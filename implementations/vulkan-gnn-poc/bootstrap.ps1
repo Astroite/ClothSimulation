@@ -1,5 +1,9 @@
 param(
-    [switch]$SkipFetch
+    [switch]$SkipFetch,
+    # The overlay is the only copy of the sample and shaders; this script copies
+    # it one way into .work. Pass this switch to discard newer edits made
+    # directly inside .work instead of failing on them.
+    [switch]$OverwriteWorkEdits
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,15 +51,61 @@ $ExampleDestination = Join-Path $UpstreamRoot 'examples/gnncloth'
 $HlslDestination = Join-Path $UpstreamRoot 'shaders/hlsl/gnncloth'
 $GlslDestination = Join-Path $UpstreamRoot 'shaders/glsl/gnncloth'
 New-Item -ItemType Directory -Force -Path $ExampleDestination, $HlslDestination, $GlslDestination | Out-Null
-Copy-Item -LiteralPath (Join-Path $PocRoot 'overlay/examples/gnncloth/gnncloth.cpp') -Destination $ExampleDestination -Force
-Copy-Item -LiteralPath (Join-Path $PocRoot 'overlay/examples/gnncloth/vgnn_format.h') -Destination $ExampleDestination -Force
-Copy-Item -Path (Join-Path $PocRoot 'overlay/shaders/hlsl/gnncloth/*') -Destination $HlslDestination -Force
 
-Get-ChildItem -LiteralPath $HlslDestination -Filter '*.spv' | Copy-Item -Destination $GlslDestination -Force
-Copy-Item -LiteralPath (Join-Path $PocRoot 'model/artifacts/model.bin') -Destination $HlslDestination -Force
-Copy-Item -LiteralPath (Join-Path $PocRoot 'model/artifacts/golden.bin') -Destination $HlslDestination -Force
-Copy-Item -LiteralPath (Join-Path $PocRoot 'model/artifacts/model.bin') -Destination $GlslDestination -Force
-Copy-Item -LiteralPath (Join-Path $PocRoot 'model/artifacts/golden.bin') -Destination $GlslDestination -Force
+# Enumerate every authoritative source and where it lands, then verify none of
+# the destinations carries newer edits before copying anything. Copy-Item
+# preserves LastWriteTime, so a freshly bootstrapped tree compares equal; only a
+# real edit inside .work makes a destination newer. The tolerance absorbs
+# timestamp granularity differences between volumes.
+$OverlayShaderRoot = Join-Path $PocRoot 'overlay/shaders/hlsl/gnncloth'
+$Copies = [System.Collections.Generic.List[object]]::new()
+function Add-Copy {
+    param([string]$Source, [string]$DestinationDirectory)
+    $Copies.Add([pscustomobject]@{
+        Source      = $Source
+        Destination = Join-Path $DestinationDirectory (Split-Path -Leaf $Source)
+    })
+}
+
+Add-Copy (Join-Path $PocRoot 'overlay/examples/gnncloth/gnncloth.cpp') $ExampleDestination
+Add-Copy (Join-Path $PocRoot 'overlay/examples/gnncloth/vgnn_format.h') $ExampleDestination
+foreach ($File in Get-ChildItem -LiteralPath $OverlayShaderRoot -File) {
+    Add-Copy $File.FullName $HlslDestination
+    if ($File.Extension -eq '.spv') { Add-Copy $File.FullName $GlslDestination }
+}
+foreach ($Artifact in @('model.bin', 'golden.bin')) {
+    Add-Copy (Join-Path $PocRoot "model/artifacts/$Artifact") $HlslDestination
+    Add-Copy (Join-Path $PocRoot "model/artifacts/$Artifact") $GlslDestination
+}
+
+if (-not $OverwriteWorkEdits) {
+    $Tolerance = [TimeSpan]::FromSeconds(2)
+    $Stale = foreach ($Copy in $Copies) {
+        if (-not (Test-Path -LiteralPath $Copy.Destination -PathType Leaf)) { continue }
+        $SourceTime = (Get-Item -LiteralPath $Copy.Source).LastWriteTimeUtc
+        $DestinationTime = (Get-Item -LiteralPath $Copy.Destination).LastWriteTimeUtc
+        if (($DestinationTime - $SourceTime) -gt $Tolerance) {
+            [pscustomobject]@{ Path = $Copy.Destination; Newer = $DestinationTime; Overlay = $SourceTime }
+        }
+    }
+    if ($Stale) {
+        $Detail = ($Stale | ForEach-Object {
+            "  $($_.Path)`n    .work: $($_.Newer.ToLocalTime())  overlay: $($_.Overlay.ToLocalTime())"
+        }) -join "`n"
+        throw @"
+Refusing to overwrite newer edits inside .work. These destinations are newer
+than their overlay sources, so bootstrap would silently discard them:
+$Detail
+
+Copy the changes back into overlay/ (the tracked, authoritative copy), or rerun
+with -OverwriteWorkEdits to discard them.
+"@
+    }
+}
+
+foreach ($Copy in $Copies) {
+    Copy-Item -LiteralPath $Copy.Source -Destination $Copy.Destination -Force
+}
 
 $ExamplesCmake = Join-Path $UpstreamRoot 'examples/CMakeLists.txt'
 $CmakeText = Get-Content -LiteralPath $ExamplesCmake -Raw
