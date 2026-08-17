@@ -31,9 +31,15 @@ public:
 	};
 	static_assert(sizeof(Particle) == 80);
 
+	// One timestamp per stage. Lumping layer 1, integration, XPBD and finalize
+	// into a single span made the reported cost almost independent of graph size,
+	// because the 128 XPBD dispatches and their barriers dominated it.
+	static constexpr uint32_t timestampCount = 5;
 	struct TimingSample {
 		double layer0Ms{};
 		double layer1Ms{};
+		double xpbdMs{};
+		double finalizeMs{};
 		double totalMs{};
 	};
 
@@ -62,6 +68,13 @@ public:
 	uint32_t ablationFrameCounter{ 0 };
 	std::filesystem::path ablationDumpOutput;
 	uint32_t timestampWarmup{ 200 };
+	// Derived rather than a magic frame count, so warmup and target stay coupled.
+	static constexpr uint32_t benchmarkSampleTarget = 1000;
+	// Verification samples at frames 1, 600 and 1200.
+	static constexpr uint32_t verificationFrames = 1200;
+	static constexpr uint32_t benchmarkFrameMargin = 8;
+	bool timestampsUsable{ true };
+	uint32_t droppedTimestampReads{ 0 };
 	std::filesystem::path benchmarkOutput{ "gnn_benchmark.csv" };
 	std::vector<TimingSample> timingSamples;
 
@@ -210,7 +223,14 @@ public:
 			vks::tools::errorModeSilent = true;
 			benchmark.warmup = 0;
 			benchmark.duration = 600;
-			benchmark.outputFrames = ablationDumpMode ? static_cast<int32_t>(ablationDumpFrame + 4) : 1204;
+			// Frame budget is derived from whichever mode needs more, so changing the
+			// benchmark sample target cannot silently starve the verification
+			// schedule or vice versa.
+			const uint32_t benchmarkFrames = timestampWarmup + benchmarkSampleTarget + maxConcurrentFrames + benchmarkFrameMargin;
+			const uint32_t neededFrames = ablationDumpMode
+				? ablationDumpFrame + benchmarkFrameMargin
+				: std::max(benchmarkFrames, verificationFrames + benchmarkFrameMargin);
+			benchmark.outputFrames = static_cast<int32_t>(neededFrames);
 			settings.overlay = false;
 #if defined(_WIN32)
 			setupConsole("Vulkan GNN cloth");
@@ -597,6 +617,15 @@ public:
 	void prepareCompute()
 	{
 		vkGetDeviceQueue(device, vulkanDevice->queueFamilyIndices.compute, 0, &compute.queue);
+		// Timestamps on the compute queue are not guaranteed. Without this check a
+		// device reporting zero valid bits would produce plausible-looking garbage
+		// timings rather than saying they are unavailable.
+		const VkQueueFamilyProperties& computeFamily = vulkanDevice->queueFamilyProperties[vulkanDevice->queueFamilyIndices.compute];
+		timestampsUsable = computeFamily.timestampValidBits > 0 && deviceProperties.limits.timestampPeriod > 0.0f;
+		if (!timestampsUsable) {
+			std::cout << "Compute queue family reports timestampValidBits=" << computeFamily.timestampValidBits
+				<< "; GPU stage timings are unavailable on this device\n";
+		}
 		vulkanDevice->createBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &compute.uniformBuffer, sizeof(Compute::UniformData));
 		VK_CHECK_RESULT(compute.uniformBuffer.map());
 		const float dx = cloth.size.x / static_cast<float>(cloth.gridSize.x - 1);
@@ -676,7 +705,7 @@ public:
 			VkSemaphoreCreateInfo semaphoreInfo = vks::initializers::semaphoreCreateInfo();
 			VK_CHECK_RESULT(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &compute.semaphores[i].ready));
 			VK_CHECK_RESULT(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &compute.semaphores[i].complete));
-			VkQueryPoolCreateInfo queryInfo{ .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 3 };
+			VkQueryPoolCreateInfo queryInfo{ .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = timestampCount };
 			VK_CHECK_RESULT(vkCreateQueryPool(device, &queryInfo, nullptr, &compute.queryPools[i]));
 		}
 		VkSubmitInfo initialSignal = vks::initializers::submitInfo();
@@ -775,7 +804,7 @@ public:
 		addGraphicsToComputeBarriers(commandBuffer, 0, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
 		resetParticlesInCommandBuffer(commandBuffer);
 
-		vkCmdResetQueryPool(commandBuffer, compute.queryPools[currentBuffer], 0, 3);
+		vkCmdResetQueryPool(commandBuffer, compute.queryPools[currentBuffer], 0, timestampCount);
 		if (solver == GNN) {
 			readSet = 1 - readSet;
 			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.pipelineLayout, 0, 1, &compute.descriptorSets[readSet], 0, nullptr);
@@ -801,7 +830,7 @@ public:
 			const uint32_t layer1PushConstants[2] = { static_cast<uint32_t>(ablation), 0u };
 			vkCmdPushConstants(commandBuffer, compute.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(layer1PushConstants), layer1PushConstants);
 			vkCmdDispatch(commandBuffer, compute.uniformData.vertexCount, 1, 1);
-
+			vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, compute.queryPools[currentBuffer], 2);
 
 			// XPBD owns one lambda per undirected constraint. Lambdas start at zero
 			// for every time step and accumulate across iterations. The 16 edge-color
@@ -824,12 +853,13 @@ public:
 			} else {
 				particleComputeBarrier(commandBuffer, readSet);
 			}
+			vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, compute.queryPools[currentBuffer], 3);
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.finalizePipeline);
 			// Only verification and ablation runs need the position mirror.
 			const uint32_t finalizePushConstants[2] = { (verifyMode || ablationDumpMode) ? 1u : 0u, 0u };
 			vkCmdPushConstants(commandBuffer, compute.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(finalizePushConstants), finalizePushConstants);
 			vkCmdDispatch(commandBuffer, (compute.uniformData.vertexCount + 127) / 128, 1, 1);
-			vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, compute.queryPools[currentBuffer], 2);
+			vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, compute.queryPools[currentBuffer], 4);
 			compute.queryWritten[currentBuffer] = true;
 		} else {
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.massSpringPipeline);
@@ -886,16 +916,27 @@ public:
 
 	void collectTimestamps(uint32_t frameIndex)
 	{
-		if (!compute.queryWritten[frameIndex]) return;
-		std::array<uint64_t, 3> values{};
-		const VkResult result = vkGetQueryPoolResults(device, compute.queryPools[frameIndex], 0, 3, sizeof(values), values.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-		if (result != VK_SUCCESS) return;
+		if (!compute.queryWritten[frameIndex] || !timestampsUsable) return;
+		std::array<uint64_t, timestampCount> values{};
+		const VkResult result = vkGetQueryPoolResults(device, compute.queryPools[frameIndex], 0, timestampCount, sizeof(values), values.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+		if (result != VK_SUCCESS) {
+			// A dropped result would otherwise silently shrink the benchmark sample
+			// count, so it is counted and asserted on before the CSV is written.
+			++droppedTimestampReads;
+			return;
+		}
 		const double scale = static_cast<double>(deviceProperties.limits.timestampPeriod) / 1.0e6;
-		const TimingSample sample{ (values[1] - values[0]) * scale, (values[2] - values[1]) * scale, (values[2] - values[0]) * scale };
+		const TimingSample sample{
+			(values[1] - values[0]) * scale,
+			(values[2] - values[1]) * scale,
+			(values[3] - values[2]) * scale,
+			(values[4] - values[3]) * scale,
+			(values[4] - values[0]) * scale,
+		};
 		lastTiming = sample;
 		if (gnnBenchmarkMode) {
 			if (timestampWarmup > 0) --timestampWarmup;
-			else if (timingSamples.size() < 1000) timingSamples.push_back(sample);
+			else if (timingSamples.size() < benchmarkSampleTarget) timingSamples.push_back(sample);
 		}
 	}
 
@@ -1166,12 +1207,23 @@ public:
 
 	void writeBenchmarkCsv()
 	{
-		if (timingSamples.empty()) return;
+		// A short sample run used to pass silently and write a CSV that looked
+		// completely normal apart from a smaller samples column, so the shortfall is
+		// now fatal and says why.
+		if (timingSamples.size() < benchmarkSampleTarget) {
+			std::cerr << "Benchmark collected " << timingSamples.size() << " of " << benchmarkSampleTarget
+				<< " timestamp samples (dropped reads: " << droppedTimestampReads
+				<< ", timestamps usable: " << (timestampsUsable ? "yes" : "no") << ")\n";
+			vks::tools::exitFatal("Benchmark did not collect the requested number of samples", -1);
+			return;
+		}
 		if (benchmarkOutput.has_parent_path()) std::filesystem::create_directories(benchmarkOutput.parent_path());
-		std::vector<double> layer0, layer1, total;
+		std::vector<double> layer0, layer1, xpbd, finalize, total;
 		for (const auto& sample : timingSamples) {
 			layer0.push_back(sample.layer0Ms);
 			layer1.push_back(sample.layer1Ms);
+			xpbd.push_back(sample.xpbdMs);
+			finalize.push_back(sample.finalizeMs);
 			total.push_back(sample.totalMs);
 		}
 		std::ofstream stream(benchmarkOutput);
@@ -1183,10 +1235,13 @@ public:
 			driver << VK_VERSION_MAJOR(deviceProperties.driverVersion) << '.' << VK_VERSION_MINOR(deviceProperties.driverVersion)
 				<< '.' << VK_VERSION_PATCH(deviceProperties.driverVersion);
 		}
-		stream << "device,driver_version,driver_raw,grid,nodes,directed_edges,xpbd_constraints,samples,layer0_median_ms,layer1_integrate_xpbd_median_ms,total_median_ms,total_p95_ms\n";
+		stream << "device,driver_version,driver_raw,grid,nodes,directed_edges,xpbd_constraints,xpbd_iterations,xpbd_colors,samples,"
+			"layer0_median_ms,layer1_integrate_median_ms,xpbd_median_ms,finalize_median_ms,total_median_ms,total_p95_ms\n";
 		stream << '"' << deviceProperties.deviceName << '"' << ',' << driver.str() << ',' << deviceProperties.driverVersion << ',' << cloth.gridSize.x << ','
-			<< initialParticles.size() << ',' << graphBuffers.edgeCount << ',' << xpbdBuffers.edgeCount << ',' << timingSamples.size() << ','
+			<< initialParticles.size() << ',' << graphBuffers.edgeCount << ',' << xpbdBuffers.edgeCount << ',' << xpbdIterations << ',' << xpbdColorCount << ','
+			<< timingSamples.size() << ','
 			<< std::fixed << std::setprecision(6) << percentile(layer0, 0.5) << ',' << percentile(layer1, 0.5) << ','
+			<< percentile(xpbd, 0.5) << ',' << percentile(finalize, 0.5) << ','
 			<< percentile(total, 0.5) << ',' << percentile(total, 0.95) << '\n';
 		std::cout << "Wrote " << benchmarkOutput << " with " << timingSamples.size() << " timestamp samples\n";
 	}
@@ -1224,9 +1279,15 @@ public:
 		overlay->text("Nodes: %u", compute.uniformData.vertexCount);
 		overlay->text("Directed edges: %u", graphBuffers.edgeCount);
 		overlay->text("XPBD constraints: %u (%u colors)", xpbdBuffers.edgeCount, xpbdColorCount);
-		overlay->text("Layer 0: %.4f ms", lastTiming.layer0Ms);
-		overlay->text("Layer 1 + integrate + XPBD: %.4f ms", lastTiming.layer1Ms);
-		overlay->text("GNN total: %.4f ms", lastTiming.totalMs);
+		if (timestampsUsable) {
+			overlay->text("Layer 0: %.4f ms", lastTiming.layer0Ms);
+			overlay->text("Layer 1 + integrate: %.4f ms", lastTiming.layer1Ms);
+			overlay->text("XPBD (%d it x %u colors): %.4f ms", xpbdIterations, xpbdColorCount, lastTiming.xpbdMs);
+			overlay->text("Finalize: %.4f ms", lastTiming.finalizeMs);
+			overlay->text("Compute total: %.4f ms", lastTiming.totalMs);
+		} else {
+			overlay->text("GPU timings unavailable on this device");
+		}
 		overlay->text("G: toggle solver, R: reset, P: pause");
 	}
 };

@@ -1,4 +1,4 @@
-"device","driver_version","driver_raw","grid","nodes","directed_edges","xpbd_constraints","samples","layer0_median_ms","layer1_integrate_xpbd_median_ms","total_median_ms","total_p95_ms"
-"NVIDIA GeForce RTX 4060 Ti","596.36.0.0","2500395008","16","256","1860","1378","1000","0.007584","0.276480","0.283648","0.287680"
-"NVIDIA GeForce RTX 4060 Ti","596.36.0.0","2500395008","32","1024","7812","5826","1000","0.012576","0.328416","0.340800","0.345408"
-"NVIDIA GeForce RTX 4060 Ti","596.36.0.0","2500395008","64","4096","32004","23938","1000","0.027104","0.374208","0.401216","0.407488"
+"device","driver_version","driver_raw","grid","nodes","directed_edges","xpbd_constraints","xpbd_iterations","xpbd_colors","samples","layer0_median_ms","layer1_integrate_median_ms","xpbd_median_ms","finalize_median_ms","total_median_ms","total_p95_ms"
+"NVIDIA GeForce RTX 4060 Ti","596.36.0.0","2500395008","16","256","1860","1378","8","16","1000","0.007456","0.003072","0.271904","0.002048","0.283904","0.286432"
+"NVIDIA GeForce RTX 4060 Ti","596.36.0.0","2500395008","32","1024","7812","5826","8","16","1000","0.012512","0.004928","0.322560","0.001952","0.341536","0.344160"
+"NVIDIA GeForce RTX 4060 Ti","596.36.0.0","2500395008","64","4096","32004","23938","8","16","1000","0.026272","0.011264","0.364192","0.002048","0.403936","0.408256"

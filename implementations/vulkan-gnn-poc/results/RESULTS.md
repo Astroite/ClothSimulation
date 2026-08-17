@@ -35,18 +35,37 @@ geometry, with a blue zenith, pale horizon, and soft sun. Brighter two-sided
 cloth lighting and a lifted warm sphere material improve fold readability.
 The sky adds no texture dependency and does not enter the compute timestamps.
 
-| Grid | Nodes | Directed GNN edges | XPBD constraints | Layer 0 median | Layer 1 + integrate + XPBD median | Total median | Total p95 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16×16 | 256 | 1,860 | 1,378 | 0.007584 ms | 0.276480 ms | 0.283648 ms | 0.287680 ms |
-| 32×32 | 1,024 | 7,812 | 5,826 | 0.012576 ms | 0.328416 ms | 0.340800 ms | 0.345408 ms |
-| 64×64 | 4,096 | 32,004 | 23,938 | 0.027104 ms | 0.374208 ms | 0.401216 ms | 0.407488 ms |
+| Grid | Nodes | Directed GNN edges | XPBD constraints | Layer 0 | Layer 1 + integrate | XPBD | Finalize | Total median | Total p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16×16 | 256 | 1,860 | 1,378 | 0.007456 ms | 0.003072 ms | 0.271904 ms | 0.002048 ms | 0.283904 ms | 0.286432 ms |
+| 32×32 | 1,024 | 7,812 | 5,826 | 0.012512 ms | 0.004928 ms | 0.322560 ms | 0.001952 ms | 0.341536 ms | 0.344160 ms |
+| 64×64 | 4,096 | 32,004 | 23,938 | 0.026272 ms | 0.011264 ms | 0.364192 ms | 0.002048 ms | 0.403936 ms | 0.408256 ms |
+
+The earlier version of this table reported layer 1, integration, XPBD and finalize
+as one span, which made the total look almost independent of graph size and
+invited the wrong conclusion. Timing each stage separately shows what is actually
+happening:
+
+- **XPBD is 90% of the total at 64×64 and 96% at 16×16.** It grows only 1.34x
+  across a 16x increase in vertices, because 8 iterations over 16 color batches
+  means 128 dispatches and 256 barriers per frame whose cost is fixed rather
+  than proportional to the cloth. `plans/gnn/gnn-cs.md` lists exactly this
+  ("too many dispatches / barriers") among the top bottlenecks.
+- **GNN inference is 9.3% of the total at 64×64** (0.0375 ms of 0.404 ms) and
+  scales well: 3.6x for 16x the vertices.
+- Finalize is flat at about 0.002 ms and is not worth optimizing.
+
+So the headline cost is the constraint solver's dispatch structure, not the
+network. Reducing the color count or moving to tile-local Gauss-Seidel inside a
+workgroup is where the time is.
 
 The timings are measurable and total time increases monotonically with graph
-size. Eight iterations over sixteen color batches make fixed dispatch and
-barrier overhead visible at the smaller grids; batching several colors in one
-shader is the clearest future optimization. This is only a deployment-chain
-measurement: the synthetic one-step target plus XPBD fallback is not evidence
-of production cloth quality.
+size. This is only a deployment-chain measurement: the synthetic one-step target
+plus XPBD fallback is not evidence of production cloth quality. A benchmark run
+that collects fewer than the requested 1000 samples is now a hard failure rather
+than a CSV that looks normal apart from a smaller sample count, and timestamps
+are skipped with an explicit message on devices whose compute queue reports no
+valid timestamp bits.
 
 ## What the network actually contributes
 
