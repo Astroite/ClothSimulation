@@ -1,0 +1,477 @@
+{
+  "schema_version": 1,
+  "source_manifest": {
+    "path_within_source_root": "output/motion_export/manifests/exported_motion_manifest.json",
+    "schema_version": 1,
+    "generated_at": "2026-05-12T18:05:34"
+  },
+  "selection_policy": "Six validated, non-mirrored motions covering locomotion, turning, squatting, kicking, jumping/landing, and axial rotation.",
+  "data_terms_notice": "These local data assets retain their original HumanML3D, AMASS, KIT, BMLmovi, SMPL, and character terms; the PoC MIT license does not grant redistribution rights.",
+  "motions": [
+    {
+      "motion_id": "hml_001962",
+      "purpose": "baseline forward walk, turn, and stop",
+      "humanml3d_id": "001962",
+      "amass_dataset": "KIT",
+      "amass_source_path": "HumanML3D/amass_data/KIT/317/bend_left05_poses.npz",
+      "text_descriptions": [
+        "a man walks forward and then comes to a stop.",
+        "a person walking and then taking a turn to their left",
+        "a person is walking around the bend  to the left."
+      ],
+      "action_tags": [
+        "walk",
+        "turn",
+        "stop",
+        "bend"
+      ],
+      "primary_tag": "walk",
+      "gender": "male",
+      "duration_s": 4.53,
+      "frame_count": 453,
+      "source_fps": 100.0,
+      "resampled_60fps_trusted": false,
+      "motion_metrics": {
+        "frame_count": 453,
+        "duration_s": 4.53,
+        "root_xz_travel_m": 1.8406,
+        "root_xz_displacement_m": 1.6874,
+        "body_pose_std_mean": 0.062205,
+        "hand_pose_std_mean": 0.0,
+        "max_angular_velocity_rad_per_s": 12.5712,
+        "static_flag": false,
+        "hand_only_flag": false
+      },
+      "fbx_validation_status": "passed",
+      "fbx_validation_checks": {
+        "file_exists": true,
+        "filesize_in_range": true,
+        "blender_can_import": true,
+        "has_armature": true,
+        "has_animation_curve": true,
+        "frame_count_matches": true,
+        "has_root_bone": true,
+        "root_translation_continuous": true,
+        "no_nan_inf_transforms": true,
+        "no_excessive_root_displacement": true,
+        "no_quaternion_jumps": true
+      },
+      "fbx_validation_details": {
+        "filesize_bytes": 771724,
+        "armature_count": 1,
+        "bone_count": 22,
+        "fcurve_count": 229,
+        "actual_frames": 453,
+        "expected_frames": 453,
+        "root_bone_name": "pelvis",
+        "root_max_step_m": 0.0138
+      },
+      "files": {
+        "raw_npz": {
+          "path": "TrainingSamples/hml_001962/hml_001962_raw.npz",
+          "bytes": 253168,
+          "sha256": "f401b4114c2742f4ed1c65a2ac59f8a9b74735b620a36b77b3c0d9e2ef2ac031"
+        },
+        "resampled_60fps_npz": {
+          "path": "TrainingSamples/hml_001962/hml_001962_60fps.npz",
+          "bytes": 136754,
+          "sha256": "f31075d5158de10776f1075728da3c92b5e5a8fb9f08105cc0b2caabbee634f9"
+        },
+        "skeleton_fbx": {
+          "path": "TrainingSamples/hml_001962/hml_001962__walk.fbx",
+          "bytes": 771724,
+          "sha256": "1fa1fc7cd8f9713ab49920e74fd93f1cb40ebd88c9339126b650ebcc8661ed74"
+        }
+      }
+    },
+    {
+      "motion_id": "hml_009402",
+      "purpose": "walk, right spin, and return to the start",
+      "humanml3d_id": "009402",
+      "amass_dataset": "KIT",
+      "amass_source_path": "HumanML3D/amass_data/KIT/314/turn_right10_poses.npz",
+      "text_descriptions": [
+        "a person walks forward, spins right, and walks back.",
+        "the rig walks forward then turns around and continues walking before stopping where he started",
+        "person takes two steps forward, spins on heels, and takes two steps back to starting point."
+      ],
+      "action_tags": [
+        "walk",
+        "turn",
+        "stop",
+        "spin"
+      ],
+      "primary_tag": "walk",
+      "gender": "female",
+      "duration_s": 4.4,
+      "frame_count": 440,
+      "source_fps": 100.0,
+      "resampled_60fps_trusted": false,
+      "motion_metrics": {
+        "frame_count": 440,
+        "duration_s": 4.4,
+        "root_xz_travel_m": 2.5797,
+        "root_xz_displacement_m": 0.2144,
+        "body_pose_std_mean": 0.111956,
+        "hand_pose_std_mean": 0.0,
+        "max_angular_velocity_rad_per_s": 10.5205,
+        "static_flag": false,
+        "hand_only_flag": false
+      },
+      "fbx_validation_status": "passed",
+      "fbx_validation_checks": {
+        "file_exists": true,
+        "filesize_in_range": true,
+        "blender_can_import": true,
+        "has_armature": true,
+        "has_animation_curve": true,
+        "frame_count_matches": true,
+        "has_root_bone": true,
+        "root_translation_continuous": true,
+        "no_nan_inf_transforms": true,
+        "no_excessive_root_displacement": true,
+        "no_quaternion_jumps": true
+      },
+      "fbx_validation_details": {
+        "filesize_bytes": 756092,
+        "armature_count": 1,
+        "bone_count": 22,
+        "fcurve_count": 229,
+        "actual_frames": 440,
+        "expected_frames": 440,
+        "root_bone_name": "pelvis",
+        "root_max_step_m": 0.0127
+      },
+      "files": {
+        "raw_npz": {
+          "path": "TrainingSamples/hml_009402/hml_009402_raw.npz",
+          "bytes": 246543,
+          "sha256": "e5259662796395de9e82c41c69343fd933de1db2dc6ed3db65e94711f64fdb52"
+        },
+        "resampled_60fps_npz": {
+          "path": "TrainingSamples/hml_009402/hml_009402_60fps.npz",
+          "bytes": 133182,
+          "sha256": "b06de3162a0cb11b7b91b9105d26bc9c3bf6afa909ec37228686d79f68feb75c"
+        },
+        "skeleton_fbx": {
+          "path": "TrainingSamples/hml_009402/hml_009402__walk.fbx",
+          "bytes": 756092,
+          "sha256": "c6007250a8f0e6dcc89fb13f8a107389f218bd4920278ad7fcff942559c638ea"
+        }
+      }
+    },
+    {
+      "motion_id": "hml_000295",
+      "purpose": "squat and sustained lower-body bend",
+      "humanml3d_id": "000295",
+      "amass_dataset": "KIT",
+      "amass_source_path": "HumanML3D/amass_data/KIT/572/squat01_poses.npz",
+      "text_descriptions": [
+        "the person is squatting, bending at the knees, keeping their back straight, while extending their arms.",
+        "a person squats down and holds out their arms",
+        "a person performing a single squat."
+      ],
+      "action_tags": [
+        "squat",
+        "bend"
+      ],
+      "primary_tag": "squat",
+      "gender": "male",
+      "duration_s": 4.35,
+      "frame_count": 435,
+      "source_fps": 100.0,
+      "resampled_60fps_trusted": false,
+      "motion_metrics": {
+        "frame_count": 435,
+        "duration_s": 4.35,
+        "root_xz_travel_m": 0.9311,
+        "root_xz_displacement_m": 0.0015,
+        "body_pose_std_mean": 0.131162,
+        "hand_pose_std_mean": 0.0,
+        "max_angular_velocity_rad_per_s": 8.4253,
+        "static_flag": false,
+        "hand_only_flag": false
+      },
+      "fbx_validation_status": "passed",
+      "fbx_validation_checks": {
+        "file_exists": true,
+        "filesize_in_range": true,
+        "blender_can_import": true,
+        "has_armature": true,
+        "has_animation_curve": true,
+        "frame_count_matches": true,
+        "has_root_bone": true,
+        "root_translation_continuous": true,
+        "no_nan_inf_transforms": true,
+        "no_excessive_root_displacement": true,
+        "no_quaternion_jumps": true
+      },
+      "fbx_validation_details": {
+        "filesize_bytes": 748508,
+        "armature_count": 1,
+        "bone_count": 22,
+        "fcurve_count": 229,
+        "actual_frames": 435,
+        "expected_frames": 435,
+        "root_bone_name": "pelvis",
+        "root_max_step_m": 0.0069
+      },
+      "files": {
+        "raw_npz": {
+          "path": "TrainingSamples/hml_000295/hml_000295_raw.npz",
+          "bytes": 240671,
+          "sha256": "3599a45e373a6d9260cfda28da5287cfba8725a6c22047647fbd1a2ec2275272"
+        },
+        "resampled_60fps_npz": {
+          "path": "TrainingSamples/hml_000295/hml_000295_60fps.npz",
+          "bytes": 131311,
+          "sha256": "eb0de89c8155cfbf9947be8ecd342aa72a1ea7c3f25fa57fa74fd78f2b842500"
+        },
+        "skeleton_fbx": {
+          "path": "TrainingSamples/hml_000295/hml_000295__squat.fbx",
+          "bytes": 748508,
+          "sha256": "f39454b050f1efe7885cef2ba23dcf561fd1ff9fa0071c9c4c0a2588dd0bc58c"
+        }
+      }
+    },
+    {
+      "motion_id": "hml_001977",
+      "purpose": "single left-leg kick",
+      "humanml3d_id": "001977",
+      "amass_dataset": "BMLmovi",
+      "amass_source_path": "HumanML3D/amass_data/BMLmovi/Subject_45_F_MoSh/Subject_45_F_17_poses.npz",
+      "text_descriptions": [
+        "a person kicks their left leg forward one time.",
+        "the person is doing a dance with his left foot.",
+        "a person kicks the air with his left foot."
+      ],
+      "action_tags": [
+        "kick",
+        "dance"
+      ],
+      "primary_tag": "kick",
+      "gender": "female",
+      "duration_s": 3.4083,
+      "frame_count": 409,
+      "source_fps": 120.0,
+      "resampled_60fps_trusted": false,
+      "motion_metrics": {
+        "frame_count": 409,
+        "duration_s": 3.4083,
+        "root_xz_travel_m": 0.5503,
+        "root_xz_displacement_m": 0.0955,
+        "body_pose_std_mean": 0.08029,
+        "hand_pose_std_mean": 0.0,
+        "max_angular_velocity_rad_per_s": 31.5251,
+        "static_flag": false,
+        "hand_only_flag": false
+      },
+      "fbx_validation_status": "passed",
+      "fbx_validation_checks": {
+        "file_exists": true,
+        "filesize_in_range": true,
+        "blender_can_import": true,
+        "has_armature": true,
+        "has_animation_curve": true,
+        "frame_count_matches": true,
+        "has_root_bone": true,
+        "root_translation_continuous": true,
+        "no_nan_inf_transforms": true,
+        "no_excessive_root_displacement": true,
+        "no_quaternion_jumps": true
+      },
+      "fbx_validation_details": {
+        "filesize_bytes": 717164,
+        "armature_count": 1,
+        "bone_count": 22,
+        "fcurve_count": 229,
+        "actual_frames": 409,
+        "expected_frames": 409,
+        "root_bone_name": "pelvis",
+        "root_max_step_m": 0.0044
+      },
+      "files": {
+        "raw_npz": {
+          "path": "TrainingSamples/hml_001977/hml_001977_raw.npz",
+          "bytes": 247072,
+          "sha256": "93b461997f1c2a83a321810cda3f5c78eae0ab256669ce18d2170934d27471e1"
+        },
+        "resampled_60fps_npz": {
+          "path": "TrainingSamples/hml_001977/hml_001977_60fps.npz",
+          "bytes": 113072,
+          "sha256": "eb6874d251e7574d97d08a5f4c312cfbfb1d1fbd0ed81cc89b509b0e0b868cbf"
+        },
+        "skeleton_fbx": {
+          "path": "TrainingSamples/hml_001977/hml_001977__kick.fbx",
+          "bytes": 717164,
+          "sha256": "d304f99aa15049fe734991ba067c66fddff440489fca1c88f3bc853d75207fe0"
+        }
+      }
+    },
+    {
+      "motion_id": "hml_002926",
+      "purpose": "squat, vertical jump, and landing",
+      "humanml3d_id": "002926",
+      "amass_dataset": "BMLmovi",
+      "amass_source_path": "HumanML3D/amass_data/BMLmovi/Subject_71_F_MoSh/Subject_71_F_12_poses.npz",
+      "text_descriptions": [
+        "person squats with both knees bent, bringing hands together at chest, then straightens legs to jump straight upwards but lands slightly to their right considering their beginning position",
+        "someone jumps to their left, landing on both feet, then does a quick squat.",
+        "a person squats down and jumps up."
+      ],
+      "action_tags": [
+        "jump",
+        "land",
+        "squat",
+        "bend"
+      ],
+      "primary_tag": "jump",
+      "gender": "male",
+      "duration_s": 4.0083,
+      "frame_count": 481,
+      "source_fps": 120.0,
+      "resampled_60fps_trusted": false,
+      "motion_metrics": {
+        "frame_count": 481,
+        "duration_s": 4.0083,
+        "root_xz_travel_m": 2.3331,
+        "root_xz_displacement_m": 0.0927,
+        "body_pose_std_mean": 0.126114,
+        "hand_pose_std_mean": 0.0,
+        "max_angular_velocity_rad_per_s": 26.5727,
+        "static_flag": false,
+        "hand_only_flag": false
+      },
+      "fbx_validation_status": "passed",
+      "fbx_validation_checks": {
+        "file_exists": true,
+        "filesize_in_range": true,
+        "blender_can_import": true,
+        "has_armature": true,
+        "has_animation_curve": true,
+        "frame_count_matches": true,
+        "has_root_bone": true,
+        "root_translation_continuous": true,
+        "no_nan_inf_transforms": true,
+        "no_excessive_root_displacement": true,
+        "no_quaternion_jumps": true
+      },
+      "fbx_validation_details": {
+        "filesize_bytes": 812908,
+        "armature_count": 1,
+        "bone_count": 22,
+        "fcurve_count": 229,
+        "actual_frames": 481,
+        "expected_frames": 481,
+        "root_bone_name": "pelvis",
+        "root_max_step_m": 0.0226
+      },
+      "files": {
+        "raw_npz": {
+          "path": "TrainingSamples/hml_002926/hml_002926_raw.npz",
+          "bytes": 289393,
+          "sha256": "7363fc6697e51c92c407435d1e41c6d310891dea9bf8ac18c351159cb8c2c361"
+        },
+        "resampled_60fps_npz": {
+          "path": "TrainingSamples/hml_002926/hml_002926_60fps.npz",
+          "bytes": 132285,
+          "sha256": "4ae7e22654d720294c14f3a8ddbc0f934260e8b4da8ca4b9c0b4f032b151089b"
+        },
+        "skeleton_fbx": {
+          "path": "TrainingSamples/hml_002926/hml_002926__jump.fbx",
+          "bytes": 812908,
+          "sha256": "9f1bf4e6da996266af53045c214dbcaf1227c0c8df669761e48ab26542d2a6e3"
+        }
+      }
+    },
+    {
+      "motion_id": "hml_011319",
+      "purpose": "full-body spin with arms extended",
+      "humanml3d_id": "011319",
+      "amass_dataset": "BMLmovi",
+      "amass_source_path": "HumanML3D/amass_data/BMLmovi/Subject_41_F_MoSh/Subject_41_F_12_poses.npz",
+      "text_descriptions": [
+        "this person spins around with arms extended to his sides.",
+        "the person is spinning around like a spinning wheel.",
+        "a person lifts their arms and spins slowly"
+      ],
+      "action_tags": [
+        "spin"
+      ],
+      "primary_tag": "spin",
+      "gender": "male",
+      "duration_s": 4.7417,
+      "frame_count": 569,
+      "source_fps": 120.0,
+      "resampled_60fps_trusted": false,
+      "motion_metrics": {
+        "frame_count": 569,
+        "duration_s": 4.7417,
+        "root_xz_travel_m": 0.7203,
+        "root_xz_displacement_m": 0.1017,
+        "body_pose_std_mean": 0.141101,
+        "hand_pose_std_mean": 0.0,
+        "max_angular_velocity_rad_per_s": 14.3217,
+        "static_flag": false,
+        "hand_only_flag": false
+      },
+      "fbx_validation_status": "passed",
+      "fbx_validation_checks": {
+        "file_exists": true,
+        "filesize_in_range": true,
+        "blender_can_import": true,
+        "has_armature": true,
+        "has_animation_curve": true,
+        "frame_count_matches": true,
+        "has_root_bone": true,
+        "root_translation_continuous": true,
+        "no_nan_inf_transforms": true,
+        "no_excessive_root_displacement": true,
+        "no_quaternion_jumps": true
+      },
+      "fbx_validation_details": {
+        "filesize_bytes": 931788,
+        "armature_count": 1,
+        "bone_count": 22,
+        "fcurve_count": 229,
+        "actual_frames": 569,
+        "expected_frames": 569,
+        "root_bone_name": "pelvis",
+        "root_max_step_m": 0.0053
+      },
+      "files": {
+        "raw_npz": {
+          "path": "TrainingSamples/hml_011319/hml_011319_raw.npz",
+          "bytes": 340830,
+          "sha256": "f66bdf7e62ca5d9dd502fd7fe60e11f9992d422048e0b74e58a3bb3f2229e879"
+        },
+        "resampled_60fps_npz": {
+          "path": "TrainingSamples/hml_011319/hml_011319_60fps.npz",
+          "bytes": 155878,
+          "sha256": "2038c2d239561ded8d41e27529fb8e0ee494499038b5f1f932b743310223b3c2"
+        },
+        "skeleton_fbx": {
+          "path": "TrainingSamples/hml_011319/hml_011319__spin.fbx",
+          "bytes": 931788,
+          "sha256": "fa8cb1ab300ddee701ee69abc06319fc2770fa425e43a7ce384476aa4e906560"
+        }
+      }
+    }
+  ],
+  "character_reference": {
+    "name": "CH10032",
+    "purpose": "body alignment, skinning reference, and collision proxy source",
+    "files": {
+      "SK_JZ_CH_10032_Body.FBX": {
+        "path": "Characters/CH10032/SK_JZ_CH_10032_Body.FBX",
+        "bytes": 6554800,
+        "sha256": "ad4f5dc964fc62d9e6de958e87397ee2b0c44d7d16968df855bfeb90eb8b9d11"
+      },
+      "SK_JZ_CH_10032_Body.json": {
+        "path": "Characters/CH10032/SK_JZ_CH_10032_Body.json",
+        "bytes": 360671,
+        "sha256": "ed31b947d0895ec43a8bad7b111aa8ef6fe7b1c9fb3bf499ef19296826525b87"
+      }
+    }
+  }
+}

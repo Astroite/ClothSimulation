@@ -131,6 +131,8 @@ CRC32。`model.json` 额外保存训练参数和 SHA-256。
 
 ## 目录
 
+- `Assets/`：处理后的布料网格、精选人体动作样本和 CH10032 身体参考；
+  资产来源、用途及再分发限制见 [`Assets/README.md`](Assets/README.md)。
 - `model/`：训练、参考推理、格式实现和已提交权重/黄金数据。
 - `overlay/`：新增 Vulkan 样例和 HLSL/SPIR-V。
 - `tools/`：shader 与本机构建包装器。

@@ -6,7 +6,10 @@
 *.png   binary
 *.exe   binary
 *.vcloth binary
-# Wavefront .obj under meshs/ is text, but the extension collides with MSVC
+# Motion/character assets are copied byte-for-byte from the local dataset.
+*.fbx   binary
+*.npz   binary
+# Wavefront .obj under Assets/Meshes is text, but the extension collides with MSVC
 # object files and those meshes are generated inspection artifacts, so they are
 # kept binary: no EOL rewriting, and a 165 KB generated mesh diff is not useful.
 *.obj   binary

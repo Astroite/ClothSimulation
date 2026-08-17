@@ -7,7 +7,7 @@ runtime:
 
     blender --background --factory-startup \
       --python tools/convert_usd_cloth.py -- \
-      --input garment.usd --output-dir meshs \
+      --input garment.usd --output-dir Assets/Meshes \
       --name CH10032_lower_sim --patterns 20-23,26-29
 
 VCLOTH v1 stores a section directory followed by aligned little-endian arrays.
