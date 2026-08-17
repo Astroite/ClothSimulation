@@ -1,6 +1,13 @@
 param(
+    [ValidateSet('Grid', 'CH10032')]
+    [string]$Scene = 'Grid',
     [ValidateSet(16, 32, 64)]
     [int]$Grid = 32,
+    [string]$Motion = 'ch10032_sprint',
+    [ValidateSet('Fine15', 'Toy2L')]
+    [string]$Solver = 'Fine15',
+    [ValidateRange(0, 10000)]
+    [int]$SimulationSteps = 0,
     [ValidateRange(0, 30000)]
     [int]$WarmupMilliseconds = 2000
 )
@@ -9,7 +16,19 @@ $ErrorActionPreference = 'Stop'
 $PocRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $UpstreamRoot = Join-Path $PocRoot '.work/Vulkan'
 $Executable = Join-Path $UpstreamRoot 'build-gnn/bin/gnncloth.exe'
-$Output = Join-Path $PocRoot 'results/gnn_cloth.png'
+$OutputName = if ($Scene -eq 'CH10032' -and $Motion -eq 'ch10032_tpose' -and $Solver -eq 'Toy2L') { 'results/hood_ch10032_tpose_toy2l.png' } elseif ($Scene -eq 'CH10032' -and $Motion -eq 'ch10032_tpose') { 'results/hood_ch10032_tpose.png' } elseif ($Scene -eq 'CH10032') { 'results/hood_ch10032.png' } else { 'results/gnn_cloth.png' }
+$Output = Join-Path $PocRoot $OutputName
+$Arguments = @('-s', 'hlsl', '-vs', '-w', '1280', '-h', '720')
+if ($Scene -eq 'CH10032') {
+    $Arguments += @(
+        '--scene', 'ch10032', '--motion', $Motion, '--solver', ($Solver -eq 'Toy2L' ? 'toy2l' : 'fine15'),
+        '--asset-root', (Join-Path $PocRoot ".work/real_scene/$Motion"),
+        '--hood-model', (Join-Path $PocRoot '.work/hood_data/fine15.vhood')
+    )
+    if ($SimulationSteps -gt 0) { $Arguments += @('--hood-pause-after', $SimulationSteps) }
+} else {
+    $Arguments += @('--gnn-grid', $Grid)
+}
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
@@ -31,7 +50,7 @@ public static class GnnWindowCapture {
 }
 '@
 
-$Process = Start-Process -FilePath $Executable -ArgumentList @('--gnn-grid', $Grid, '-s', 'hlsl', '-vs', '-w', '1280', '-h', '720') -WorkingDirectory $UpstreamRoot -WindowStyle Normal -PassThru
+$Process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WorkingDirectory $UpstreamRoot -WindowStyle Normal -PassThru
 try {
     for ($Attempt = 0; $Attempt -lt 100 -and $Process.MainWindowHandle -eq 0; ++$Attempt) {
         Start-Sleep -Milliseconds 20
@@ -39,8 +58,10 @@ try {
     }
     if ($Process.MainWindowHandle -eq 0) { throw 'The Vulkan window did not appear' }
     Start-Sleep -Milliseconds $WarmupMilliseconds
-    [void][GnnWindowCapture]::PostMessage($Process.MainWindowHandle, 0x0100, [IntPtr]0x50, [IntPtr]0)
-    [void][GnnWindowCapture]::PostMessage($Process.MainWindowHandle, 0x0101, [IntPtr]0x50, [IntPtr]0)
+    if ($SimulationSteps -eq 0) {
+        [void][GnnWindowCapture]::PostMessage($Process.MainWindowHandle, 0x0100, [IntPtr]0x50, [IntPtr]0)
+        [void][GnnWindowCapture]::PostMessage($Process.MainWindowHandle, 0x0101, [IntPtr]0x50, [IntPtr]0)
+    }
     [void][GnnWindowCapture]::ShowWindow($Process.MainWindowHandle, 9)
     [void][GnnWindowCapture]::SetForegroundWindow($Process.MainWindowHandle)
     [void][GnnWindowCapture]::SetWindowPos($Process.MainWindowHandle, [IntPtr](-1), 40, 40, 1280, 720, 0x0040)

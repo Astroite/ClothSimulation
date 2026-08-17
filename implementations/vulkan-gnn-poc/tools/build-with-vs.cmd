@@ -17,4 +17,9 @@ if errorlevel 1 exit /b %errorlevel%
 cmake --build "%POC_ROOT%\tests\build" -j 8
 if errorlevel 1 exit /b %errorlevel%
 "%POC_ROOT%\tests\build\vgnn_format_test.exe" "%POC_ROOT%\model\artifacts\model.bin" "%POC_ROOT%\model\artifacts\golden.bin"
+if errorlevel 1 exit /b %errorlevel%
+if exist "%POC_ROOT%\.work\real_scene\ch10032_sprint\ch10032.vchar" if exist "%POC_ROOT%\.work\hood_data\fine15.vhood" (
+    "%POC_ROOT%\tests\build\real_scene_format_test.exe" "%POC_ROOT%\.work\real_scene\ch10032_sprint" "%POC_ROOT%\.work\hood_data\fine15.vhood"
+    if errorlevel 1 exit /b %errorlevel%
+)
 exit /b %errorlevel%

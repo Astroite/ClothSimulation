@@ -1,0 +1,64 @@
+#include "hood_mlp.hlsli"
+
+struct Push { uint block, nodeCount, clothCount, meshEdgeCount; };
+[[vk::push_constant]] Push push;
+[[vk::binding(0)]] StructuredBuffer<float> weights;
+[[vk::binding(1)]] StructuredBuffer<uint4> mlpTable;
+[[vk::binding(2)]] StructuredBuffer<float> nodeIn;
+[[vk::binding(3)]] RWStructuredBuffer<float> nodeOut;
+[[vk::binding(4)]] StructuredBuffer<float> meshIn;
+[[vk::binding(5)]] StructuredBuffer<float> meshOut;
+[[vk::binding(6)]] StructuredBuffer<float> worldDirectIn;
+[[vk::binding(7)]] StructuredBuffer<float> worldDirectOut;
+[[vk::binding(8)]] StructuredBuffer<float> worldInverseIn;
+[[vk::binding(9)]] StructuredBuffer<float> worldInverseOut;
+[[vk::binding(10)]] StructuredBuffer<uint> meshReceivers;
+[[vk::binding(11)]] StructuredBuffer<uint> worldObstacle;
+[[vk::binding(12)]] StructuredBuffer<uint> activeProxy;
+
+groupshared float aggregateMesh[128];
+groupshared float aggregateWorld[128];
+groupshared float oldNodeValue[128];
+
+[numthreads(128, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint node = groupId.x;
+    if (node >= push.nodeCount) return;
+    if (node >= push.clothCount && activeProxy[node - push.clothCount] == 0) {
+        nodeOut[node * 128 + lane] = nodeIn[node * 128 + lane];
+        return;
+    }
+    float meshSum = 0.0;
+    float worldSum = 0.0;
+    if (node < push.clothCount) {
+        const uint beginEdge = meshReceivers[node];
+        const uint endEdge = meshReceivers[node + 1];
+        [loop] for (uint edge = beginEdge; edge < endEdge; ++edge)
+            meshSum += meshOut[edge * 128 + lane] - meshIn[edge * 128 + lane];
+        if (worldObstacle[node] != 0xffffffffu)
+            worldSum = worldInverseOut[node * 128 + lane] - worldInverseIn[node * 128 + lane];
+    } else {
+        const uint proxy = node - push.clothCount;
+        [loop] for (uint cloth = 0; cloth < push.clothCount; ++cloth) if (worldObstacle[cloth] == proxy)
+            worldSum += worldDirectOut[cloth * 128 + lane] - worldDirectIn[cloth * 128 + lane];
+    }
+    aggregateMesh[lane] = meshSum;
+    aggregateWorld[lane] = worldSum;
+    oldNodeValue[lane] = nodeIn[node * 128 + lane];
+    GroupMemoryBarrierWithGroupSync();
+    const MlpDesc mlp = loadMlp(mlpTable, 5 + push.block * 3);
+    float value = weights[mlp.b0 + lane];
+    [loop] for (uint input = 0; input < 384; ++input) {
+        const float inputValue = input < 128 ? aggregateMesh[input] : (input < 256 ? aggregateWorld[input - 128] : oldNodeValue[input - 256]);
+        value += weights[mlp.w0 + lane * 384 + input] * inputValue;
+    }
+    hoodScratchA[lane] = max(value, 0.0);
+    GroupMemoryBarrierWithGroupSync();
+    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, true), 0.0);
+    GroupMemoryBarrierWithGroupSync();
+    hoodScratchA[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, false);
+    calculateLayerNorm(lane, 128);
+    const float update = (hoodScratchA[lane] - hoodMean) * hoodInvStd * weights[mlp.lnWeight + lane] + weights[mlp.lnBias + lane];
+    nodeOut[node * 128 + lane] = nodeIn[node * 128 + lane] + update;
+}

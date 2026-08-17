@@ -67,8 +67,9 @@ function Add-Copy {
     })
 }
 
-Add-Copy (Join-Path $PocRoot 'overlay/examples/gnncloth/gnncloth.cpp') $ExampleDestination
-Add-Copy (Join-Path $PocRoot 'overlay/examples/gnncloth/vgnn_format.h') $ExampleDestination
+foreach ($File in Get-ChildItem -LiteralPath (Join-Path $PocRoot 'overlay/examples/gnncloth') -File) {
+    Add-Copy $File.FullName $ExampleDestination
+}
 foreach ($File in Get-ChildItem -LiteralPath $OverlayShaderRoot -File) {
     Add-Copy $File.FullName $HlslDestination
     if ($File.Extension -eq '.spv') { Add-Copy $File.FullName $GlslDestination }

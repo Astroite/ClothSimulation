@@ -1,0 +1,909 @@
+	struct HoodPlain3 { float x, y, z; };
+	static_assert(sizeof(HoodPlain3) == 12);
+	struct HoodSkinParams {
+		uint32_t frameIndex{}, nextFrameIndex{}, boneCount{}, characterCount{};
+		uint32_t proxyCount{}, clothCount{}, resetState{}, renderFrameIndex{};
+	};
+	struct HoodFeatureParams {
+		uint32_t clothCount{}, proxyCount{}, triangleCount{}, meshEdgeCount{};
+		uint32_t embeddingOffset{}, firstStep{}, reserved0{}, reserved1{};
+		float timestep{}, collisionRadius{ 0.03f }, material0{}, material1{};
+		float material2{}, pad0{}, pad1{}, pad2{};
+	};
+	struct HoodIntegrateParams { uint32_t clothCount{}, firstStep{}, collisionProjection{}, reserved{}; };
+	struct HoodToyParams {
+		uint32_t clothCount{};
+		float timestep{ 1.0f / 30.0f }, maxSpeed{ 8.0f }, maxAcceleration{ 30.0f };
+		glm::vec4 externalAcceleration{ 0.0f, -9.8f, 0.0f, 0.0f };
+	};
+	static_assert(sizeof(HoodToyParams) == 32);
+	struct HoodGraphicsUniform {
+		glm::mat4 projection{};
+		glm::mat4 modelview{};
+		glm::vec4 lightPos{ -2.0f, 4.0f, -2.0f, 1.0f };
+		glm::vec4 rootPosition{};
+	};
+
+	bool realSceneMode{ false };
+	bool hoodPaused{ false };
+	bool hoodRequestReset{ true };
+	bool hoodFirstStep{ true };
+	bool hoodSimulateFrame{ false };
+	bool hoodCollisionProjection{ false };
+	bool hoodVerifyMode{ false };
+	bool hoodVerifyWritten{ false };
+	bool hoodStaticBenchmarkMode{ false };
+	enum HoodSolver : int32_t { HoodFine15 = 0, HoodToy2L = 1 };
+	int32_t hoodSolver{ HoodFine15 };
+	std::filesystem::path hoodAssetRoot;
+	std::filesystem::path hoodModelPath;
+	std::filesystem::path hoodToyModelPath;
+	std::filesystem::path hoodGoldenPath;
+	std::filesystem::path hoodVerifyOutput;
+	std::filesystem::path hoodStaticBenchmarkOutput{ "hood_static_timing.csv" };
+	std::string hoodMotion{ "ch10032_sprint" };
+	float hoodAccumulator{};
+	uint32_t hoodFrame{};
+	uint32_t hoodCompletedSteps{}, hoodPauseAfterSteps{};
+	uint32_t hoodComputeFrame{};
+	uint32_t hoodNextFrame{};
+	uint32_t hoodRenderFrame{};
+	uint32_t hoodFrameCount{}, hoodBoneCount{}, hoodFps{};
+	uint32_t hoodCharacterCount{}, hoodCharacterIndexCount{}, hoodProxyCount{};
+	uint32_t hoodClothCount{}, hoodClothIndexCount{}, hoodTriangleCount{}, hoodMeshEdgeCount{};
+	std::vector<glm::vec3> hoodRootPositions;
+	std::vector<HoodPlain3> hoodGoldenPositions;
+	std::vector<HoodPlain3> hoodGoldenAcceleration;
+	std::vector<uint32_t> hoodGoldenWorld;
+	std::vector<double> hoodVerifyStepMaximums;
+	std::vector<double> hoodVerifyStepMeans;
+	uint32_t hoodGoldenSteps{};
+	uint32_t hoodVerifyStep{};
+	double hoodVerifyMaximum{};
+	double hoodVerifyMeanSum{};
+	double hoodVerifyAccelerationMaximum{};
+	double hoodVerifyAccelerationMean{};
+	uint32_t hoodVerifyWorldMismatches{};
+	uint64_t hoodVerifyValueCount{};
+	uint32_t hoodEmbeddingOffset{};
+	uint32_t hoodStaticBenchmarkWarmup{ 5 };
+	uint32_t hoodStaticBenchmarkTarget{ 20 };
+	uint32_t hoodStaticBenchmarkDiscarded{};
+	static constexpr uint32_t hoodProcessorBlocks = 15;
+	static constexpr uint32_t hoodTimestampCount = 8 + hoodProcessorBlocks * 2;
+
+	struct HoodBuffers {
+		vks::Buffer skinMatrices, characterRestPosition, characterRestNormal, characterBoneIndices, characterBoneWeights;
+		vks::Buffer characterPosition, characterNormal, characterUv, characterIndices;
+		vks::Buffer proxyRestPosition, proxyRestNormal, proxyBoneIndices, proxyBoneWeights;
+		vks::Buffer proxyPosition, proxyNormal, proxyTarget;
+		vks::Buffer clothRestPosition, clothBoneIndices, clothBoneWeights, pinTarget, pinMask, mass;
+		vks::Buffer clothPosition, clothPrevious, effectivePosition, acceleration, clothTriangles, clothIndices;
+		vks::Buffer meshSenders, meshReceivers, csrOffsets, worldObstacle, activeProxy;
+		vks::Buffer nodeFeatures, meshFeatures, worldDirectFeatures, worldInverseFeatures;
+		vks::Buffer weights, mlpTable, normalizers, toyWeights, toyHidden;
+		std::array<vks::Buffer, 2> nodeLatent, meshLatent, worldDirectLatent, worldInverseLatent;
+	} hoodBuffers;
+
+	struct HoodLayouts {
+		VkDescriptorPool pool{ VK_NULL_HANDLE };
+		VkDescriptorSetLayout skinLayout{}, featuresLayout{}, encodeLayout{}, edgeLayout{}, nodeLayout{}, integrateLayout{}, toyLayout{}, graphicsLayout{};
+		VkPipelineLayout skinPipeline{}, featuresPipeline{}, encodePipeline{}, edgePipeline{}, nodePipeline{}, integratePipeline{}, toyPipeline{}, graphicsPipeline{};
+		std::array<VkDescriptorSet, maxConcurrentFrames> skinSets{}, featureSets{}, integrateSets{}, graphicsSets{};
+		std::array<VkDescriptorSet, maxConcurrentFrames> toySets{};
+		VkDescriptorSet encodeSet{};
+		std::array<VkDescriptorSet, 2> edgeSets{}, nodeSets{};
+		VkPipeline skin{}, features{}, encode{}, edge{}, node{}, integrate{}, toyLayer0{}, toyLayer1{};
+		VkPipeline sky{}, character{}, cloth{};
+		std::array<vks::Buffer, maxConcurrentFrames> skinUniforms, featureUniforms, integrateUniforms, toyUniforms, graphicsUniforms;
+		std::array<VkQueryPool, maxConcurrentFrames> queryPools{};
+		std::array<bool, maxConcurrentFrames> queryWritten{}, querySimulated{};
+	} hood;
+
+	struct HoodTiming {
+		double skin{}, features{};
+		std::array<double, 4> encoders{};
+		std::array<double, hoodProcessorBlocks> edgeBlocks{}, nodeBlocks{};
+		double integrate{}, total{};
+		double encodeTotal() const { return encoders[0] + encoders[1] + encoders[2] + encoders[3]; }
+		double processorTotal() const {
+			double value = 0.0;
+			for (uint32_t block = 0; block < hoodProcessorBlocks; ++block) value += edgeBlocks[block] + nodeBlocks[block];
+			return value;
+		}
+	} hoodTiming;
+	std::vector<HoodTiming> hoodStaticBenchmarkSamples;
+
+	template <typename T>
+	static std::vector<glm::vec4> hoodExpandVec3(std::span<const T> input, float w)
+	{
+		std::vector<glm::vec4> output;
+		output.reserve(input.size());
+		for (const auto& value : input) output.emplace_back(value.x, value.y, value.z, w);
+		return output;
+	}
+
+	void hoodUpload(vks::Buffer& destination, VkBufferUsageFlags usage, const void* data, VkDeviceSize bytes)
+	{
+		if (!bytes) throw std::runtime_error("Cannot create an empty HOOD runtime buffer");
+		vks::Buffer staging;
+		VK_CHECK_RESULT(vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging, bytes, const_cast<void*>(data)));
+		VK_CHECK_RESULT(vulkanDevice->createBuffer(usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &destination, bytes));
+		VkCommandBuffer command = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
+		VkBufferCopy copy{ .size = bytes };
+		vkCmdCopyBuffer(command, staging.buffer, destination.buffer, 1, &copy);
+		vulkanDevice->flushCommandBuffer(command, queue, true);
+		staging.destroy();
+	}
+
+	void hoodEmpty(vks::Buffer& destination, VkBufferUsageFlags usage, VkDeviceSize bytes)
+	{
+		VK_CHECK_RESULT(vulkanDevice->createBuffer(usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &destination, bytes));
+	}
+
+	template <typename T>
+	void hoodUploadVector(vks::Buffer& destination, VkBufferUsageFlags usage, const std::vector<T>& values)
+	{
+		hoodUpload(destination, usage, values.data(), static_cast<VkDeviceSize>(values.size()) * sizeof(T));
+	}
+
+	VkDescriptorSetLayout hoodMakeLayout(const std::vector<VkDescriptorType>& types)
+	{
+		std::vector<VkDescriptorSetLayoutBinding> bindings;
+		for (uint32_t index = 0; index < types.size(); ++index) bindings.push_back(
+			vks::initializers::descriptorSetLayoutBinding(types[index], types[index] == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ? VK_SHADER_STAGE_ALL : VK_SHADER_STAGE_COMPUTE_BIT, index));
+		VkDescriptorSetLayout result{};
+		auto info = vks::initializers::descriptorSetLayoutCreateInfo(bindings);
+		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &info, nullptr, &result));
+		return result;
+	}
+
+	VkPipelineLayout hoodMakePipelineLayout(VkDescriptorSetLayout layout, uint32_t pushBytes = 0)
+	{
+		auto info = vks::initializers::pipelineLayoutCreateInfo(&layout, 1);
+		VkPushConstantRange range{};
+		if (pushBytes) {
+			range = vks::initializers::pushConstantRange(VK_SHADER_STAGE_COMPUTE_BIT, pushBytes, 0);
+			info.pushConstantRangeCount = 1;
+			info.pPushConstantRanges = &range;
+		}
+		VkPipelineLayout result{};
+		VK_CHECK_RESULT(vkCreatePipelineLayout(device, &info, nullptr, &result));
+		return result;
+	}
+
+	VkDescriptorSet hoodAllocateSet(VkDescriptorSetLayout layout)
+	{
+		VkDescriptorSet set{};
+		auto info = vks::initializers::descriptorSetAllocateInfo(hood.pool, &layout, 1);
+		VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &info, &set));
+		return set;
+	}
+
+	void hoodWriteSet(VkDescriptorSet set, const std::vector<std::pair<VkDescriptorType, vks::Buffer*>>& buffers)
+	{
+		std::vector<VkWriteDescriptorSet> writes;
+		for (uint32_t binding = 0; binding < buffers.size(); ++binding)
+			writes.push_back(vks::initializers::writeDescriptorSet(set, buffers[binding].first, binding, &buffers[binding].second->descriptor));
+		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+	}
+
+	void hoodLoadAssets()
+	{
+		if (hoodAssetRoot.empty()) throw std::runtime_error("CH10032 requires --asset-root <baked scene directory>");
+		if (hoodModelPath.empty()) hoodModelPath = hoodAssetRoot.parent_path().parent_path() / "hood_data" / "fine15.vhood";
+		const auto character = vhood::loadSectioned(hoodAssetRoot / "ch10032.vchar", "VCHAR001", 1);
+		const auto animation = vhood::loadSectioned(hoodAssetRoot / (hoodMotion + ".vanim"), "VANIM001", 1);
+		const auto cloth = vhood::loadSectioned(hoodAssetRoot / "ch10032_lower.vcloth2", "VCLTH002", 2);
+		const auto model = vhood::buildGpuModel(vhood::loadTensorAsset(hoodModelPath));
+		if (hoodToyModelPath.empty()) hoodToyModelPath = std::filesystem::path(getShadersPath()) / "gnncloth" / "model.bin";
+		const auto toyModel = vgnn::loadModel(hoodToyModelPath);
+		if (hoodVerifyMode) {
+			if (hoodGoldenPath.empty()) hoodGoldenPath = hoodAssetRoot / "fine15_rollout.vhgold";
+			const auto golden = vhood::loadSectioned(hoodGoldenPath, "VHGOLD01", 1);
+			const auto goldenInfo = golden.require("info", 4, 4).as<uint32_t>();
+			hoodGoldenSteps = std::min(10u, goldenInfo[0]);
+			if (goldenInfo[1] != cloth.require("positions", 12).count || !hoodGoldenSteps) throw std::runtime_error("Fine15 golden dimensions are invalid");
+			const auto positions = golden.require("rollout_pos", 12).as<HoodPlain3>(12);
+			hoodGoldenPositions.assign(positions.begin(), positions.begin() + static_cast<size_t>(hoodGoldenSteps) * goldenInfo[1]);
+			const auto acceleration = golden.require("first_accel", 12, goldenInfo[1]).as<HoodPlain3>(12);
+			hoodGoldenAcceleration.assign(acceleration.begin(), acceleration.end());
+			const auto world = golden.require("world_to", 4, goldenInfo[1]).as<uint32_t>(4);
+			hoodGoldenWorld.assign(world.begin(), world.end());
+		}
+
+		const auto info = character.require("info", 4, 6).as<uint32_t>();
+		hoodCharacterCount = info[0];
+		hoodCharacterIndexCount = info[1] * 3;
+		hoodBoneCount = info[2];
+		hoodProxyCount = info[3];
+		const auto animationInfo = animation.require("info", 4, 4).as<uint32_t>();
+		hoodFrameCount = animationInfo[0];
+		if (animationInfo[1] != hoodBoneCount || animationInfo[2] != 30) throw std::runtime_error("VANIM bone count/FPS does not match CH10032 runtime");
+		hoodFps = animationInfo[2];
+		hoodClothCount = cloth.require("positions", 12).count;
+		hoodTriangleCount = cloth.require("triangles", 12).count;
+		hoodClothIndexCount = hoodTriangleCount * 3;
+		hoodMeshEdgeCount = cloth.require("csr_neighbors", 4).count;
+
+		const auto characterPosition = hoodExpandVec3(character.require("render_pos", 12, hoodCharacterCount).as<HoodPlain3>(12), 1.0f);
+		const auto characterNormal = hoodExpandVec3(character.require("render_nrm", 12, hoodCharacterCount).as<HoodPlain3>(12), 0.0f);
+		const auto proxyPosition = hoodExpandVec3(character.require("proxy_pos", 12, hoodProxyCount).as<HoodPlain3>(12), 1.0f);
+		const auto proxyNormal = hoodExpandVec3(character.require("proxy_nrm", 12, hoodProxyCount).as<HoodPlain3>(12), 0.0f);
+		const auto clothPosition = hoodExpandVec3(cloth.require("positions", 12, hoodClothCount).as<HoodPlain3>(12), 1.0f);
+		const auto roots = animation.require("root_pos", 12, hoodFrameCount).as<HoodPlain3>(12);
+		hoodRootPositions.reserve(roots.size());
+		for (const auto& root : roots) hoodRootPositions.emplace_back(root.x, root.y, root.z);
+
+		auto uploadView = [&](vks::Buffer& buffer, VkBufferUsageFlags usage, const vhood::ByteView& view) { hoodUpload(buffer, usage, view.bytes.data(), view.bytes.size()); };
+		const VkBufferUsageFlags storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		hoodUploadVector(hoodBuffers.characterRestPosition, storage, characterPosition);
+		hoodUploadVector(hoodBuffers.characterRestNormal, storage, characterNormal);
+		uploadView(hoodBuffers.characterBoneIndices, storage, character.require("bone_idx", 48, hoodCharacterCount));
+		uploadView(hoodBuffers.characterBoneWeights, storage, character.require("bone_weight", 48, hoodCharacterCount));
+		uploadView(hoodBuffers.characterUv, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, character.require("render_uv", 8, hoodCharacterCount));
+		uploadView(hoodBuffers.characterIndices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, character.require("render_tri", 12));
+		hoodUploadVector(hoodBuffers.proxyRestPosition, storage, proxyPosition);
+		hoodUploadVector(hoodBuffers.proxyRestNormal, storage, proxyNormal);
+		uploadView(hoodBuffers.proxyBoneIndices, storage, character.require("proxy_bone_idx", 48, hoodProxyCount));
+		uploadView(hoodBuffers.proxyBoneWeights, storage, character.require("proxy_weight", 48, hoodProxyCount));
+		hoodUploadVector(hoodBuffers.clothRestPosition, storage, clothPosition);
+		uploadView(hoodBuffers.clothBoneIndices, storage, cloth.require("bone_idx", 48, hoodClothCount));
+		uploadView(hoodBuffers.clothBoneWeights, storage, cloth.require("bone_weight", 48, hoodClothCount));
+		uploadView(hoodBuffers.pinMask, storage, cloth.require("pin_mask", 4, hoodClothCount));
+		uploadView(hoodBuffers.mass, storage, cloth.require("mass", 4, hoodClothCount));
+		uploadView(hoodBuffers.clothTriangles, storage, cloth.require("triangles", 12, hoodTriangleCount));
+		uploadView(hoodBuffers.clothIndices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, cloth.require("triangles", 12, hoodTriangleCount));
+		uploadView(hoodBuffers.skinMatrices, storage, animation.require("skin_matrices", 48, hoodFrameCount * hoodBoneCount));
+
+		const auto offsets = cloth.require("csr_offsets", 4, hoodClothCount + 1).as<uint32_t>();
+		const auto senders = cloth.require("csr_neighbors", 4, hoodMeshEdgeCount).as<uint32_t>();
+		std::vector<uint32_t> meshSenders(senders.begin(), senders.end()), meshReceivers;
+		meshReceivers.reserve(hoodMeshEdgeCount);
+		for (uint32_t receiver = 0; receiver < hoodClothCount; ++receiver)
+			for (uint32_t edge = offsets[receiver]; edge < offsets[receiver + 1]; ++edge) meshReceivers.push_back(receiver);
+		hoodUploadVector(hoodBuffers.meshSenders, storage, meshSenders);
+		hoodUploadVector(hoodBuffers.meshReceivers, storage, meshReceivers);
+		uploadView(hoodBuffers.csrOffsets, storage, cloth.require("csr_offsets", 4, hoodClothCount + 1));
+		hoodUploadVector(hoodBuffers.weights, storage, model.weights);
+		hoodUploadVector(hoodBuffers.toyWeights, storage, toyModel.payload);
+		std::vector<glm::uvec4> table;
+		table.reserve(vhood::mlpCount * 3);
+		for (const auto& mlp : model.mlps) {
+			table.emplace_back(mlp.w0, mlp.b0, mlp.w1, mlp.b1);
+			table.emplace_back(mlp.w2, mlp.b2, mlp.layerNormWeight, mlp.layerNormBias);
+			table.emplace_back(mlp.inputDimension, mlp.outputDimension, mlp.hasLayerNorm, 0);
+		}
+		hoodUploadVector(hoodBuffers.mlpTable, storage, table);
+		hoodUploadVector(hoodBuffers.normalizers, storage, model.normalizers);
+
+		hoodEmpty(hoodBuffers.characterPosition, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, hoodCharacterCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.characterNormal, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, hoodCharacterCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.proxyPosition, storage, hoodProxyCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.proxyNormal, storage, hoodProxyCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.proxyTarget, storage, hoodProxyCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.pinTarget, storage, hoodClothCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.clothPosition, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.clothPrevious, storage, hoodClothCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.effectivePosition, storage, hoodClothCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.acceleration, storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.toyHidden, storage, static_cast<VkDeviceSize>(hoodClothCount) * 4 * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.worldObstacle, storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(uint32_t));
+		hoodEmpty(hoodBuffers.activeProxy, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, hoodProxyCount * sizeof(uint32_t));
+		const VkBufferUsageFlags debugStorage = storage | (hoodVerifyMode ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : 0);
+		hoodEmpty(hoodBuffers.nodeFeatures, debugStorage, static_cast<VkDeviceSize>(hoodClothCount + hoodProxyCount) * 20 * sizeof(float));
+		hoodEmpty(hoodBuffers.meshFeatures, debugStorage, static_cast<VkDeviceSize>(hoodMeshEdgeCount) * 12 * sizeof(float));
+		hoodEmpty(hoodBuffers.worldDirectFeatures, debugStorage, static_cast<VkDeviceSize>(hoodClothCount) * 9 * sizeof(float));
+		hoodEmpty(hoodBuffers.worldInverseFeatures, debugStorage, static_cast<VkDeviceSize>(hoodClothCount) * 9 * sizeof(float));
+		for (uint32_t ping = 0; ping < 2; ++ping) {
+			hoodEmpty(hoodBuffers.nodeLatent[ping], debugStorage, static_cast<VkDeviceSize>(hoodClothCount + hoodProxyCount) * 128 * sizeof(float));
+			hoodEmpty(hoodBuffers.meshLatent[ping], storage, static_cast<VkDeviceSize>(hoodMeshEdgeCount) * 128 * sizeof(float));
+			hoodEmpty(hoodBuffers.worldDirectLatent[ping], storage, static_cast<VkDeviceSize>(hoodClothCount) * 128 * sizeof(float));
+			hoodEmpty(hoodBuffers.worldInverseLatent[ping], storage, static_cast<VkDeviceSize>(hoodClothCount) * 128 * sizeof(float));
+		}
+		hoodEmbeddingOffset = model.embeddingOffset;
+	}
+
+	void hoodPrepareDescriptors()
+	{
+		const std::vector<VkDescriptorPoolSize> sizes = {
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 220),
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 16),
+		};
+		auto poolInfo = vks::initializers::descriptorPoolCreateInfo(sizes, 32);
+		VK_CHECK_RESULT(vkCreateDescriptorPool(device, &poolInfo, nullptr, &hood.pool));
+		auto storageTypes = [](uint32_t count) { return std::vector<VkDescriptorType>(count, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); };
+		auto skinTypes = storageTypes(22); skinTypes[21] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		auto featureTypes = storageTypes(22); featureTypes[20] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		auto integrateTypes = storageTypes(14); integrateTypes[13] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		auto toyTypes = storageTypes(10); toyTypes[9] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		hood.skinLayout = hoodMakeLayout(skinTypes); hood.featuresLayout = hoodMakeLayout(featureTypes); hood.encodeLayout = hoodMakeLayout(storageTypes(10));
+		hood.edgeLayout = hoodMakeLayout(storageTypes(12)); hood.nodeLayout = hoodMakeLayout(storageTypes(13)); hood.integrateLayout = hoodMakeLayout(integrateTypes);
+		hood.toyLayout = hoodMakeLayout(toyTypes);
+		hood.graphicsLayout = hoodMakeLayout({ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER });
+		hood.skinPipeline = hoodMakePipelineLayout(hood.skinLayout); hood.featuresPipeline = hoodMakePipelineLayout(hood.featuresLayout);
+		hood.encodePipeline = hoodMakePipelineLayout(hood.encodeLayout, 16); hood.edgePipeline = hoodMakePipelineLayout(hood.edgeLayout, 16);
+		hood.nodePipeline = hoodMakePipelineLayout(hood.nodeLayout, 16); hood.integratePipeline = hoodMakePipelineLayout(hood.integrateLayout);
+		hood.toyPipeline = hoodMakePipelineLayout(hood.toyLayout);
+		hood.graphicsPipeline = hoodMakePipelineLayout(hood.graphicsLayout);
+
+		for (uint32_t frame = 0; frame < maxConcurrentFrames; ++frame) {
+			for (auto* buffer : { &hood.skinUniforms[frame], &hood.featureUniforms[frame], &hood.integrateUniforms[frame], &hood.toyUniforms[frame], &hood.graphicsUniforms[frame] }) {
+				const VkDeviceSize size = buffer == &hood.skinUniforms[frame] ? sizeof(HoodSkinParams) : buffer == &hood.featureUniforms[frame] ? sizeof(HoodFeatureParams)
+					: buffer == &hood.integrateUniforms[frame] ? sizeof(HoodIntegrateParams) : buffer == &hood.toyUniforms[frame] ? sizeof(HoodToyParams) : sizeof(HoodGraphicsUniform);
+				VK_CHECK_RESULT(vulkanDevice->createBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+					VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, buffer, size));
+				VK_CHECK_RESULT(buffer->map());
+			}
+			hood.skinSets[frame] = hoodAllocateSet(hood.skinLayout);
+			hoodWriteSet(hood.skinSets[frame], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.skinMatrices},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.characterRestPosition},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.characterRestNormal},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.characterBoneIndices},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.characterBoneWeights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.characterPosition},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.characterNormal},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyRestPosition},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyRestNormal},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyBoneIndices},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyBoneWeights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyPosition},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyTarget},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothRestPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothBoneIndices},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothBoneWeights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.skinUniforms[frame]} });
+			hood.featureSets[frame] = hoodAllocateSet(hood.featuresLayout);
+			hoodWriteSet(hood.featureSets[frame], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangles},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshSenders},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshReceivers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothRestPosition},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.mass},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyPosition},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeFeatures},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshFeatures},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldDirectFeatures},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldInverseFeatures},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.weights},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.normalizers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.effectivePosition},
+				{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.featureUniforms[frame]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.activeProxy} });
+			hood.integrateSets[frame] = hoodAllocateSet(hood.integrateLayout);
+			hoodWriteSet(hood.integrateSets[frame], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.weights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.mlpTable},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.normalizers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeLatent[1]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.effectivePosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.acceleration},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyTarget},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.integrateUniforms[frame]} });
+			hood.toySets[frame] = hoodAllocateSet(hood.toyLayout);
+			hoodWriteSet(hood.toySets[frame], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.csrOffsets},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshSenders},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.toyWeights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.toyHidden},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.acceleration},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.toyUniforms[frame]} });
+			hood.graphicsSets[frame] = hoodAllocateSet(hood.graphicsLayout);
+			hoodWriteSet(hood.graphicsSets[frame], { {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.graphicsUniforms[frame]} });
+		}
+
+		hood.encodeSet = hoodAllocateSet(hood.encodeLayout);
+		hoodWriteSet(hood.encodeSet, {
+			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.weights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.mlpTable},
+			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeFeatures},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshFeatures},
+			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldDirectFeatures},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldInverseFeatures},
+			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeLatent[0]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshLatent[0]},
+			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldDirectLatent[0]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldInverseLatent[0]} });
+		for (uint32_t ping = 0; ping < 2; ++ping) {
+			const uint32_t pong = 1 - ping;
+			hood.edgeSets[ping] = hoodAllocateSet(hood.edgeLayout);
+			hoodWriteSet(hood.edgeSets[ping], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.weights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.mlpTable},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeLatent[ping]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshLatent[ping]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldDirectLatent[ping]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldInverseLatent[ping]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshLatent[pong]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldDirectLatent[pong]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldInverseLatent[pong]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshSenders},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshReceivers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle} });
+				hood.nodeSets[ping] = hoodAllocateSet(hood.nodeLayout);
+			hoodWriteSet(hood.nodeSets[ping], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.weights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.mlpTable},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeLatent[ping]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeLatent[pong]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshLatent[ping]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshLatent[pong]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldDirectLatent[ping]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldDirectLatent[pong]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldInverseLatent[ping]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldInverseLatent[pong]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.csrOffsets},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.activeProxy} });
+		}
+	}
+
+	void hoodPreparePipelines()
+	{
+		auto computePipeline = [&](const char* shader, VkPipelineLayout layout, VkPipeline& target) {
+			auto info = vks::initializers::computePipelineCreateInfo(layout, 0);
+			info.stage = loadShader(getShadersPath() + std::string("gnncloth/") + shader, VK_SHADER_STAGE_COMPUTE_BIT);
+			VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1, &info, nullptr, &target));
+		};
+		computePipeline("hood_skin.comp.spv", hood.skinPipeline, hood.skin);
+		computePipeline("hood_features.comp.spv", hood.featuresPipeline, hood.features);
+		computePipeline("hood_encode.comp.spv", hood.encodePipeline, hood.encode);
+		computePipeline("hood_edge_update.comp.spv", hood.edgePipeline, hood.edge);
+		computePipeline("hood_node_update.comp.spv", hood.nodePipeline, hood.node);
+		computePipeline("hood_integrate.comp.spv", hood.integratePipeline, hood.integrate);
+		computePipeline("hood_toy_layer0.comp.spv", hood.toyPipeline, hood.toyLayer0);
+		computePipeline("hood_toy_layer1.comp.spv", hood.toyPipeline, hood.toyLayer1);
+
+		VkPipelineInputAssemblyStateCreateInfo assembly = vks::initializers::pipelineInputAssemblyStateCreateInfo(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, VK_FALSE);
+		VkPipelineRasterizationStateCreateInfo raster = vks::initializers::pipelineRasterizationStateCreateInfo(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, 0);
+		VkPipelineColorBlendAttachmentState blendAttachment = vks::initializers::pipelineColorBlendAttachmentState(0xf, VK_FALSE);
+		VkPipelineColorBlendStateCreateInfo blend = vks::initializers::pipelineColorBlendStateCreateInfo(1, &blendAttachment);
+		VkPipelineDepthStencilStateCreateInfo depth = vks::initializers::pipelineDepthStencilStateCreateInfo(VK_TRUE, VK_TRUE, VK_COMPARE_OP_LESS_OR_EQUAL);
+		VkPipelineViewportStateCreateInfo viewport = vks::initializers::pipelineViewportStateCreateInfo(1, 1, 0);
+		VkPipelineMultisampleStateCreateInfo multisample = vks::initializers::pipelineMultisampleStateCreateInfo(VK_SAMPLE_COUNT_1_BIT, 0);
+		std::vector<VkDynamicState> states{ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+		VkPipelineDynamicStateCreateInfo dynamic = vks::initializers::pipelineDynamicStateCreateInfo(states);
+		VkPipelineVertexInputStateCreateInfo vertexInput = vks::initializers::pipelineVertexInputStateCreateInfo();
+		auto pipeline = vks::initializers::pipelineCreateInfo(hood.graphicsPipeline, renderPass);
+		pipeline.pInputAssemblyState = &assembly; pipeline.pRasterizationState = &raster; pipeline.pColorBlendState = &blend;
+		pipeline.pMultisampleState = &multisample; pipeline.pViewportState = &viewport; pipeline.pDepthStencilState = &depth; pipeline.pDynamicState = &dynamic;
+		pipeline.pVertexInputState = &vertexInput; pipeline.stageCount = 2;
+
+		std::array<VkPipelineShaderStageCreateInfo, 2> shaders{
+			loadShader(getShadersPath() + "gnncloth/hood_character.vert.spv", VK_SHADER_STAGE_VERTEX_BIT),
+			loadShader(getShadersPath() + "gnncloth/hood_character.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT) };
+		std::array<VkVertexInputBindingDescription, 3> charBindings{
+			vks::initializers::vertexInputBindingDescription(0, 16, VK_VERTEX_INPUT_RATE_VERTEX),
+			vks::initializers::vertexInputBindingDescription(1, 16, VK_VERTEX_INPUT_RATE_VERTEX),
+			vks::initializers::vertexInputBindingDescription(2, 8, VK_VERTEX_INPUT_RATE_VERTEX) };
+		std::array<VkVertexInputAttributeDescription, 3> charAttributes{
+			vks::initializers::vertexInputAttributeDescription(0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0),
+			vks::initializers::vertexInputAttributeDescription(1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0),
+			vks::initializers::vertexInputAttributeDescription(2, 2, VK_FORMAT_R32G32_SFLOAT, 0) };
+		vertexInput.vertexBindingDescriptionCount = 3; vertexInput.pVertexBindingDescriptions = charBindings.data();
+		vertexInput.vertexAttributeDescriptionCount = 3; vertexInput.pVertexAttributeDescriptions = charAttributes.data();
+		pipeline.pStages = shaders.data();
+		VK_CHECK_RESULT(vkCreateGraphicsPipelines(device, pipelineCache, 1, &pipeline, nullptr, &hood.character));
+
+		shaders = { loadShader(getShadersPath() + "gnncloth/hood_cloth.vert.spv", VK_SHADER_STAGE_VERTEX_BIT),
+			loadShader(getShadersPath() + "gnncloth/hood_cloth.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT) };
+		const auto clothBinding = vks::initializers::vertexInputBindingDescription(0, 16, VK_VERTEX_INPUT_RATE_VERTEX);
+		const auto clothAttribute = vks::initializers::vertexInputAttributeDescription(0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0);
+		vertexInput.vertexBindingDescriptionCount = 1; vertexInput.pVertexBindingDescriptions = &clothBinding;
+		vertexInput.vertexAttributeDescriptionCount = 1; vertexInput.pVertexAttributeDescriptions = &clothAttribute;
+		pipeline.pStages = shaders.data();
+		VK_CHECK_RESULT(vkCreateGraphicsPipelines(device, pipelineCache, 1, &pipeline, nullptr, &hood.cloth));
+
+		shaders = { loadShader(getShadersPath() + "gnncloth/sky.vert.spv", VK_SHADER_STAGE_VERTEX_BIT), loadShader(getShadersPath() + "gnncloth/sky.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT) };
+		vertexInput.vertexBindingDescriptionCount = 0; vertexInput.vertexAttributeDescriptionCount = 0;
+		VkPipelineDepthStencilStateCreateInfo skyDepth = vks::initializers::pipelineDepthStencilStateCreateInfo(VK_FALSE, VK_FALSE, VK_COMPARE_OP_ALWAYS);
+		pipeline.pDepthStencilState = &skyDepth; pipeline.pStages = shaders.data();
+		VK_CHECK_RESULT(vkCreateGraphicsPipelines(device, pipelineCache, 1, &pipeline, nullptr, &hood.sky));
+		for (uint32_t frame = 0; frame < maxConcurrentFrames; ++frame) {
+			VkQueryPoolCreateInfo queryInfo{ .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = hoodTimestampCount };
+			VK_CHECK_RESULT(vkCreateQueryPool(device, &queryInfo, nullptr, &hood.queryPools[frame]));
+		}
+	}
+
+	void hoodPrepare()
+	{
+		hoodLoadAssets();
+		hoodPrepareDescriptors();
+		hoodPreparePipelines();
+		camera.type = Camera::CameraType::lookat;
+		// Baked CH10032 assets are conventional Y-up. The projection is flipped
+		// when copied to the real-scene graphics UBO; keeping Camera itself in the
+		// upstream convention preserves its stable translation/root-follow logic.
+		camera.setPerspective(55.0f, static_cast<float>(width) / static_cast<float>(height), 0.05f, 256.0f);
+		camera.setRotation(glm::vec3(-5.0f, 0.0f, 0.0f));
+		std::cout << "CH10032 native scene: " << hoodCharacterCount << " body vertices, " << hoodClothCount
+			<< " cloth vertices, " << hoodBoneCount << " core bones, " << hoodFrameCount << " frames @ " << hoodFps << " Hz, solver "
+			<< (hoodSolver == HoodToy2L ? "Toy2L" : "Fine15") << "\n";
+	}
+
+	void hoodAdvance()
+	{
+		hoodSimulateFrame = false;
+		if (hoodRequestReset) {
+			hoodFrame = hoodComputeFrame = hoodNextFrame = hoodRenderFrame = 0;
+			hoodCompletedSteps = 0;
+			hoodAccumulator = 0.0f;
+			hoodFirstStep = true;
+			return;
+		}
+		if (hoodPaused) { hoodComputeFrame = hoodNextFrame = hoodRenderFrame = hoodFrame; return; }
+		// Automated validation has no presentation pacing, so advance exactly one
+		// 30 Hz simulation step per benchmark frame instead of depending on wall time.
+		hoodAccumulator += benchmark.active ? 1.0f / static_cast<float>(hoodFps) : frameTimer;
+		if (hoodAccumulator < 1.0f / static_cast<float>(hoodFps)) { hoodComputeFrame = hoodNextFrame = hoodRenderFrame = hoodFrame; return; }
+		hoodAccumulator = std::fmod(hoodAccumulator, 1.0f / static_cast<float>(hoodFps));
+		if (hoodFrameCount == 1) {
+			hoodComputeFrame = hoodNextFrame = hoodRenderFrame = 0;
+			hoodSimulateFrame = true;
+			return;
+		}
+		hoodComputeFrame = hoodFrame;
+		hoodNextFrame = hoodFrame + 1;
+		if (hoodNextFrame >= hoodFrameCount) {
+			hoodFrame = hoodComputeFrame = hoodNextFrame = hoodRenderFrame = 0;
+			hoodRequestReset = true;
+			hoodFirstStep = true;
+			return;
+		}
+		hoodRenderFrame = hoodNextFrame;
+		hoodSimulateFrame = true;
+	}
+
+	void hoodUpdateUniforms()
+	{
+		HoodSkinParams skin{ hoodComputeFrame, hoodNextFrame, hoodBoneCount, hoodCharacterCount, hoodProxyCount, hoodClothCount,
+			hoodRequestReset ? 1u : 0u, hoodRenderFrame };
+		std::memcpy(hood.skinUniforms[currentBuffer].mapped, &skin, sizeof(skin));
+		const float material0 = static_cast<float>((std::log(3.9625778333333325e-5) - std::log(6.370782056371576e-8)) / (std::log(0.0013139737991266374) - std::log(6.370782056371576e-8)));
+		const float material1 = static_cast<float>((std::log(23600.0) - std::log(15909.0)) / (std::log(63636.0) - std::log(15909.0)));
+		const float material2 = static_cast<float>((44400.0 - 3535.414406069427) / (93333.73508005822 - 3535.414406069427));
+		HoodFeatureParams features{ hoodClothCount, hoodProxyCount, hoodTriangleCount, hoodMeshEdgeCount, hoodEmbeddingOffset,
+			hoodFirstStep ? 1u : 0u, 0, 0, hoodFirstStep ? 1.0f / 3.0f : 1.0f / 30.0f, 0.03f, material0, material1, material2 };
+		std::memcpy(hood.featureUniforms[currentBuffer].mapped, &features, sizeof(features));
+		HoodIntegrateParams integrate{ hoodClothCount, hoodFirstStep ? 1u : 0u, hoodCollisionProjection ? 1u : 0u, 0 };
+		std::memcpy(hood.integrateUniforms[currentBuffer].mapped, &integrate, sizeof(integrate));
+		HoodToyParams toy{ hoodClothCount, 1.0f / static_cast<float>(hoodFps), 8.0f, 30.0f, glm::vec4(0.0f, -9.8f, 0.0f, 0.0f) };
+		std::memcpy(hood.toyUniforms[currentBuffer].mapped, &toy, sizeof(toy));
+		const glm::vec3 root = hoodRootPositions[hoodRenderFrame];
+		camera.setTranslation(glm::vec3(-root.x, 0.35f - root.y, -3.2f - root.z));
+		glm::mat4 projection = camera.matrices.perspective;
+		projection[1][1] *= -1.0f;
+		HoodGraphicsUniform graphics{ projection, camera.matrices.view, glm::vec4(-2.0f, 4.0f, -2.0f, 1.0f), glm::vec4(root, 1.0f) };
+		std::memcpy(hood.graphicsUniforms[currentBuffer].mapped, &graphics, sizeof(graphics));
+	}
+
+	void hoodComputeBarrier(VkCommandBuffer command)
+	{
+		VkMemoryBarrier barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+	}
+
+	void hoodRecord(VkCommandBuffer command)
+	{
+		vkCmdResetQueryPool(command, hood.queryPools[currentBuffer], 0, hoodTimestampCount);
+		// These state buffers are shared by the in-flight command buffers. Declare
+		// the dependency from the preceding frame's fills, compute writes and
+		// vertex fetches before this frame starts overwriting/reading them. The
+		// same-queue submission order alone is not a Vulkan memory dependency.
+		VkMemoryBarrier frameBarrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+			.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
+			.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+		vkCmdPipelineBarrier(command,
+			VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &frameBarrier, 0, nullptr, 0, nullptr);
+		vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, hood.queryPools[currentBuffer], 0);
+		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.skin);
+		vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.skinPipeline, 0, 1, &hood.skinSets[currentBuffer], 0, nullptr);
+		const uint32_t skinCount = std::max({ hoodCharacterCount, hoodProxyCount, hoodClothCount });
+		vkCmdDispatch(command, (skinCount + 127) / 128, 1, 1);
+		hoodComputeBarrier(command);
+		vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 1);
+		if (hoodSimulateFrame) {
+			if (hoodSolver == HoodToy2L) {
+				vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.toyPipeline, 0, 1, &hood.toySets[currentBuffer], 0, nullptr);
+				vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.toyLayer0);
+				vkCmdDispatch(command, hoodClothCount, 1, 1);
+				hoodComputeBarrier(command);
+				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 2);
+				vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.toyLayer1);
+				vkCmdDispatch(command, hoodClothCount, 1, 1);
+				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 3);
+				for (uint32_t timestamp = 4; timestamp < hoodTimestampCount; ++timestamp)
+					vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], timestamp);
+			} else {
+			vkCmdFillBuffer(command, hoodBuffers.activeProxy.buffer, 0, VK_WHOLE_SIZE, 0);
+			VkMemoryBarrier clearBarrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clearBarrier, 0, nullptr, 0, nullptr);
+			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.features);
+			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.featuresPipeline, 0, 1, &hood.featureSets[currentBuffer], 0, nullptr);
+			vkCmdDispatch(command, (std::max({ hoodClothCount, hoodProxyCount, hoodMeshEdgeCount }) + 127) / 128, 1, 1);
+			hoodComputeBarrier(command);
+			vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 2);
+
+			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.encode);
+			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.encodePipeline, 0, 1, &hood.encodeSet, 0, nullptr);
+			const uint32_t encodePushes[4][4] = { {0,0,hoodClothCount + hoodProxyCount,20}, {1,1,hoodMeshEdgeCount,12}, {2,2,hoodClothCount,9}, {2,3,hoodClothCount,9} };
+			for (uint32_t encoder = 0; encoder < 4; ++encoder) {
+				const auto& push = encodePushes[encoder];
+				vkCmdPushConstants(command, hood.encodePipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push);
+				vkCmdDispatch(command, push[2], 1, 1);
+				hoodComputeBarrier(command);
+				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 3 + encoder);
+			}
+
+			for (uint32_t block = 0; block < hoodProcessorBlocks; ++block) {
+				const uint32_t ping = block & 1u;
+				vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.edge);
+				vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.edgePipeline, 0, 1, &hood.edgeSets[ping], 0, nullptr);
+				const uint32_t edgePushes[3][4] = { {block,0,hoodMeshEdgeCount,hoodClothCount}, {block,1,hoodClothCount,hoodClothCount}, {block,2,hoodClothCount,hoodClothCount} };
+				for (const auto& push : edgePushes) { vkCmdPushConstants(command, hood.edgePipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push); vkCmdDispatch(command, push[2], 1, 1); }
+				hoodComputeBarrier(command);
+				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 7 + block * 2);
+				vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.node);
+				vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.nodePipeline, 0, 1, &hood.nodeSets[ping], 0, nullptr);
+				const uint32_t nodePush[4]{ block, hoodClothCount + hoodProxyCount, hoodClothCount, hoodMeshEdgeCount };
+				vkCmdPushConstants(command, hood.nodePipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, nodePush);
+				vkCmdDispatch(command, hoodClothCount + hoodProxyCount, 1, 1);
+				hoodComputeBarrier(command);
+				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 8 + block * 2);
+			}
+			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.integrate);
+			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.integratePipeline, 0, 1, &hood.integrateSets[currentBuffer], 0, nullptr);
+			vkCmdDispatch(command, hoodClothCount, 1, 1);
+			vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], hoodTimestampCount - 1);
+			}
+		} else {
+			for (uint32_t timestamp = 2; timestamp < hoodTimestampCount; ++timestamp)
+				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], timestamp);
+		}
+		hood.queryWritten[currentBuffer] = true;
+		hood.querySimulated[currentBuffer] = hoodSimulateFrame;
+		VkMemoryBarrier vertexBarrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT };
+		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &vertexBarrier, 0, nullptr, 0, nullptr);
+	}
+
+	void hoodCollectTiming()
+	{
+		if (!hood.queryWritten[currentBuffer]) return;
+		std::array<uint64_t, hoodTimestampCount> values{};
+		if (vkGetQueryPoolResults(device, hood.queryPools[currentBuffer], 0, hoodTimestampCount, sizeof(values), values.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+		// Paused/reset-only frames write a complete zero-duration query sequence so
+		// pools remain valid, but the UI should retain the last simulated sample.
+		if (!hood.querySimulated[currentBuffer]) return;
+		const double scale = deviceProperties.limits.timestampPeriod / 1.0e6;
+		hoodTiming = {};
+		hoodTiming.skin = (values[1] - values[0]) * scale;
+		hoodTiming.features = (values[2] - values[1]) * scale;
+		for (uint32_t encoder = 0; encoder < 4; ++encoder) hoodTiming.encoders[encoder] = (values[3 + encoder] - values[2 + encoder]) * scale;
+		for (uint32_t block = 0; block < hoodProcessorBlocks; ++block) {
+			hoodTiming.edgeBlocks[block] = (values[7 + block * 2] - values[6 + block * 2]) * scale;
+			hoodTiming.nodeBlocks[block] = (values[8 + block * 2] - values[7 + block * 2]) * scale;
+		}
+		hoodTiming.integrate = (values[hoodTimestampCount - 1] - values[hoodTimestampCount - 2]) * scale;
+		hoodTiming.total = (values[hoodTimestampCount - 1] - values[0]) * scale;
+		if (hoodStaticBenchmarkMode && hood.querySimulated[currentBuffer] && hoodStaticBenchmarkSamples.size() < hoodStaticBenchmarkTarget) {
+			if (hoodStaticBenchmarkDiscarded < hoodStaticBenchmarkWarmup) ++hoodStaticBenchmarkDiscarded;
+			else hoodStaticBenchmarkSamples.push_back(hoodTiming);
+		}
+	}
+
+	void hoodWriteStaticBenchmarkCsv()
+	{
+		if (hoodStaticBenchmarkSamples.size() < hoodStaticBenchmarkTarget) {
+			std::cerr << "Static Fine15 benchmark collected " << hoodStaticBenchmarkSamples.size() << " of "
+				<< hoodStaticBenchmarkTarget << " timestamp samples after " << hoodStaticBenchmarkDiscarded << " warmup samples\n";
+			vks::tools::exitFatal("Static real-cloth benchmark did not collect the requested number of samples", -1);
+			return;
+		}
+		if (hoodStaticBenchmarkOutput.has_parent_path()) std::filesystem::create_directories(hoodStaticBenchmarkOutput.parent_path());
+		std::ofstream stream(hoodStaticBenchmarkOutput);
+		if (!stream) {
+			vks::tools::exitFatal("Could not create the static real-cloth benchmark CSV", -1);
+			return;
+		}
+		std::ostringstream driver;
+		if (deviceProperties.vendorID == 0x10de) {
+			driver << ((deviceProperties.driverVersion >> 22) & 0x3ff) << '.' << ((deviceProperties.driverVersion >> 14) & 0xff)
+				<< '.' << ((deviceProperties.driverVersion >> 6) & 0xff) << '.' << (deviceProperties.driverVersion & 0x3f);
+		} else {
+			driver << VK_VERSION_MAJOR(deviceProperties.driverVersion) << '.' << VK_VERSION_MINOR(deviceProperties.driverVersion)
+				<< '.' << VK_VERSION_PATCH(deviceProperties.driverVersion);
+		}
+		const char* solverName = hoodSolver == HoodToy2L ? "toy2l" : "fine15";
+		stream << "device,driver_version,driver_raw,motion,solver,cloth_nodes,directed_mesh_edges,proxy_vertices,samples,stage,mean_ms,min_ms,p95_ms,max_ms\n";
+		auto writeStage = [&](const std::string& stage, const auto& select) {
+			std::vector<double> values;
+			values.reserve(hoodStaticBenchmarkSamples.size());
+			for (const auto& sample : hoodStaticBenchmarkSamples) values.push_back(select(sample));
+			const double mean = std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(values.size());
+			const auto bounds = std::minmax_element(values.begin(), values.end());
+			stream << '"' << deviceProperties.deviceName << '"' << ',' << driver.str() << ',' << deviceProperties.driverVersion << ','
+				<< hoodMotion << ',' << solverName << ',' << hoodClothCount << ',' << hoodMeshEdgeCount << ',' << hoodProxyCount << ',' << values.size() << ','
+				<< stage << ',' << std::fixed << std::setprecision(6) << mean << ',' << *bounds.first << ','
+				<< percentile(values, 0.95) << ',' << *bounds.second << '\n';
+		};
+		writeStage("skin", [](const HoodTiming& value) { return value.skin; });
+		if (hoodSolver == HoodToy2L) {
+			writeStage("toy_layer0", [](const HoodTiming& value) { return value.features; });
+			writeStage("toy_layer1_integrate", [](const HoodTiming& value) { return value.encoders[0]; });
+		} else {
+			writeStage("features_world", [](const HoodTiming& value) { return value.features; });
+			const std::array<const char*, 4> encoderNames{ "encoder_node", "encoder_mesh", "encoder_world_direct", "encoder_world_inverse" };
+			for (uint32_t encoder = 0; encoder < encoderNames.size(); ++encoder)
+				writeStage(encoderNames[encoder], [encoder](const HoodTiming& value) { return value.encoders[encoder]; });
+			for (uint32_t block = 0; block < hoodProcessorBlocks; ++block) {
+				std::ostringstream edgeName, nodeName;
+				edgeName << "block_" << std::setfill('0') << std::setw(2) << block << "_edge";
+				nodeName << "block_" << std::setfill('0') << std::setw(2) << block << "_node";
+				writeStage(edgeName.str(), [block](const HoodTiming& value) { return value.edgeBlocks[block]; });
+				writeStage(nodeName.str(), [block](const HoodTiming& value) { return value.nodeBlocks[block]; });
+			}
+			writeStage("encoder_total", [](const HoodTiming& value) { return value.encodeTotal(); });
+			writeStage("processor_15_total", [](const HoodTiming& value) { return value.processorTotal(); });
+			writeStage("decoder_integrate", [](const HoodTiming& value) { return value.integrate; });
+		}
+		writeStage("total", [](const HoodTiming& value) { return value.total; });
+		std::cout << "Wrote " << hoodStaticBenchmarkOutput << " with " << hoodStaticBenchmarkSamples.size()
+			<< " static T-pose timestamp samples\n";
+	}
+
+	template <typename T>
+	std::vector<T> hoodReadback(VkBuffer source, uint32_t count)
+	{
+		const VkDeviceSize bytes = static_cast<VkDeviceSize>(count) * sizeof(T);
+		vks::Buffer readback;
+		VK_CHECK_RESULT(vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &readback, bytes));
+		VkCommandBuffer command = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
+		VkBufferMemoryBarrier barrier{ .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .buffer = source, .offset = 0, .size = bytes };
+		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+		VkBufferCopy copy{ .size = bytes };
+		vkCmdCopyBuffer(command, source, readback.buffer, 1, &copy);
+		vulkanDevice->flushCommandBuffer(command, queue, true);
+		VK_CHECK_RESULT(readback.map());
+		std::vector<T> result(count);
+		std::memcpy(result.data(), readback.mapped, static_cast<size_t>(bytes));
+		readback.destroy();
+		return result;
+	}
+
+	void hoodVerifyCurrentStep()
+	{
+		if (!hoodVerifyMode || !hoodSimulateFrame || hoodVerifyStep >= hoodGoldenSteps) return;
+		const auto positions = hoodReadback<glm::vec4>(hoodBuffers.clothPosition.buffer, hoodClothCount);
+		const auto acceleration = hoodVerifyStep == 0 ? hoodReadback<glm::vec4>(hoodBuffers.acceleration.buffer, hoodClothCount) : std::vector<glm::vec4>{};
+		double stepMaximum = 0.0, stepSum = 0.0;
+		for (uint32_t vertex = 0; vertex < hoodClothCount; ++vertex) {
+			const auto& expected = hoodGoldenPositions[static_cast<size_t>(hoodVerifyStep) * hoodClothCount + vertex];
+			for (uint32_t component = 0; component < 3; ++component) {
+				const double difference = std::abs(static_cast<double>(positions[vertex][component]) - (&expected.x)[component]);
+				stepMaximum = std::max(stepMaximum, difference); stepSum += difference;
+			}
+		}
+		hoodVerifyMaximum = std::max(hoodVerifyMaximum, stepMaximum);
+		hoodVerifyMeanSum += stepSum;
+		hoodVerifyValueCount += static_cast<uint64_t>(hoodClothCount) * 3;
+		hoodVerifyStepMaximums.push_back(stepMaximum);
+		hoodVerifyStepMeans.push_back(stepSum / (hoodClothCount * 3));
+		if (hoodVerifyStep == 0) {
+			double accelerationSum = 0.0;
+			for (uint32_t vertex = 0; vertex < hoodClothCount; ++vertex) for (uint32_t component = 0; component < 3; ++component) {
+				const double difference = std::abs(static_cast<double>(acceleration[vertex][component]) - (&hoodGoldenAcceleration[vertex].x)[component]);
+				hoodVerifyAccelerationMaximum = std::max(hoodVerifyAccelerationMaximum, difference);
+				accelerationSum += difference;
+			}
+			hoodVerifyAccelerationMean = accelerationSum / (hoodClothCount * 3);
+			const auto world = hoodReadback<uint32_t>(hoodBuffers.worldObstacle.buffer, hoodClothCount);
+			for (uint32_t vertex = 0; vertex < hoodClothCount; ++vertex) if (world[vertex] != hoodGoldenWorld[vertex]) ++hoodVerifyWorldMismatches;
+			auto dumpFloats = [&](const char* label, VkBuffer buffer, uint32_t count) {
+				const auto values = hoodReadback<float>(buffer, count);
+				const auto path = hoodVerifyOutput.parent_path() / (std::string("hood_debug_") + label + ".bin");
+				std::ofstream stream(path, std::ios::binary);
+				stream.write(reinterpret_cast<const char*>(values.data()), static_cast<std::streamsize>(values.size() * sizeof(float)));
+			};
+			dumpFloats("node_features", hoodBuffers.nodeFeatures.buffer, (hoodClothCount + hoodProxyCount) * 20);
+			dumpFloats("mesh_features", hoodBuffers.meshFeatures.buffer, hoodMeshEdgeCount * 12);
+			dumpFloats("world_direct_features", hoodBuffers.worldDirectFeatures.buffer, hoodClothCount * 9);
+			dumpFloats("world_inverse_features", hoodBuffers.worldInverseFeatures.buffer, hoodClothCount * 9);
+			dumpFloats("node_latent", hoodBuffers.nodeLatent[1].buffer, (hoodClothCount + hoodProxyCount) * 128);
+			std::cout << "Fine15 Vulkan step 1: position max=" << stepMaximum << " mean=" << stepSum / (hoodClothCount * 3)
+				<< " acceleration max=" << hoodVerifyAccelerationMaximum << " world mismatches=" << hoodVerifyWorldMismatches << "\n";
+		}
+		++hoodVerifyStep;
+		if (hoodVerifyStep == hoodGoldenSteps && !hoodVerifyWritten) {
+			const bool passed = hoodVerifyStepMaximums[0] <= 2.0e-4 && hoodVerifyStepMeans[0] <= 2.0e-5 && hoodVerifyMaximum <= 2.0e-3;
+			if (hoodVerifyOutput.has_parent_path()) std::filesystem::create_directories(hoodVerifyOutput.parent_path());
+			std::ofstream output(hoodVerifyOutput);
+			output << "{\n  \"passed\": " << (passed ? "true" : "false") << ",\n  \"steps\": " << hoodVerifyStep
+				<< ",\n  \"max_abs_error\": " << std::setprecision(10) << hoodVerifyMaximum
+				<< ",\n  \"mean_abs_error\": " << hoodVerifyMeanSum / hoodVerifyValueCount
+				<< ",\n  \"first_acceleration_max_abs_error\": " << hoodVerifyAccelerationMaximum
+				<< ",\n  \"first_acceleration_mean_abs_error\": " << hoodVerifyAccelerationMean
+				<< ",\n  \"first_world_edge_mismatches\": " << hoodVerifyWorldMismatches << ",\n  \"per_step\": [\n";
+			for (uint32_t step = 0; step < hoodVerifyStep; ++step) {
+				output << "    {\"step\": " << step + 1 << ", \"max_abs_error\": " << hoodVerifyStepMaximums[step]
+					<< ", \"mean_abs_error\": " << hoodVerifyStepMeans[step] << "}" << (step + 1 == hoodVerifyStep ? "\n" : ",\n");
+			}
+			output << "  ]\n}\n";
+			std::cout << "Fine15 Vulkan " << hoodVerifyStep << " step max=" << hoodVerifyMaximum << " mean=" << hoodVerifyMeanSum / hoodVerifyValueCount << "\n";
+			hoodVerifyWritten = true;
+			if (!passed) throw std::runtime_error("Fine15 Vulkan verification exceeded the one-step or ten-step error threshold");
+		}
+	}
+
+	void hoodRender()
+	{
+		VK_CHECK_RESULT(vkWaitForFences(device, 1, &waitFences[currentBuffer], VK_TRUE, UINT64_MAX));
+		hoodCollectTiming();
+		VK_CHECK_RESULT(vkResetFences(device, 1, &waitFences[currentBuffer]));
+		VulkanExampleBase::prepareFrame(false);
+		hoodAdvance();
+		hoodUpdateUniforms();
+		VkCommandBuffer command = drawCmdBuffers[currentBuffer];
+		auto begin = vks::initializers::commandBufferBeginInfo();
+		VK_CHECK_RESULT(vkBeginCommandBuffer(command, &begin));
+		hoodRecord(command);
+		VkClearValue clears[2]{}; clears[0].color = { {0.35f,0.60f,0.88f,1.0f} }; clears[1].depthStencil = {1.0f,0};
+		auto renderBegin = vks::initializers::renderPassBeginInfo(); renderBegin.renderPass = renderPass; renderBegin.framebuffer = frameBuffers[currentImageIndex];
+		renderBegin.renderArea.extent = { width,height }; renderBegin.clearValueCount = 2; renderBegin.pClearValues = clears;
+		vkCmdBeginRenderPass(command, &renderBegin, VK_SUBPASS_CONTENTS_INLINE);
+		const auto viewport = vks::initializers::viewport(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
+		const auto scissor = vks::initializers::rect2D(width, height, 0, 0); vkCmdSetViewport(command, 0, 1, &viewport); vkCmdSetScissor(command, 0, 1, &scissor);
+		vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.graphicsPipeline, 0, 1, &hood.graphicsSets[currentBuffer], 0, nullptr);
+		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.sky); vkCmdDraw(command, 3, 1, 0, 0);
+		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.character);
+		const VkBuffer characterBuffers[3]{ hoodBuffers.characterPosition.buffer, hoodBuffers.characterNormal.buffer, hoodBuffers.characterUv.buffer };
+		const VkDeviceSize offsets[3]{}; vkCmdBindVertexBuffers(command, 0, 3, characterBuffers, offsets);
+		vkCmdBindIndexBuffer(command, hoodBuffers.characterIndices.buffer, 0, VK_INDEX_TYPE_UINT32); vkCmdDrawIndexed(command, hoodCharacterIndexCount, 1, 0, 0, 0);
+		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.cloth); const VkBuffer clothBuffer = hoodBuffers.clothPosition.buffer; const VkDeviceSize zero = 0;
+		vkCmdBindVertexBuffers(command, 0, 1, &clothBuffer, &zero); vkCmdBindIndexBuffer(command, hoodBuffers.clothIndices.buffer, 0, VK_INDEX_TYPE_UINT32);
+		vkCmdDrawIndexed(command, hoodClothIndexCount, 1, 0, 0, 0);
+		drawUI(command); vkCmdEndRenderPass(command); VK_CHECK_RESULT(vkEndCommandBuffer(command));
+		VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		auto submit = vks::initializers::submitInfo(); submit.waitSemaphoreCount = 1; submit.pWaitSemaphores = &presentCompleteSemaphores[currentBuffer];
+		submit.pWaitDstStageMask = &waitStage; submit.commandBufferCount = 1; submit.pCommandBuffers = &command; submit.signalSemaphoreCount = 1;
+		submit.pSignalSemaphores = &renderCompleteSemaphores[currentImageIndex]; VK_CHECK_RESULT(vkQueueSubmit(queue, 1, &submit, waitFences[currentBuffer]));
+		if (hoodVerifyMode) {
+			VK_CHECK_RESULT(vkWaitForFences(device, 1, &waitFences[currentBuffer], VK_TRUE, UINT64_MAX));
+			hoodVerifyCurrentStep();
+		}
+		VulkanExampleBase::submitFrame(true);
+		if (hoodRequestReset) hoodRequestReset = false;
+		if (hoodSimulateFrame) {
+			hoodFrame = hoodRenderFrame;
+			hoodFirstStep = false;
+			++hoodCompletedSteps;
+			if (hoodPauseAfterSteps != 0 && hoodCompletedSteps >= hoodPauseAfterSteps) hoodPaused = true;
+		}
+	}
+
+	void hoodUI(vks::UIOverlay* overlay)
+	{
+		if (!overlay->header(hoodSolver == HoodToy2L ? "CH10032 + Toy GNN 10-16-3" : "CH10032 + HOOD Fine15")) return;
+		overlay->checkBox("Paused", &hoodPaused);
+		if (hoodSolver == HoodFine15) overlay->checkBox("Body collision projection", &hoodCollisionProjection);
+		if (overlay->button("Reset")) hoodRequestReset = true;
+		overlay->text(hoodFrameCount == 1 ? "Pose: static %s" : "Native animation: %s", hoodMotion.c_str());
+		if (hoodFrameCount > 1) overlay->text("Time: %.2f / %.2f s (%u/%u)", hoodFrame / float(hoodFps), (hoodFrameCount - 1) / float(hoodFps), hoodFrame, hoodFrameCount - 1);
+		overlay->text("Core bones: %u", hoodBoneCount);
+		overlay->text("Cloth: %u nodes, %u mesh edges", hoodClothCount, hoodMeshEdgeCount);
+		overlay->text("Collision proxy: %u vertices", hoodProxyCount);
+		overlay->text("Simulation steps: %u", hoodCompletedSteps);
+		if (hoodSolver == HoodToy2L) {
+			overlay->text("Toy model: 10 -> 16 -> 3, no XPBD/collision");
+			overlay->text("GPU skin %.3f, layer 0 %.3f ms", hoodTiming.skin, hoodTiming.features);
+			overlay->text("Layer 1 + integrate %.3f, total %.3f ms", hoodTiming.encoders[0], hoodTiming.total);
+		} else {
+			overlay->text("GPU skin %.3f, features/world %.3f ms", hoodTiming.skin, hoodTiming.features);
+			overlay->text("GPU encoders %.3f, 15 blocks %.3f ms", hoodTiming.encodeTotal(), hoodTiming.processorTotal());
+			overlay->text("Block 0 edge/node %.3f / %.3f ms", hoodTiming.edgeBlocks[0], hoodTiming.nodeBlocks[0]);
+			overlay->text("GPU integrate %.3f, total %.3f ms", hoodTiming.integrate, hoodTiming.total);
+		}
+		overlay->text("R: reset, P: pause");
+	}
+
+	void hoodDestroy()
+	{
+		#define HOOD_DESTROY_BUFFER(name) hoodBuffers.name.destroy()
+		HOOD_DESTROY_BUFFER(skinMatrices); HOOD_DESTROY_BUFFER(characterRestPosition); HOOD_DESTROY_BUFFER(characterRestNormal);
+		HOOD_DESTROY_BUFFER(characterBoneIndices); HOOD_DESTROY_BUFFER(characterBoneWeights); HOOD_DESTROY_BUFFER(characterPosition);
+		HOOD_DESTROY_BUFFER(characterNormal); HOOD_DESTROY_BUFFER(characterUv); HOOD_DESTROY_BUFFER(characterIndices);
+		HOOD_DESTROY_BUFFER(proxyRestPosition); HOOD_DESTROY_BUFFER(proxyRestNormal); HOOD_DESTROY_BUFFER(proxyBoneIndices); HOOD_DESTROY_BUFFER(proxyBoneWeights);
+		HOOD_DESTROY_BUFFER(proxyPosition); HOOD_DESTROY_BUFFER(proxyNormal); HOOD_DESTROY_BUFFER(proxyTarget);
+		HOOD_DESTROY_BUFFER(clothRestPosition); HOOD_DESTROY_BUFFER(clothBoneIndices); HOOD_DESTROY_BUFFER(clothBoneWeights); HOOD_DESTROY_BUFFER(pinTarget);
+		HOOD_DESTROY_BUFFER(pinMask); HOOD_DESTROY_BUFFER(mass); HOOD_DESTROY_BUFFER(clothPosition); HOOD_DESTROY_BUFFER(clothPrevious);
+		HOOD_DESTROY_BUFFER(effectivePosition); HOOD_DESTROY_BUFFER(acceleration); HOOD_DESTROY_BUFFER(clothTriangles); HOOD_DESTROY_BUFFER(clothIndices);
+		HOOD_DESTROY_BUFFER(meshSenders); HOOD_DESTROY_BUFFER(meshReceivers); HOOD_DESTROY_BUFFER(csrOffsets); HOOD_DESTROY_BUFFER(worldObstacle); HOOD_DESTROY_BUFFER(activeProxy); HOOD_DESTROY_BUFFER(nodeFeatures);
+		HOOD_DESTROY_BUFFER(meshFeatures); HOOD_DESTROY_BUFFER(worldDirectFeatures); HOOD_DESTROY_BUFFER(worldInverseFeatures);
+		HOOD_DESTROY_BUFFER(weights); HOOD_DESTROY_BUFFER(mlpTable); HOOD_DESTROY_BUFFER(normalizers); HOOD_DESTROY_BUFFER(toyWeights); HOOD_DESTROY_BUFFER(toyHidden);
+		for (uint32_t i=0;i<2;++i) { hoodBuffers.nodeLatent[i].destroy(); hoodBuffers.meshLatent[i].destroy(); hoodBuffers.worldDirectLatent[i].destroy(); hoodBuffers.worldInverseLatent[i].destroy(); }
+		#undef HOOD_DESTROY_BUFFER
+		for (uint32_t i=0;i<maxConcurrentFrames;++i) { hood.skinUniforms[i].destroy(); hood.featureUniforms[i].destroy(); hood.integrateUniforms[i].destroy(); hood.toyUniforms[i].destroy(); hood.graphicsUniforms[i].destroy(); vkDestroyQueryPool(device,hood.queryPools[i],nullptr); }
+		for (auto pipeline : {hood.skin,hood.features,hood.encode,hood.edge,hood.node,hood.integrate,hood.toyLayer0,hood.toyLayer1,hood.sky,hood.character,hood.cloth}) vkDestroyPipeline(device,pipeline,nullptr);
+		for (auto layout : {hood.skinPipeline,hood.featuresPipeline,hood.encodePipeline,hood.edgePipeline,hood.nodePipeline,hood.integratePipeline,hood.toyPipeline,hood.graphicsPipeline}) vkDestroyPipelineLayout(device,layout,nullptr);
+		for (auto layout : {hood.skinLayout,hood.featuresLayout,hood.encodeLayout,hood.edgeLayout,hood.nodeLayout,hood.integrateLayout,hood.toyLayout,hood.graphicsLayout}) vkDestroyDescriptorSetLayout(device,layout,nullptr);
+		vkDestroyDescriptorPool(device,hood.pool,nullptr);
+	}

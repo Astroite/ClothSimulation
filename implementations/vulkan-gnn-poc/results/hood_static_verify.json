@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "steps": 1,
+  "max_abs_error": 1.177191734e-06,
+  "mean_abs_error": 1.215487556e-08,
+  "first_acceleration_max_abs_error": 1.179054379e-06,
+  "first_acceleration_mean_abs_error": 1.417516895e-08,
+  "first_world_edge_mismatches": 0,
+  "per_step": [
+    {"step": 1, "max_abs_error": 1.177191734e-06, "mean_abs_error": 1.215487556e-08}
+  ]
+}

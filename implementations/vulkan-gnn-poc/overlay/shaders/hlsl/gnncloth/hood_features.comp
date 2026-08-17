@@ -1,0 +1,120 @@
+struct Params {
+    uint clothCount, proxyCount, triangleCount, meshEdgeCount;
+    uint embeddingOffset, firstStep, reserved0, reserved1;
+    float timestep, collisionRadius, material0, material1;
+    float material2, pad0, pad1, pad2;
+};
+cbuffer ubo : register(b20) { Params params; };
+
+[[vk::binding(0)]] StructuredBuffer<float4> clothPosition;
+[[vk::binding(1)]] StructuredBuffer<float4> clothPrevious;
+[[vk::binding(2)]] StructuredBuffer<float4> pinTarget;
+[[vk::binding(3)]] StructuredBuffer<uint> pinMask;
+// DXC gives StructuredBuffer<uint3> a 16-byte SPIR-V ArrayStride, while VCLTH
+// stores tightly packed uint32 triangle triplets (12 bytes). Use a scalar view
+// so the storage and index-buffer interpretations stay identical.
+[[vk::binding(4)]] StructuredBuffer<uint> clothTriangles;
+[[vk::binding(5)]] StructuredBuffer<uint> meshSenders;
+[[vk::binding(6)]] StructuredBuffer<uint> meshReceivers;
+[[vk::binding(7)]] StructuredBuffer<float4> clothRestPosition;
+[[vk::binding(8)]] StructuredBuffer<float> clothMass;
+[[vk::binding(9)]] StructuredBuffer<float4> proxyPosition;
+[[vk::binding(10)]] StructuredBuffer<float4> proxyTarget;
+[[vk::binding(11)]] StructuredBuffer<float4> proxyNormal;
+[[vk::binding(12)]] RWStructuredBuffer<uint> worldObstacle;
+[[vk::binding(13)]] RWStructuredBuffer<float> nodeFeatures;
+[[vk::binding(14)]] RWStructuredBuffer<float> meshFeatures;
+[[vk::binding(15)]] RWStructuredBuffer<float> worldDirectFeatures;
+[[vk::binding(16)]] RWStructuredBuffer<float> worldInverseFeatures;
+[[vk::binding(17)]] StructuredBuffer<float> weights;
+[[vk::binding(18)]] StructuredBuffer<float> normalizers;
+[[vk::binding(19)]] RWStructuredBuffer<float4> effectivePosition;
+[[vk::binding(21)]] RWStructuredBuffer<uint> activeProxy;
+
+float normalizeFeature(float value, uint meanOffset, uint stdOffset, uint index)
+{
+    return (value - normalizers[meanOffset + index]) / normalizers[stdOffset + index];
+}
+
+float3 clothNormal(uint vertex)
+{
+    float3 sum = 0.0;
+    [loop] for (uint triIndex = 0; triIndex < params.triangleCount; ++triIndex) {
+        const uint3 ids = uint3(clothTriangles[triIndex * 3 + 0], clothTriangles[triIndex * 3 + 1], clothTriangles[triIndex * 3 + 2]);
+        if (ids.x != vertex && ids.y != vertex && ids.z != vertex) continue;
+        const float3 a = (pinMask[ids.x] != 0 ? pinTarget[ids.x] : clothPosition[ids.x]).xyz;
+        const float3 b = (pinMask[ids.y] != 0 ? pinTarget[ids.y] : clothPosition[ids.y]).xyz;
+        const float3 c = (pinMask[ids.z] != 0 ? pinTarget[ids.z] : clothPosition[ids.z]).xyz;
+        const float3 e0 = b - a, e1 = c - b, e2 = a - c;
+        sum += cross(e0, e1) + cross(e1, e2) + cross(e2, e0);
+    }
+    const float lengthSquared = dot(sum, sum);
+    return lengthSquared > 1.0e-20 ? sum * rsqrt(lengthSquared) : float3(0.0, 1.0, 0.0);
+}
+
+void writeNode(uint node, float3 velocity, uint type, float3 normal, float logMass, float3 material)
+{
+    float raw[17];
+    raw[0] = velocity.x; raw[1] = velocity.y; raw[2] = velocity.z;
+    [unroll] for (uint i = 0; i < 9; ++i) raw[3 + i] = weights[params.embeddingOffset + type * 9 + i];
+    raw[12] = normal.x; raw[13] = normal.y; raw[14] = normal.z;
+    raw[15] = params.timestep; raw[16] = logMass;
+    [unroll] for (uint j = 0; j < 17; ++j) nodeFeatures[node * 20 + j] = normalizeFeature(raw[j], 0, 17, j);
+    nodeFeatures[node * 20 + 17] = material.x;
+    nodeFeatures[node * 20 + 18] = material.y;
+    nodeFeatures[node * 20 + 19] = material.z;
+}
+
+[numthreads(128, 1, 1)]
+void main(uint3 dispatchId : SV_DispatchThreadID)
+{
+    const uint index = dispatchId.x;
+    if (index < params.clothCount) {
+        const bool pinned = pinMask[index] != 0;
+        const float3 current = pinned ? pinTarget[index].xyz : clothPosition[index].xyz;
+        const float3 previous = pinned ? clothPosition[index].xyz : clothPrevious[index].xyz;
+        effectivePosition[index] = float4(current, 1.0);
+        writeNode(index, current - previous, pinned ? 3 : 0, clothNormal(index), log(max(clothMass[index], 1.0e-20)),
+            float3(params.material0, params.material1, params.material2));
+
+        float minimumSquared = params.collisionRadius * params.collisionRadius;
+        uint nearest = 0xffffffffu;
+        [loop] for (uint proxy = 0; proxy < params.proxyCount; ++proxy) {
+            const float3 difference = current - proxyPosition[proxy].xyz;
+            const float squared = dot(difference, difference);
+            if (squared < minimumSquared) { minimumSquared = squared; nearest = proxy; }
+        }
+        worldObstacle[index] = nearest;
+        if (nearest != 0xffffffffu) {
+            uint ignored;
+            InterlockedOr(activeProxy[nearest], 1u, ignored);
+            const float3 relativeCurrent = current - proxyPosition[nearest].xyz;
+            const float3 relativeTarget = current - proxyTarget[nearest].xyz;
+            const float direct[9] = { relativeCurrent.x, relativeCurrent.y, relativeCurrent.z, length(relativeCurrent),
+                relativeTarget.x, relativeTarget.y, relativeTarget.z, length(relativeTarget), params.timestep };
+            [unroll] for (uint w = 0; w < 9; ++w) {
+                worldDirectFeatures[index * 9 + w] = normalizeFeature(direct[w], 52, 61, w);
+                const bool vectorComponent = (w < 3) || (w >= 4 && w < 7);
+                worldInverseFeatures[index * 9 + w] = normalizeFeature(vectorComponent ? -direct[w] : direct[w], 52, 61, w);
+            }
+        }
+    }
+    if (index < params.proxyCount) {
+        writeNode(params.clothCount + index, proxyTarget[index].xyz - proxyPosition[index].xyz, 1, normalize(proxyNormal[index].xyz), -1.0, -1.0.xxx);
+    }
+    if (index < params.meshEdgeCount) {
+        const uint sender = meshSenders[index], receiver = meshReceivers[index];
+        // Mesh-edge invocations may execute before the node invocations in another
+        // workgroup. Read the stable source buffers directly instead of depending
+        // on effectivePosition written earlier in this same dispatch.
+        const float3 senderPosition = (pinMask[sender] != 0 ? pinTarget[sender] : clothPosition[sender]).xyz;
+        const float3 receiverPosition = (pinMask[receiver] != 0 ? pinTarget[receiver] : clothPosition[receiver]).xyz;
+        const float3 relative = senderPosition - receiverPosition;
+        const float3 relativeRest = clothRestPosition[sender].xyz - clothRestPosition[receiver].xyz;
+        const float raw[9] = { relative.x, relative.y, relative.z, length(relative), relativeRest.x, relativeRest.y, relativeRest.z, length(relativeRest), params.timestep };
+        [unroll] for (uint m = 0; m < 9; ++m) meshFeatures[index * 12 + m] = normalizeFeature(raw[m], 34, 43, m);
+        meshFeatures[index * 12 + 9] = params.material0;
+        meshFeatures[index * 12 + 10] = params.material1;
+        meshFeatures[index * 12 + 11] = params.material2;
+    }
+}

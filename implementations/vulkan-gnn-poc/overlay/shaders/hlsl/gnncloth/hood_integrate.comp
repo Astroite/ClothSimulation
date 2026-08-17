@@ -1,0 +1,50 @@
+#include "hood_mlp.hlsli"
+
+struct Params { uint clothCount, firstStep, collisionProjection, reserved; };
+cbuffer ubo : register(b13) { Params params; };
+[[vk::binding(0)]] StructuredBuffer<float> weights;
+[[vk::binding(1)]] StructuredBuffer<uint4> mlpTable;
+[[vk::binding(2)]] StructuredBuffer<float> normalizers;
+[[vk::binding(3)]] StructuredBuffer<float> nodeLatent;
+[[vk::binding(4)]] RWStructuredBuffer<float4> clothPosition;
+[[vk::binding(5)]] RWStructuredBuffer<float4> clothPrevious;
+[[vk::binding(6)]] StructuredBuffer<float4> effectivePosition;
+[[vk::binding(7)]] StructuredBuffer<float4> pinTarget;
+[[vk::binding(8)]] StructuredBuffer<uint> pinMask;
+[[vk::binding(9)]] RWStructuredBuffer<float4> accelerationOut;
+[[vk::binding(10)]] StructuredBuffer<uint> worldObstacle;
+[[vk::binding(11)]] StructuredBuffer<float4> proxyTarget;
+[[vk::binding(12)]] StructuredBuffer<float4> proxyNormal;
+
+[numthreads(128, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint vertex = groupId.x;
+    if (vertex >= params.clothCount) return;
+    const MlpDesc mlp = loadMlp(mlpTable, 48);
+    hoodScratchA[lane] = nodeLatent[vertex * 128 + lane];
+    GroupMemoryBarrierWithGroupSync();
+    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w0, mlp.b0, lane, 128, true), 0.0);
+    GroupMemoryBarrierWithGroupSync();
+    hoodScratchA[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, false), 0.0);
+    GroupMemoryBarrierWithGroupSync();
+    if (lane < 3) hoodScratchB[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, true) * normalizers[73 + lane] + normalizers[70 + lane];
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0) {
+        const float3 acceleration = float3(hoodScratchB[0], hoodScratchB[1], hoodScratchB[2]);
+        const float3 effective = effectivePosition[vertex].xyz;
+        const float3 oldPosition = clothPosition[vertex].xyz;
+        const float3 oldPrevious = clothPrevious[vertex].xyz;
+        float3 predicted = effective + (effective - (pinMask[vertex] != 0 ? oldPosition : oldPrevious) + acceleration);
+        const uint obstacle = worldObstacle[vertex];
+        if (params.collisionProjection != 0 && pinMask[vertex] == 0 && obstacle != 0xffffffffu) {
+            const float3 normal = normalize(proxyNormal[obstacle].xyz);
+            const float signedDistance = dot(predicted - proxyTarget[obstacle].xyz, normal);
+            if (signedDistance < 0.0) predicted -= signedDistance * normal;
+        }
+        if (pinMask[vertex] != 0) predicted = pinTarget[vertex].xyz;
+        clothPrevious[vertex] = float4(params.firstStep != 0 ? predicted : effective, 1.0);
+        clothPosition[vertex] = float4(predicted, 1.0);
+        accelerationOut[vertex] = float4(acceleration, 0.0);
+    }
+}

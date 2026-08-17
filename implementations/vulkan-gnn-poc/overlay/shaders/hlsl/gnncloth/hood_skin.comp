@@ -1,0 +1,92 @@
+struct Params {
+    uint frameIndex, nextFrameIndex, boneCount, characterCount;
+    uint proxyCount, clothCount, resetState, renderFrameIndex;
+};
+cbuffer ubo : register(b21) { Params params; };
+
+[[vk::binding(0)]] StructuredBuffer<float4> skinMatrices;
+[[vk::binding(1)]] StructuredBuffer<float4> characterRestPosition;
+[[vk::binding(2)]] StructuredBuffer<float4> characterRestNormal;
+[[vk::binding(3)]] StructuredBuffer<uint4> characterBoneIndices;
+[[vk::binding(4)]] StructuredBuffer<float4> characterBoneWeights;
+[[vk::binding(5)]] RWStructuredBuffer<float4> characterPosition;
+[[vk::binding(6)]] RWStructuredBuffer<float4> characterNormal;
+[[vk::binding(7)]] StructuredBuffer<float4> proxyRestPosition;
+[[vk::binding(8)]] StructuredBuffer<float4> proxyRestNormal;
+[[vk::binding(9)]] StructuredBuffer<uint4> proxyBoneIndices;
+[[vk::binding(10)]] StructuredBuffer<float4> proxyBoneWeights;
+[[vk::binding(11)]] RWStructuredBuffer<float4> proxyPosition;
+[[vk::binding(12)]] RWStructuredBuffer<float4> proxyNormal;
+[[vk::binding(13)]] RWStructuredBuffer<float4> proxyTarget;
+[[vk::binding(14)]] StructuredBuffer<float4> clothRestPosition;
+[[vk::binding(15)]] StructuredBuffer<uint4> clothBoneIndices;
+[[vk::binding(16)]] StructuredBuffer<float4> clothBoneWeights;
+[[vk::binding(17)]] RWStructuredBuffer<float4> pinTarget;
+[[vk::binding(18)]] RWStructuredBuffer<float4> clothPosition;
+[[vk::binding(19)]] RWStructuredBuffer<float4> clothPrevious;
+[[vk::binding(20)]] StructuredBuffer<uint> pinMask;
+
+float3 transformPosition(uint frame, uint bone, float3 position)
+{
+    const uint base = (frame * params.boneCount + bone) * 3;
+    const float4 p = float4(position, 1.0);
+    return float3(dot(skinMatrices[base + 0], p), dot(skinMatrices[base + 1], p), dot(skinMatrices[base + 2], p));
+}
+
+float3 transformNormal(uint frame, uint bone, float3 normal)
+{
+    const uint base = (frame * params.boneCount + bone) * 3;
+    return float3(dot(skinMatrices[base + 0].xyz, normal), dot(skinMatrices[base + 1].xyz, normal), dot(skinMatrices[base + 2].xyz, normal));
+}
+
+float3 skinPosition(uint frame, float3 position, StructuredBuffer<uint4> indices, StructuredBuffer<float4> weights, uint vertex)
+{
+    float3 result = 0.0;
+    [unroll] for (uint block = 0; block < 3; ++block) {
+        const uint4 bone = indices[vertex * 3 + block];
+        const float4 weight = weights[vertex * 3 + block];
+        result += transformPosition(frame, bone.x, position) * weight.x;
+        result += transformPosition(frame, bone.y, position) * weight.y;
+        result += transformPosition(frame, bone.z, position) * weight.z;
+        result += transformPosition(frame, bone.w, position) * weight.w;
+    }
+    return result;
+}
+
+float3 skinNormal(uint frame, float3 normal, StructuredBuffer<uint4> indices, StructuredBuffer<float4> weights, uint vertex)
+{
+    float3 result = 0.0;
+    [unroll] for (uint block = 0; block < 3; ++block) {
+        const uint4 bone = indices[vertex * 3 + block];
+        const float4 weight = weights[vertex * 3 + block];
+        result += transformNormal(frame, bone.x, normal) * weight.x;
+        result += transformNormal(frame, bone.y, normal) * weight.y;
+        result += transformNormal(frame, bone.z, normal) * weight.z;
+        result += transformNormal(frame, bone.w, normal) * weight.w;
+    }
+    return normalize(result);
+}
+
+[numthreads(128, 1, 1)]
+void main(uint3 dispatchId : SV_DispatchThreadID)
+{
+    const uint index = dispatchId.x;
+    if (index < params.characterCount) {
+        characterPosition[index] = float4(skinPosition(params.renderFrameIndex, characterRestPosition[index].xyz, characterBoneIndices, characterBoneWeights, index), 1.0);
+        characterNormal[index] = float4(skinNormal(params.renderFrameIndex, characterRestNormal[index].xyz, characterBoneIndices, characterBoneWeights, index), 0.0);
+    }
+    if (index < params.proxyCount) {
+        proxyPosition[index] = float4(skinPosition(params.frameIndex, proxyRestPosition[index].xyz, proxyBoneIndices, proxyBoneWeights, index), 1.0);
+        proxyNormal[index] = float4(skinNormal(params.frameIndex, proxyRestNormal[index].xyz, proxyBoneIndices, proxyBoneWeights, index), 0.0);
+        proxyTarget[index] = float4(skinPosition(params.nextFrameIndex, proxyRestPosition[index].xyz, proxyBoneIndices, proxyBoneWeights, index), 1.0);
+    }
+    if (index < params.clothCount) {
+        const float3 currentTarget = skinPosition(params.frameIndex, clothRestPosition[index].xyz, clothBoneIndices, clothBoneWeights, index);
+        const float3 nextTarget = skinPosition(params.nextFrameIndex, clothRestPosition[index].xyz, clothBoneIndices, clothBoneWeights, index);
+        pinTarget[index] = float4(nextTarget, 1.0);
+        if (params.resetState != 0) {
+            clothPosition[index] = float4(currentTarget, 1.0);
+            clothPrevious[index] = float4(currentTarget, 1.0);
+        }
+    }
+}

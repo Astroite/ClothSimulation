@@ -7,6 +7,7 @@
 
 #include "vulkanexamplebase.h"
 #include "vgnn_format.h"
+#include "fine15_gpu_layout.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -201,6 +202,12 @@ public:
 	vgnn::Model model;
 	vgnn::GoldenCase golden;
 
+// The real-character branch is kept in an in-class include so it can reuse the
+// sample base's swapchain/UI, percentile and benchmark helpers without exposing
+// them through another API. Its cross-frame state dependency, static-step capture
+// and Y-up projection are isolated from the regular-grid toy sample.
+#include "hood_runtime.inl"
+
 	static bool hasArgument(const char* name)
 	{
 		return std::find_if(args.begin(), args.end(), [=](const char* value) { return std::strcmp(value, name) == 0; }) != args.end();
@@ -216,6 +223,24 @@ public:
 
 	VulkanExample() : VulkanExampleBase()
 	{
+		hoodStaticBenchmarkMode = hasArgument("--hood-static-benchmark");
+		const std::string realSolverName = argumentValue("--solver", "toy");
+		hoodSolver = realSolverName == "toy2l" ? HoodToy2L : HoodFine15;
+		realSceneMode = argumentValue("--scene", "grid") == "ch10032" || realSolverName == "fine15" || realSolverName == "toy2l";
+		hoodAssetRoot = argumentValue("--asset-root", "");
+		hoodMotion = argumentValue("--motion", hoodStaticBenchmarkMode ? "ch10032_tpose" : "ch10032_sprint");
+		hoodModelPath = argumentValue("--hood-model", "");
+		hoodToyModelPath = argumentValue("--toy-model", "");
+		hoodVerifyMode = hasArgument("--hood-verify");
+		if (hoodVerifyMode && hoodSolver != HoodFine15) throw std::runtime_error("--hood-verify is only defined for Fine15 golden rollouts");
+		hoodCollisionProjection = hasArgument("--hood-collision-projection");
+		hoodGoldenPath = argumentValue("--hood-golden", "");
+		hoodVerifyOutput = argumentValue("--hood-verify-output", "hood_verify.json");
+		hoodStaticBenchmarkOutput = argumentValue("--hood-benchmark-output", hoodSolver == HoodToy2L ? "hood_static_toy2l_timing.csv" : "hood_static_timing.csv");
+		hoodStaticBenchmarkWarmup = static_cast<uint32_t>(std::strtoul(argumentValue("--hood-benchmark-warmup", "5").c_str(), nullptr, 10));
+		hoodStaticBenchmarkTarget = static_cast<uint32_t>(std::strtoul(argumentValue("--hood-benchmark-samples", "20").c_str(), nullptr, 10));
+		hoodPauseAfterSteps = static_cast<uint32_t>(std::strtoul(argumentValue("--hood-pause-after", "0").c_str(), nullptr, 10));
+		if (hoodStaticBenchmarkMode && hoodStaticBenchmarkTarget == 0) throw std::runtime_error("--hood-benchmark-samples must be positive");
 		verifyMode = hasArgument("--gnn-verify");
 		gnnBenchmarkMode = hasArgument("--gnn-benchmark");
 		const uint32_t requestedGrid = static_cast<uint32_t>(std::strtoul(argumentValue("--gnn-grid", "32").c_str(), nullptr, 10));
@@ -254,7 +279,34 @@ public:
 			setupConsole("Vulkan GNN cloth");
 #endif
 		}
-		title = "Vulkan GNN cloth PoC";
+		if (hoodVerifyMode) {
+			benchmark.active = true;
+			benchmark.warmup = 0;
+			benchmark.duration = 600;
+			// One reset-only frame followed by ten deterministic 30 Hz steps.
+			benchmark.outputFrames = 12;
+			settings.overlay = false;
+			vks::tools::errorModeSilent = true;
+#if defined(_WIN32)
+			setupConsole("CH10032 Fine15 verification");
+#endif
+		}
+		if (hoodStaticBenchmarkMode) {
+			benchmark.active = true;
+			benchmark.warmup = 0;
+			benchmark.duration = 600;
+			// One reset-only frame plus enough in-flight frames to make every
+			// requested GPU query result visible before the destructor writes CSV.
+			benchmark.outputFrames = static_cast<int32_t>(1 + hoodStaticBenchmarkWarmup + hoodStaticBenchmarkTarget + maxConcurrentFrames + 2);
+			settings.overlay = false;
+			vks::tools::errorModeSilent = true;
+#if defined(_WIN32)
+			setupConsole(hoodSolver == HoodToy2L ? "CH10032 Toy2L static T-pose benchmark" : "CH10032 Fine15 static T-pose benchmark");
+#endif
+		}
+		title = hoodSolver == HoodToy2L && realSceneMode ? "CH10032 + Toy GNN 10-16-3 Vulkan cloth"
+			: (hoodStaticBenchmarkMode ? "CH10032 + HOOD Fine15 static T-pose benchmark"
+			: (realSceneMode ? "CH10032 + HOOD Fine15 Vulkan cloth" : "Vulkan GNN cloth PoC"));
 		camera.type = Camera::CameraType::lookat;
 		camera.setPerspective(60.0f, static_cast<float>(width) / static_cast<float>(height), 0.1f, 512.0f);
 		camera.setRotation(glm::vec3(-30.0f, -45.0f, 0.0f));
@@ -265,6 +317,11 @@ public:
 	{
 		if (!device) return;
 		vkDeviceWaitIdle(device);
+		if (realSceneMode) {
+			if (hoodStaticBenchmarkMode) hoodWriteStaticBenchmarkCsv();
+			hoodDestroy();
+			return;
+		}
 		if (gnnBenchmarkMode) writeBenchmarkCsv();
 
 		graphics.indices.destroy();
@@ -797,6 +854,11 @@ public:
 	void prepare() override
 	{
 		VulkanExampleBase::prepare();
+		if (realSceneMode) {
+			hoodPrepare();
+			prepared = true;
+			return;
+		}
 		dedicatedComputeQueue = vulkanDevice->queueFamilyIndices.graphics != vulkanDevice->queueFamilyIndices.compute;
 		loadModelAndState();
 		prepareBuffers();
@@ -1202,6 +1264,10 @@ public:
 	void render() override
 	{
 		if (!prepared) return;
+		if (realSceneMode) {
+			hoodRender();
+			return;
+		}
 		VK_CHECK_RESULT(vkWaitForFences(device, 1, &compute.fences[currentBuffer], VK_TRUE, UINT64_MAX));
 		collectTimestamps(currentBuffer);
 		VK_CHECK_RESULT(vkResetFences(device, 1, &compute.fences[currentBuffer]));
@@ -1299,6 +1365,10 @@ public:
 
 	void keyPressed(uint32_t keyCode) override
 	{
+		if (realSceneMode) {
+			if (keyCode == 0x52) hoodRequestReset = true;
+			return;
+		}
 		// The upstream base does not define symbolic G/R key constants on Windows.
 		if (keyCode == 0x47) solver = solver == GNN ? MassSpring : GNN;
 		if (keyCode == 0x52) {
@@ -1309,6 +1379,10 @@ public:
 
 	void OnUpdateUIOverlay(vks::UIOverlay* overlay) override
 	{
+		if (realSceneMode) {
+			hoodUI(overlay);
+			return;
+		}
 		if (!overlay->header("GNN cloth")) return;
 		if (overlay->comboBox("Solver", &solver, { "Mass spring", "GNN 10-16-3" })) resetRequested = true;
 		overlay->checkBox("Paused", &paused);

@@ -1,0 +1,5 @@
+device,driver_version,driver_raw,motion,solver,cloth_nodes,directed_mesh_edges,proxy_vertices,samples,stage,mean_ms,min_ms,p95_ms,max_ms
+"NVIDIA GeForce RTX 4060 Ti",596.36.0.0,2500395008,ch10032_tpose,toy2l,1377,7894,4096,200,skin,0.036494,0.021632,0.057696,0.062304
+"NVIDIA GeForce RTX 4060 Ti",596.36.0.0,2500395008,ch10032_tpose,toy2l,1377,7894,4096,200,toy_layer0,0.009768,0.007968,0.011264,0.012288
+"NVIDIA GeForce RTX 4060 Ti",596.36.0.0,2500395008,ch10032_tpose,toy2l,1377,7894,4096,200,toy_layer1_integrate,0.004826,0.004032,0.005120,0.006144
+"NVIDIA GeForce RTX 4060 Ti",596.36.0.0,2500395008,ch10032_tpose,toy2l,1377,7894,4096,200,total,0.055194,0.039040,0.077696,0.082528

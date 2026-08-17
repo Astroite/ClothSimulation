@@ -1,8 +1,10 @@
 # Vulkan GNN 最小布料验证
 
-这个 PoC 打通以下固定链路：
+这个 PoC 现在包含两条可切换链路：
 
 `纯 PyTorch 训练 → VGNN v1 固定 FP32 权重 → HLSL Compute → SPIR-V → Vulkan 常驻推理 → 顶点缓冲直接绘制`
+
+`CH10032 原生 AnimSequence → 45 根核心骨骼 GPU LBS → HOOD Fine15 → Vulkan 直接绘制角色与裙装`
 
 渲染、ping-pong 缓冲和跨队列同步以 MIT 许可的 Sascha Willems
 `computecloth` 为基础。bootstrap 只获取锁定 commit，并把本目录 overlay
@@ -32,12 +34,22 @@ checker 材质和天空均为程序生成，所以不需要 `Vulkan-Assets`。
 - 原始 mass-spring 路径保留，UI 可切换求解器、暂停、重置和风力；`G` 切换，`R` 重置，`P` 暂停。
 - `--gnn-verify` 只在验证模式回读：检查黄金单步、1200 帧健康状态，以及 600 帧后的重置回放。
 - `--gnn-benchmark` 预热 200 帧、采集 1000 帧 timestamp，正常渲染和 benchmark 均无 host readback。
+- 真实角色路径使用 `AS_C10032_ArmedSprint_Skirt`，直接从
+  `E:\Main\Projects\Z2Game\Content\Developers\jinzhao\AICloth\CH_10032\Animation`
+  导出；不再使用 SMPL/AMASS 或重新重定向动画。动画为 62 帧、30 Hz、2.03 秒，保留 Root Motion。
+- 离线烘焙把角色网格引用的 705 根源骨骼折叠为 45 根核心/形变骨骼，保留每顶点最多 12 个 LBS 影响；
+  面部、手指、头发、socket 和次级骨骼权重合并到最近的保留祖先。
+- 真实裙装为 1,377 顶点、2,570 三角形、7,894 条有向 mesh edge，腰部 72 点持续跟随角色；
+  身体碰撞使用 4,096 点下半身代理。可选碰撞投影只沿最近代理法线推出穿透，不改变默认 Fine15 黄金结果。
+- Fine15 为官方单层图基线：节点/mesh edge/world edge 输入分别为 20/12/9 维，128 维 latent，
+  15 次 GraphNet 消息传递，输出 3 维加速度。FP32 权重、LayerNorm、NodeType embedding 和 normalizer
+  打包为严格校验的 `VHOOD v1`；正常帧无 CPU readback。
 
 ## 先决条件
 
 当前首轮目标是 Windows x64。需要 Vulkan SDK（含 DXC 和 SPIR-V tools）、
-CMake、Visual Studio 2026 C++ 工具链和 Python 3.13。已提交的权重使 PyTorch
-不成为构建或运行前置条件；仅在重训时需要。
+CMake、Visual Studio 2026 C++ 工具链。Toy 权重已提交；CH10032 离线转换额外需要
+Unreal Editor、Blender 4.5、`uv` 和 Python 3.11/PyTorch。运行时不解析 FBX、UAsset、`.pth` 或 USD。
 
 ## 一键 bootstrap 与构建
 
@@ -66,6 +78,72 @@ GNN 模式下可以把 `XPBD iterations` 在 0–16 间调节，并分别调整 
 规模在启动时选择，以避免在交互帧中重建全部 Vulkan 资源。`Moving sphere`
 可随时关闭；暂停会同时停止布料和球体，重置会把运动相位归零。
 
+## CH10032 原生动画 + HOOD Fine15
+
+首次准备（下载缓存与生成资产均位于被忽略的 `.work/`）：
+
+```powershell
+uv sync --python 3.11
+.\tools\fetch_hood_fine15.ps1
+.\tools\bake_real_scene.ps1
+.\build.ps1
+```
+
+`bake_real_scene.ps1` 通过 Unreal 内建 AnimSequence FBX exporter 导出
+`/Game/Developers/jinzhao/AICloth/CH_10032/Animation/04_Sprint/AS_C10032_ArmedSprint_Skirt`，
+然后由 Blender 严格按 30 Hz 烘焙 `VCHAR v1`、`VANIM v1` 和 `VCLTH v2`，并生成完整 Python Fine15 黄金 rollout。
+可用 `-AnimAsset` 和 `-Motion` 指向同目录下的其他 CH10032 原生动画。
+
+要排除动画与 Root Motion 的干扰，可直接烘焙项目中的原生 T-Pose。`-StaticPose`
+会把 `VANIM` 严格压成一个采样帧；角色、碰撞代理和 72 个腰部目标保持静止，
+Fine15 布料仍以首步 `1/3 s`、后续 `1/30 s` 连续自回归：
+
+```powershell
+.\tools\bake_tpose_scene.ps1
+.\run.ps1 -StaticPose
+```
+
+同一 T-Pose 和真实裙装也可以调用最初的 `10→16→3` 两层 Gather GNN。运行时会把
+Y-up 向量转换到该模型训练时的 +Y-down 坐标，但不额外添加 XPBD 或身体碰撞：
+
+```powershell
+.\run.ps1 -StaticPose -Solver Toy2L
+.\benchmark_hood_static.ps1 -Solver Toy2L -Warmup 50 -Samples 200
+```
+
+可用固定模拟步数生成可比较截图：
+
+```powershell
+.\capture_screenshot.ps1 -Scene CH10032 -Motion ch10032_tpose -Solver Fine15 -SimulationSteps 10 -WarmupMilliseconds 8000
+.\capture_screenshot.ps1 -Scene CH10032 -Motion ch10032_tpose -Solver Toy2L -SimulationSteps 10 -WarmupMilliseconds 1500
+```
+
+两种模型的性能和第 10 步视觉对比见
+[`results/HOOD_MODEL_COMPARISON.md`](results/HOOD_MODEL_COMPARISON.md)。
+
+启动真实角色：
+
+```powershell
+.\run.ps1 -Scene CH10032 -Motion ch10032_sprint -Solver Fine15
+# 可选的非黄金后处理：
+.\run.ps1 -Scene CH10032 -Motion ch10032_sprint -Solver Fine15 -CollisionProjection
+```
+
+相机跟随 `Root_M`；`P` 暂停/继续，`R` 复位，动画自动循环。UI 显示动画帧、核心骨骼数、
+角色/布料/代理规模，以及蒙皮、特征/世界边、encoder、15 层消息传递、积分和总 GPU 时间。
+
+静态 T-Pose 的逐阶段 GPU benchmark：
+
+```powershell
+.\benchmark_hood_static.ps1 -Warmup 5 -Samples 20
+```
+
+脚本启用 Khronos validation，输出 38 个 Vulkan timestamp 聚合到
+`results/hood_static_timing.csv`：蒙皮、特征/世界边、4 个 encoder、15 个 block 各自的
+edge/node update、decoder/积分和总时间。时间区间包含阶段间必要的 compute barrier，
+但不包含 CPU 提交、绘制和 present。实测表与结论见
+[`results/HOOD_STATIC_RESULTS.md`](results/HOOD_STATIC_RESULTS.md)。
+
 ## 验证
 
 ```powershell
@@ -77,6 +155,22 @@ GNN 模式下可以把 `XPBD iterations` 在 0–16 间调节，并分别调整 
 synchronization validation。交互 smoke test 会先让移动球与 GNN/XPBD 布料接触
 2 秒，再切换并重置两种 solver。
 结果写入 `results/gnn_verify.json` 与 `results/validation_output.txt`。
+
+真实角色链路的验证命令为：
+
+```powershell
+.\verify_hood.ps1
+```
+
+它只在验证模式回读，严格比较 Python rollout，并同时开启 Khronos validation 与 synchronization validation。
+数值与 validation 日志分别写到 `results/hood_verify.json` 和 `results/hood_validation_output.txt`。
+当前 RTX 4060 Ti 实测：第一步位置最大/平均误差 `2.38e-7 / 1.50e-8`，第一步加速度最大误差
+`1.92e-7`；10 步最大/平均误差 `1.32e-4 / 1.93e-7`，世界边映射 0 个不匹配。
+可用 `.\capture_screenshot.ps1 -Scene CH10032 -WarmupMilliseconds 3000` 保存动画中间帧；
+详细资产、时间和视觉结论见 [`results/HOOD_RESULTS.md`](results/HOOD_RESULTS.md)。
+
+静态姿态可用 `.\verify_hood.ps1 -Motion ch10032_tpose` 验证，结果写到
+`results/hood_static_verify.json`，避免覆盖原生 sprint 的十步结果。
 
 当前 RTX 4060 Ti 实测：`max_abs=1.907348633e-06`、
 `mean_abs=3.117110078e-07`、健康异常 0、重置回放差 0。1200 帧检查同时报告
@@ -134,6 +228,7 @@ CRC32。`model.json` 额外保存训练参数和 SHA-256。
 - `Assets/`：处理后的布料网格、精选人体动作样本和 CH10032 身体参考；
   资产来源、用途及再分发限制见 [`Assets/README.md`](Assets/README.md)。
 - `model/`：训练、参考推理、格式实现和已提交权重/黄金数据。
+- `real_scene/`：严格二进制格式、纯 PyTorch Fine15 与 CH10032 参考运行时。
 - `overlay/`：新增 Vulkan 样例和 HLSL/SPIR-V。
 - `tools/`：shader 与本机构建包装器。
 - `tests/`：不依赖 Vulkan 的 C++ 格式加载器测试。

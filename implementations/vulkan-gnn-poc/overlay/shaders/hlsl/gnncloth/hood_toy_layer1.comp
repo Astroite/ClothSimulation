@@ -1,0 +1,88 @@
+// Original 16->3 Gather layer plus unclothed semi-implicit integration.
+// No Fine15 world edges, body collision projection or XPBD are added here.
+
+#include "vgnn_weights.hlsli"
+
+struct Params {
+    uint clothCount;
+    float timestep;
+    float maxSpeed;
+    float maxAcceleration;
+    float4 externalAcceleration;
+};
+cbuffer ubo : register(b9) { Params params; };
+[[vk::binding(0)]] RWStructuredBuffer<float4> clothPosition;
+[[vk::binding(1)]] RWStructuredBuffer<float4> clothPrevious;
+[[vk::binding(2)]] StructuredBuffer<float4> restTarget;
+[[vk::binding(3)]] StructuredBuffer<uint> pinMask;
+[[vk::binding(4)]] StructuredBuffer<uint> csrOffsets;
+[[vk::binding(5)]] StructuredBuffer<uint> csrNeighbors;
+[[vk::binding(6)]] StructuredBuffer<float> weights;
+[[vk::binding(7)]] RWStructuredBuffer<float4> hiddenState;
+[[vk::binding(8)]] RWStructuredBuffer<float4> accelerationOut;
+
+groupshared float neighborHidden[VGNN_HIDDEN_DIM];
+groupshared float predictedAcceleration[VGNN_OUTPUT_DIM];
+
+float hiddenValue(uint vertex, uint channel)
+{
+    return hiddenState[vertex * 4 + channel / 4][channel % 4];
+}
+
+float3 clampMagnitude(float3 value, float maximum)
+{
+    const float magnitude = length(value);
+    return magnitude > maximum && magnitude > 0.0 ? value * (maximum / magnitude) : value;
+}
+
+[numthreads(32, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint vertex = groupId.x;
+    if (vertex >= params.clothCount) return;
+    if (lane < VGNN_HIDDEN_DIM) {
+        const uint begin = csrOffsets[vertex];
+        const uint end = csrOffsets[vertex + 1];
+        float sum = 0.0;
+        for (uint edge = begin; edge < end; ++edge) sum += hiddenValue(csrNeighbors[edge], lane);
+        neighborHidden[lane] = sum / max(float(end - begin), 1.0);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (lane < VGNN_OUTPUT_DIM) {
+        float value = weights[VGNN_BIAS1_OFFSET + lane];
+        [unroll] for (uint channel = 0; channel < VGNN_HIDDEN_DIM; ++channel) {
+            const uint matrix = lane * VGNN_HIDDEN_DIM + channel;
+            value += hiddenValue(vertex, channel) * weights[VGNN_SELF1_OFFSET + matrix];
+            value += neighborHidden[channel] * weights[VGNN_NEIGHBOR1_OFFSET + matrix];
+        }
+        predictedAcceleration[lane] = value * weights[VGNN_OUTPUT_SCALE_OFFSET + lane];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0) {
+        // Convert the network output from its +Y-down training frame to CH10032 Y-up.
+        float3 acceleration = float3(predictedAcceleration[0], -predictedAcceleration[1], predictedAcceleration[2]);
+        const float3 oldPosition = clothPosition[vertex].xyz;
+        const float3 oldPrevious = clothPrevious[vertex].xyz;
+        uint status = 0;
+        float3 nextPosition = oldPosition;
+        if (pinMask[vertex] != 0) {
+            acceleration = 0.0;
+            nextPosition = restTarget[vertex].xyz;
+        } else {
+            if (length(acceleration) > params.maxAcceleration) status |= 2;
+            acceleration = clampMagnitude(acceleration, params.maxAcceleration);
+            float3 velocity = (oldPosition - oldPrevious) / params.timestep + acceleration * params.timestep;
+            if (length(velocity) > params.maxSpeed) status |= 4;
+            velocity = clampMagnitude(velocity, params.maxSpeed);
+            nextPosition = oldPosition + velocity * params.timestep;
+        }
+        if (!all(isfinite(nextPosition)) || !all(isfinite(acceleration))) {
+            status |= 1;
+            nextPosition = pinMask[vertex] != 0 ? restTarget[vertex].xyz : oldPosition;
+            acceleration = 0.0;
+        }
+        clothPrevious[vertex] = float4(pinMask[vertex] != 0 ? nextPosition : oldPosition, 1.0);
+        clothPosition[vertex] = float4(nextPosition, 1.0);
+        accelerationOut[vertex] = float4(acceleration, float(status));
+    }
+}

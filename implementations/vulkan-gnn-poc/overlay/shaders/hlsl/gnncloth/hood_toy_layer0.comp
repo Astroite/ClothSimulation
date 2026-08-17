@@ -1,0 +1,72 @@
+// Apply the original fixed 10->16 Gather GNN to the arbitrary CH10032 cloth CSR.
+// One 32-lane workgroup owns one cloth vertex, matching the verified grid shader.
+
+#include "vgnn_weights.hlsli"
+
+struct Params {
+    uint clothCount;
+    float timestep;
+    float maxSpeed;
+    float maxAcceleration;
+    float4 externalAcceleration;
+};
+cbuffer ubo : register(b9) { Params params; };
+[[vk::binding(0)]] RWStructuredBuffer<float4> clothPosition;
+[[vk::binding(1)]] RWStructuredBuffer<float4> clothPrevious;
+[[vk::binding(2)]] StructuredBuffer<float4> restTarget;
+[[vk::binding(3)]] StructuredBuffer<uint> pinMask;
+[[vk::binding(4)]] StructuredBuffer<uint> csrOffsets;
+[[vk::binding(5)]] StructuredBuffer<uint> csrNeighbors;
+[[vk::binding(6)]] StructuredBuffer<float> weights;
+[[vk::binding(7)]] RWStructuredBuffer<float4> hiddenState;
+[[vk::binding(8)]] RWStructuredBuffer<float4> accelerationOut;
+
+groupshared float neighborFeature[VGNN_INPUT_DIM];
+
+// The toy training data uses +Y as gravity/down, while the CH10032 scene is
+// conventional Y-up. Transform vector-valued features into the training frame.
+float toModelAxis(float value, uint component) { return component == 1 ? -value : value; }
+
+float rawFeature(uint vertex, uint channel)
+{
+    if (channel < 3) return toModelAxis(clothPosition[vertex][channel] - restTarget[vertex][channel], channel);
+    if (channel < 6) {
+        const uint component = channel - 3;
+        const float velocity = (clothPosition[vertex][component] - clothPrevious[vertex][component]) / params.timestep;
+        return toModelAxis(velocity, component);
+    }
+    if (channel < 9) {
+        const uint component = channel - 6;
+        return toModelAxis(params.externalAcceleration[component], component);
+    }
+    return pinMask[vertex] != 0 ? 1.0 : 0.0;
+}
+
+float scaledFeature(uint vertex, uint channel)
+{
+    return rawFeature(vertex, channel) * weights[VGNN_INPUT_SCALE_OFFSET + channel];
+}
+
+[numthreads(32, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint vertex = groupId.x;
+    if (vertex >= params.clothCount) return;
+    if (lane < VGNN_INPUT_DIM) {
+        const uint begin = csrOffsets[vertex];
+        const uint end = csrOffsets[vertex + 1];
+        float sum = 0.0;
+        for (uint edge = begin; edge < end; ++edge) sum += scaledFeature(csrNeighbors[edge], lane);
+        neighborFeature[lane] = sum / max(float(end - begin), 1.0);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (lane < VGNN_HIDDEN_DIM) {
+        float value = weights[VGNN_BIAS0_OFFSET + lane];
+        [unroll] for (uint input = 0; input < VGNN_INPUT_DIM; ++input) {
+            const uint matrix = lane * VGNN_INPUT_DIM + input;
+            value += scaledFeature(vertex, input) * weights[VGNN_SELF0_OFFSET + matrix];
+            value += neighborFeature[input] * weights[VGNN_NEIGHBOR0_OFFSET + matrix];
+        }
+        hiddenState[vertex * 4 + lane / 4][lane % 4] = max(value, 0.0);
+    }
+}

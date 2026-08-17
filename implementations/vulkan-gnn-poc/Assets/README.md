@@ -8,7 +8,11 @@ This directory keeps runtime and research inputs separate from source code:
   `F:\Projects\Anim` export, with raw motion, a convenience 60 fps resample,
   and a validated SMPL body-22 skeleton FBX for each motion.
 - `Characters/CH10032/`: the body reference FBX and sidecar used for alignment,
-  skinning, and future collision-proxy work.
+  45-bone runtime skinning and the generated 4,096-vertex lower-body proxy.
+
+The active real-character demo does not consume `TrainingSamples/` or SMPL at
+runtime. It exports the native CH10032 `AS_C10032_ArmedSprint_Skirt`
+AnimSequence from the Z2Game project into the ignored `.work/` bake cache.
 
 Run `tools/import_motion_samples.py` to reproduce the local motion subset. The
 checked-in `TrainingSamples/manifest.json` records relative paths, file sizes,
