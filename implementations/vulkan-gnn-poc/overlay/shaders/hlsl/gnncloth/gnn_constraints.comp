@@ -2,45 +2,13 @@
 // Each dispatch contains vertex-disjoint edges and therefore updates both
 // endpoints in place without floating-point atomics.
 
-struct Particle {
-    float4 pos;
-    float4 vel;
-    float4 uv;
-    float4 normal; // previous position during the GNN/XPBD path
-    float4 rest;
-};
-
-struct UBO {
-    float deltaT;
-    float particleMass;
-    float springStiffness;
-    float damping;
-    float restDistH;
-    float restDistV;
-    float restDistD;
-    float sphereRadius;
-    float4 spherePos;
-    float4 gravity;
-    int2 particleCount;
-    uint vertexCount;
-    uint edgeCount;
-    float maxSpeed;
-    float maxAcceleration;
-    float stretchComplianceMicro;
-    float bendComplianceMicro;
-    float xpbdVelocityDamping;
-    float3 sphereVelocity;
-};
+#include "common.hlsli"
 
 struct PushConstants {
     uint edgeOffset;
     uint edgeCount;
 };
 
-[[vk::binding(1)]] RWStructuredBuffer<Particle> particles;
-cbuffer ubo : register(b2) { UBO params; };
-[[vk::binding(8)]] StructuredBuffer<uint4> constraintEdges;
-[[vk::binding(9)]] RWStructuredBuffer<float> constraintLambdas;
 [[vk::push_constant]] PushConstants pushConstants;
 
 [numthreads(128, 1, 1)]
@@ -49,8 +17,8 @@ void main(uint3 id : SV_DispatchThreadID)
     if (id.x >= pushConstants.edgeCount || params.deltaT <= 0.0) return;
     const uint edgeIndex = pushConstants.edgeOffset + id.x;
     const uint4 edge = constraintEdges[edgeIndex];
-    Particle p0 = particles[edge.x];
-    Particle p1 = particles[edge.y];
+    Particle p0 = particleOut[edge.x];
+    Particle p1 = particleOut[edge.y];
 
     const float inverseMass = 1.0 / max(params.particleMass, 1.0e-6);
     const float w0 = p0.rest.w > 0.5 ? 0.0 : inverseMass;
@@ -78,8 +46,8 @@ void main(uint3 id : SV_DispatchThreadID)
         p0.pos.xyz += correction0;
         p1.pos.xyz += correction1;
         constraintLambdas[edgeIndex] = lambda + deltaLambda;
-        particles[edge.x] = p0;
-        particles[edge.y] = p1;
+        particleOut[edge.x] = p0;
+        particleOut[edge.y] = p1;
     } else {
         constraintLambdas[edgeIndex] = 0.0;
     }

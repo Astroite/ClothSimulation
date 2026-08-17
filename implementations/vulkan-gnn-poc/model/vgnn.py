@@ -219,6 +219,32 @@ def infer_numpy(features: np.ndarray, graph: Graph, weights: Weights) -> np.ndar
     return np.asarray(output, dtype=np.float32)
 
 
+def weight_offsets() -> dict[str, int]:
+    """Float offsets of each array inside the VGNN payload.
+
+    The shaders index the weight buffer with these constants.  They are derived
+    from the same ordering :meth:`Weights.arrays_in_file_order` writes, so the
+    two cannot drift apart.
+    """
+    shapes: tuple[tuple[str, int], ...] = (
+        ("INPUT_SCALE", INPUT_DIM),
+        ("OUTPUT_SCALE", OUTPUT_DIM),
+        ("SELF0", HIDDEN_DIM * INPUT_DIM),
+        ("NEIGHBOR0", HIDDEN_DIM * INPUT_DIM),
+        ("BIAS0", HIDDEN_DIM),
+        ("SELF1", OUTPUT_DIM * HIDDEN_DIM),
+        ("NEIGHBOR1", OUTPUT_DIM * HIDDEN_DIM),
+        ("BIAS1", OUTPUT_DIM),
+    )
+    offsets: dict[str, int] = {}
+    cursor = 0
+    for name, count in shapes:
+        offsets[name] = cursor
+        cursor += count
+    offsets["PAYLOAD_FLOAT_COUNT"] = cursor
+    return offsets
+
+
 def _flatten_payload(weights: Weights) -> np.ndarray:
     arrays = [np.asarray(value, dtype="<f4").reshape(-1) for value in weights.arrays_in_file_order()]
     return np.concatenate(arrays).astype("<f4", copy=False)

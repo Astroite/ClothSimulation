@@ -1,41 +1,10 @@
 // Finalize an XPBD time step: restore hard pins, project collision, and derive
 // velocity from the corrected position rather than the unconstrained prediction.
 
-struct Particle {
-    float4 pos;
-    float4 vel;
-    float4 uv;
-    float4 normal; // previous position written by gnn_layer1_integrate
-    float4 rest;
-};
-
-struct UBO {
-    float deltaT;
-    float particleMass;
-    float springStiffness;
-    float damping;
-    float restDistH;
-    float restDistV;
-    float restDistD;
-    float sphereRadius;
-    float4 spherePos;
-    float4 gravity;
-    int2 particleCount;
-    uint vertexCount;
-    uint edgeCount;
-    float maxSpeed;
-    float maxAcceleration;
-    float stretchComplianceMicro;
-    float bendComplianceMicro;
-    float xpbdVelocityDamping;
-    float3 sphereVelocity;
-};
-
-[[vk::binding(1)]] RWStructuredBuffer<Particle> particles;
-cbuffer ubo : register(b2) { UBO params; };
 // Verification mirror of the final position. Written only when the host asks for
 // it, so benchmark and interactive runs do not pay for the extra store.
-[[vk::binding(10)]] RWStructuredBuffer<float4> verificationPositions;
+
+#include "common.hlsli"
 
 struct PushConstants {
     uint mirrorPositions;
@@ -43,24 +12,18 @@ struct PushConstants {
 };
 [[vk::push_constant]] PushConstants pushConstants;
 
-float3 clampMagnitude(float3 value, float maximum)
-{
-    const float magnitude = length(value);
-    return (magnitude > maximum && magnitude > 0.0) ? value * (maximum / magnitude) : value;
-}
-
 [numthreads(128, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
     const uint vertex = id.x;
     if (vertex >= params.vertexCount) return;
-    Particle next = particles[vertex];
+    Particle next = particleOut[vertex];
 
     if (next.rest.w > 0.5) {
         next.pos = float4(next.rest.xyz, 1.0);
         next.vel = 0.0;
-        next.normal = float4(next.rest.xyz, 1.0);
-        particles[vertex] = next;
+        next.previousPosition = float4(next.rest.xyz, 1.0);
+        particleOut[vertex] = next;
         if (pushConstants.mirrorPositions != 0) verificationPositions[vertex] = next.pos;
         return;
     }
@@ -68,7 +31,7 @@ void main(uint3 id : SV_DispatchThreadID)
     if (params.deltaT <= 0.0) return;
 
     float3 correctedPosition = next.pos.xyz;
-    float3 correctedVelocity = (correctedPosition - next.normal.xyz) / max(params.deltaT, 1.0e-4);
+    float3 correctedVelocity = (correctedPosition - next.previousPosition.xyz) / max(params.deltaT, 1.0e-4);
     const float3 sphereDelta = correctedPosition - params.spherePos.xyz;
     const float collisionRadius = params.sphereRadius + 0.01;
     const float sphereDistance = length(sphereDelta);
@@ -92,7 +55,7 @@ void main(uint3 id : SV_DispatchThreadID)
     }
     next.pos = float4(correctedPosition, 1.0);
     next.vel = float4(clampMagnitude(correctedVelocity, params.maxSpeed), 0.0);
-    next.normal = float4(correctedPosition, 1.0);
-    particles[vertex] = next;
+    next.previousPosition = float4(correctedPosition, 1.0);
+    particleOut[vertex] = next;
     if (pushConstants.mirrorPositions != 0) verificationPositions[vertex] = next.pos;
 }

@@ -15,44 +15,13 @@
 // Rest lengths come from restDistH/V/D in the UBO rather than from rest positions,
 // which keeps rest data out of groupshared entirely.
 
-struct Particle {
-    float4 pos;
-    float4 vel;
-    float4 uv;
-    float4 normal;
-    float4 rest;
-};
-
-struct UBO {
-    float deltaT;
-    float particleMass;
-    float springStiffness;
-    float damping;
-    float restDistH;
-    float restDistV;
-    float restDistD;
-    float sphereRadius;
-    float4 spherePos;
-    float4 gravity;
-    int2 particleCount;
-    uint vertexCount;
-    uint edgeCount;
-    float maxSpeed;
-    float maxAcceleration;
-    float stretchComplianceMicro;
-    float bendComplianceMicro;
-    float xpbdVelocityDamping;
-    float3 sphereVelocity;
-};
+#include "common.hlsli"
 
 struct PushConstants {
     int bandOffsetRows;      // shifts the band grid so boundary constraints move inside
     uint localIterations;
 };
 
-[[vk::binding(1)]] RWStructuredBuffer<Particle> particles;
-cbuffer ubo : register(b2) { UBO params; };
-[[vk::binding(9)]] RWStructuredBuffer<float> constraintLambdas;
 [[vk::push_constant]] PushConstants pushConstants;
 
 static const uint BAND_ROWS = 8;
@@ -126,7 +95,7 @@ void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
         if (row < 0 || row >= int(height)) {
             tile[local] = float4(0.0, 0.0, 0.0, -1.0);
         } else {
-            const Particle particle = particles[uint(row) * width + column];
+            const Particle particle = particleOut[uint(row) * width + column];
             const float inverseMass = particle.rest.w > 0.5 ? 0.0 : 1.0 / max(params.particleMass, 1.0e-6);
             tile[local] = float4(particle.pos.xyz, inverseMass);
         }
@@ -196,6 +165,6 @@ void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
         if (row < 0 || row >= int(height)) continue;
         const float4 value = tile[store];
         if (value.w <= 0.0) continue;
-        particles[uint(row) * width + column].pos = float4(value.xyz, 1.0);
+        particleOut[uint(row) * width + column].pos = float4(value.xyz, 1.0);
     }
 }

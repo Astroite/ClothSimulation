@@ -32,7 +32,9 @@ public:
 		glm::vec4 pos{};
 		glm::vec4 vel{};
 		glm::vec4 uv{};
-		glm::vec4 normal{};
+		// Repurposed as the pre-integration position by the GNN/XPBD path; see
+		// common.hlsli. Shading normals are derived per pixel, not stored.
+		glm::vec4 previousPosition{};
 		glm::vec4 rest{};
 	};
 	static_assert(sizeof(Particle) == 80);
@@ -409,7 +411,7 @@ public:
 				particle.pos = glm::vec4(position, 1.0f);
 				particle.vel = glm::vec4(velocity, 0.0f);
 				particle.uv = glm::vec4(du * x, dv * y, 0.0f, 0.0f);
-				particle.normal = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
+				particle.previousPosition = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
 				particle.rest = glm::vec4(rest, verifyMode ? golden.pinned[index] : (pinned ? 1.0f : 0.0f));
 			}
 		}
@@ -909,8 +911,6 @@ public:
 			compute.queryWritten[currentBuffer] = true;
 		} else {
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.massSpringPipeline);
-			uint32_t calculateNormals = 0;
-			vkCmdPushConstants(commandBuffer, compute.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &calculateNormals);
 			for (uint32_t iteration = 0; iteration < 64; ++iteration) {
 				readSet = 1 - readSet;
 				vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.pipelineLayout, 0, 1, &compute.descriptorSets[readSet], 0, nullptr);

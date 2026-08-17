@@ -24,6 +24,10 @@ if (Test-Path -LiteralPath $FormatTest) {
     Write-Host "  skipped: $FormatTest not built"
 }
 
+Write-Host '== Generated shader constants match vgnn.py'
+& $Python (Join-Path $PocRoot 'model/write_shader_constants.py') --check
+if ($LASTEXITCODE -ne 0) { throw 'Generated shader constants are stale' }
+
 # The committed SPIR-V is what makes the Vulkan SDK optional at run time, so it
 # has to stay in step with the HLSL sources. DXC output is byte-reproducible for
 # these shaders, which makes an exact comparison the right check.

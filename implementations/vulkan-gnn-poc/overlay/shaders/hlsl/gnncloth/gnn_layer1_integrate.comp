@@ -1,50 +1,7 @@
 // Shader-friendly fixed-topology GNN, layer 1 plus stable integration/constraints.
 
-struct Particle {
-    float4 pos;
-    float4 vel;
-    float4 uv;
-    float4 normal;
-    float4 rest;
-};
+#include "common.hlsli"
 
-struct UBO {
-    float deltaT;
-    float particleMass;
-    float springStiffness;
-    float damping;
-    float restDistH;
-    float restDistV;
-    float restDistD;
-    float sphereRadius;
-    float4 spherePos;
-    float4 gravity;
-    int2 particleCount;
-    uint vertexCount;
-    uint edgeCount;
-    float maxSpeed;
-    float maxAcceleration;
-    float stretchComplianceMicro;
-    float bendComplianceMicro;
-    float xpbdVelocityDamping;
-    float3 sphereVelocity;
-};
-
-[[vk::binding(0)]] StructuredBuffer<Particle> particleIn;
-[[vk::binding(1)]] RWStructuredBuffer<Particle> particleOut;
-cbuffer ubo : register(b2) { UBO params; };
-[[vk::binding(3)]] StructuredBuffer<uint> vertexOffsets;
-[[vk::binding(4)]] StructuredBuffer<uint> neighborIndices;
-[[vk::binding(5)]] StructuredBuffer<float> weights;
-[[vk::binding(6)]] RWStructuredBuffer<float4> hiddenState;
-[[vk::binding(7)]] RWStructuredBuffer<float4> accelerationOut;
-
-static const uint HIDDEN_DIM = 16;
-static const uint OUTPUT_DIM = 3;
-static const uint OUTPUT_SCALE_OFFSET = 10;
-static const uint SELF1_OFFSET = 349;
-static const uint NEIGHBOR1_OFFSET = 397;
-static const uint BIAS1_OFFSET = 445;
 
 // Ablation: where the acceleration comes from. The network is trained to imitate
 // the analytic target recorded in model.json, so running that formula directly
@@ -65,18 +22,12 @@ struct PushConstants {
 };
 [[vk::push_constant]] PushConstants pushConstants;
 
-groupshared float neighborHidden[HIDDEN_DIM];
-groupshared float predictedAcceleration[OUTPUT_DIM];
+groupshared float neighborHidden[VGNN_HIDDEN_DIM];
+groupshared float predictedAcceleration[VGNN_OUTPUT_DIM];
 
 float hiddenValue(uint vertex, uint channel)
 {
     return hiddenState[vertex * 4 + channel / 4][channel % 4];
-}
-
-float3 clampMagnitude(float3 value, float maximum)
-{
-    const float magnitude = length(value);
-    return (magnitude > maximum && magnitude > 0.0) ? value * (maximum / magnitude) : value;
 }
 
 [numthreads(32, 1, 1)]
@@ -88,7 +39,7 @@ void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
     // pushConstants.ablationMode is uniform across the group, so every barrier
     // below is still reached by all lanes.
     if (pushConstants.ablationMode == ABLATE_GNN) {
-        if (lane < HIDDEN_DIM) {
+        if (lane < VGNN_HIDDEN_DIM) {
             const uint begin = vertexOffsets[vertex];
             const uint end = vertexOffsets[vertex + 1];
             float sum = 0.0;
@@ -99,19 +50,19 @@ void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
         }
         GroupMemoryBarrierWithGroupSync();
 
-        if (lane < OUTPUT_DIM) {
-            float value = weights[BIAS1_OFFSET + lane];
+        if (lane < VGNN_OUTPUT_DIM) {
+            float value = weights[VGNN_BIAS1_OFFSET + lane];
             [unroll]
-            for (uint channel = 0; channel < HIDDEN_DIM; ++channel) {
-                const uint matrixIndex = lane * HIDDEN_DIM + channel;
-                value += hiddenValue(vertex, channel) * weights[SELF1_OFFSET + matrixIndex];
-                value += neighborHidden[channel] * weights[NEIGHBOR1_OFFSET + matrixIndex];
+            for (uint channel = 0; channel < VGNN_HIDDEN_DIM; ++channel) {
+                const uint matrixIndex = lane * VGNN_HIDDEN_DIM + channel;
+                value += hiddenValue(vertex, channel) * weights[VGNN_SELF1_OFFSET + matrixIndex];
+                value += neighborHidden[channel] * weights[VGNN_NEIGHBOR1_OFFSET + matrixIndex];
             }
-            predictedAcceleration[lane] = value * weights[OUTPUT_SCALE_OFFSET + lane];
+            predictedAcceleration[lane] = value * weights[VGNN_OUTPUT_SCALE_OFFSET + lane];
         }
     } else if (pushConstants.ablationMode == ABLATE_ANALYTIC) {
         // The training target evaluated directly: no layer 0, no weights.
-        if (lane < OUTPUT_DIM) {
+        if (lane < VGNN_OUTPUT_DIM) {
             const uint begin = vertexOffsets[vertex];
             const uint end = vertexOffsets[vertex + 1];
             float sum = 0.0;
@@ -128,12 +79,12 @@ void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
     } else if (pushConstants.ablationMode == ABLATE_GRAVITY) {
         // The analytic target with the neighbour coupling removed, so the
         // difference against it is what the graph structure contributes.
-        if (lane < OUTPUT_DIM) {
+        if (lane < VGNN_OUTPUT_DIM) {
             const Particle self = particleIn[vertex];
             predictedAcceleration[lane] = -ANALYTIC_DAMPING * self.vel[lane] + params.gravity[lane];
         }
     } else {
-        if (lane < OUTPUT_DIM) predictedAcceleration[lane] = 0.0;
+        if (lane < VGNN_OUTPUT_DIM) predictedAcceleration[lane] = 0.0;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -141,7 +92,7 @@ void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
         Particle next = particleIn[vertex];
         const bool pinnedInputDrift = next.rest.w > 0.5 && any(abs(next.pos.xyz - next.rest.xyz) > 1.0e-6);
         const float3 previousPosition = next.pos.xyz;
-        next.normal = float4(previousPosition, 1.0);
+        next.previousPosition = float4(previousPosition, 1.0);
         float3 acceleration = float3(
             predictedAcceleration[0],
             predictedAcceleration[1],
@@ -152,7 +103,7 @@ void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
             acceleration = 0.0;
             next.pos = float4(next.rest.xyz, 1.0);
             next.vel = 0.0;
-            next.normal = float4(next.rest.xyz, 1.0);
+            next.previousPosition = float4(next.rest.xyz, 1.0);
         } else {
             accelerationClamped = length(acceleration) > params.maxAcceleration;
             acceleration = clampMagnitude(acceleration, params.maxAcceleration);
@@ -163,7 +114,7 @@ void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
             next.pos = float4(position, 1.0);
             next.vel = float4(velocity, 0.0);
         }
-        const bool finiteState = all(isfinite(next.pos)) && all(isfinite(next.vel)) && all(isfinite(next.normal)) && all(isfinite(acceleration));
+        const bool finiteState = all(isfinite(next.pos)) && all(isfinite(next.vel)) && all(isfinite(next.previousPosition)) && all(isfinite(acceleration));
         // w carries a status bitfield rather than a plain health flag:
         //   1 = non-finite state or pinned drift (hard failure)
         //   2 = acceleration clamp engaged

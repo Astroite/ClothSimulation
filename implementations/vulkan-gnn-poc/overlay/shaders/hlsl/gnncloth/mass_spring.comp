@@ -1,42 +1,7 @@
 // Original computecloth mass-spring path, adapted to the PoC Particle layout and pins.
 // Based on SaschaWillems/Vulkan (MIT), computecloth/cloth.comp.
 
-struct Particle {
-    float4 pos;
-    float4 vel;
-    float4 uv;
-    float4 normal;
-    float4 rest;
-};
-
-struct UBO {
-    float deltaT;
-    float particleMass;
-    float springStiffness;
-    float damping;
-    float restDistH;
-    float restDistV;
-    float restDistD;
-    float sphereRadius;
-    float4 spherePos;
-    float4 gravity;
-    int2 particleCount;
-    uint vertexCount;
-    uint edgeCount;
-    float maxSpeed;
-    float maxAcceleration;
-    float stretchComplianceMicro;
-    float bendComplianceMicro;
-    float xpbdVelocityDamping;
-    float3 sphereVelocity;
-};
-
-[[vk::binding(0)]] StructuredBuffer<Particle> particleIn;
-[[vk::binding(1)]] RWStructuredBuffer<Particle> particleOut;
-cbuffer ubo : register(b2) { UBO params; };
-
-struct PushConstants { uint calculateNormals; };
-[[vk::push_constant]] PushConstants pushConstants;
+#include "common.hlsli"
 
 float3 springForce(float3 p0, float3 p1, float restDistance)
 {
