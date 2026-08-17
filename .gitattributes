@@ -5,6 +5,10 @@
 *.pdf   binary
 *.png   binary
 *.exe   binary
+*.vcloth binary
+# Wavefront .obj under meshs/ is text, but the extension collides with MSVC
+# object files and those meshes are generated inspection artifacts, so they are
+# kept binary: no EOL rewriting, and a 165 KB generated mesh diff is not useful.
 *.obj   binary
 
 # 文本按平台检出，仓库内统一存 LF。
