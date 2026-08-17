@@ -1,0 +1,86 @@
+// Edge-colored XPBD distance constraints for the GNN cloth path.
+// Each dispatch contains vertex-disjoint edges and therefore updates both
+// endpoints in place without floating-point atomics.
+
+struct Particle {
+    float4 pos;
+    float4 vel;
+    float4 uv;
+    float4 normal; // previous position during the GNN/XPBD path
+    float4 rest;
+};
+
+struct UBO {
+    float deltaT;
+    float particleMass;
+    float springStiffness;
+    float damping;
+    float restDistH;
+    float restDistV;
+    float restDistD;
+    float sphereRadius;
+    float4 spherePos;
+    float4 gravity;
+    int2 particleCount;
+    uint vertexCount;
+    uint edgeCount;
+    float maxSpeed;
+    float maxAcceleration;
+    float stretchComplianceMicro;
+    float bendComplianceMicro;
+    float xpbdVelocityDamping;
+    float3 sphereVelocity;
+};
+
+struct PushConstants {
+    uint edgeOffset;
+    uint edgeCount;
+};
+
+[[vk::binding(1)]] RWStructuredBuffer<Particle> particles;
+cbuffer ubo : register(b2) { UBO params; };
+[[vk::binding(8)]] StructuredBuffer<uint4> constraintEdges;
+[[vk::binding(9)]] RWStructuredBuffer<float> constraintLambdas;
+[[vk::push_constant]] PushConstants pushConstants;
+
+[numthreads(128, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= pushConstants.edgeCount || params.deltaT <= 0.0) return;
+    const uint edgeIndex = pushConstants.edgeOffset + id.x;
+    const uint4 edge = constraintEdges[edgeIndex];
+    Particle p0 = particles[edge.x];
+    Particle p1 = particles[edge.y];
+
+    const float inverseMass = 1.0 / max(params.particleMass, 1.0e-6);
+    const float w0 = p0.rest.w > 0.5 ? 0.0 : inverseMass;
+    const float w1 = p1.rest.w > 0.5 ? 0.0 : inverseMass;
+    const float inverseMassSum = w0 + w1;
+    if (inverseMassSum <= 0.0) return;
+
+    const float3 restDelta = p0.rest.xyz - p1.rest.xyz;
+    const float restLength = length(restDelta);
+    if (restLength <= 1.0e-7) return;
+    const float3 delta = p0.pos.xyz - p1.pos.xyz;
+    const float distance = length(delta);
+    const float3 gradient = distance > 1.0e-7 ? delta / distance : restDelta / restLength;
+    const float constraintValue = distance - restLength;
+
+    const float complianceMicro = edge.z == 0 ? params.stretchComplianceMicro : params.bendComplianceMicro;
+    const float compliance = max(complianceMicro, 0.0) * 1.0e-6;
+    const float alphaTilde = compliance / max(params.deltaT * params.deltaT, 1.0e-8);
+    const float lambda = constraintLambdas[edgeIndex];
+    const float deltaLambda = (-constraintValue - alphaTilde * lambda) / (inverseMassSum + alphaTilde);
+
+    const float3 correction0 = w0 * gradient * deltaLambda;
+    const float3 correction1 = -w1 * gradient * deltaLambda;
+    if (all(isfinite(correction0)) && all(isfinite(correction1)) && isfinite(deltaLambda)) {
+        p0.pos.xyz += correction0;
+        p1.pos.xyz += correction1;
+        constraintLambdas[edgeIndex] = lambda + deltaLambda;
+        particles[edge.x] = p0;
+        particles[edge.y] = p1;
+    } else {
+        constraintLambdas[edgeIndex] = 0.0;
+    }
+}

@@ -1,0 +1,21 @@
+# 各实现子目录自带 .gitignore（其中的前导斜杠模式相对该目录生效），
+# 本文件只收纳跨目录的通用规则。
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 编辑器与操作系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# 通用构建产物
+build/
+out/

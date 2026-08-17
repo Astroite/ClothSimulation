@@ -1,0 +1,10 @@
+{
+  "golden_max_abs": 1.907348633e-06,
+  "golden_mean_abs": 3.117110078e-07,
+  "max_limit": 0.0001,
+  "mean_limit": 0.00001,
+  "stability_frames": 1200,
+  "health_failures": 0,
+  "reset_replay_max_abs": 0,
+  "passed": true
+}

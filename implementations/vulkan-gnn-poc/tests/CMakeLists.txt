@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.20)
+project(vgnn_format_test LANGUAGES CXX)
+add_executable(vgnn_format_test vgnn_format_test.cpp)
+target_compile_features(vgnn_format_test PRIVATE cxx_std_20)
+target_include_directories(vgnn_format_test PRIVATE ../overlay/examples/gnncloth)

@@ -1,0 +1,27 @@
+# 二进制产物必须逐字节保留：model.bin / golden.bin 在加载时校验 CRC32，
+# SPIR-V 是已提交的构建产物，任何行尾转换都会使其损坏。
+*.bin   binary
+*.spv   binary
+*.pdf   binary
+*.png   binary
+*.exe   binary
+*.obj   binary
+
+# 文本按平台检出，仓库内统一存 LF。
+*.md    text
+*.py    text
+*.cpp   text
+*.h     text
+*.hlsli text
+*.comp  text
+*.vert  text
+*.frag  text
+*.json  text
+*.txt   text
+*.csv   text
+*.html  text
+*.cmake text
+
+# Windows 专用脚本在工作区始终使用 CRLF。
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf

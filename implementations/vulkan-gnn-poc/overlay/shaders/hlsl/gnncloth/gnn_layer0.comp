@@ -1,0 +1,89 @@
+// Shader-friendly fixed-topology GNN, layer 0.
+// One 32-lane workgroup owns one vertex. No atomics or wave-size assumptions.
+
+struct Particle {
+    float4 pos;
+    float4 vel;
+    float4 uv;
+    float4 normal;
+    float4 rest; // xyz = rest position, w = pinned flag
+};
+
+struct UBO {
+    float deltaT;
+    float particleMass;
+    float springStiffness;
+    float damping;
+    float restDistH;
+    float restDistV;
+    float restDistD;
+    float sphereRadius;
+    float4 spherePos;
+    float4 gravity;
+    int2 particleCount;
+    uint vertexCount;
+    uint edgeCount;
+    float maxSpeed;
+    float maxAcceleration;
+};
+
+[[vk::binding(0)]] StructuredBuffer<Particle> particleIn;
+[[vk::binding(1)]] RWStructuredBuffer<Particle> particleOut;
+cbuffer ubo : register(b2) { UBO params; };
+[[vk::binding(3)]] StructuredBuffer<uint> vertexOffsets;
+[[vk::binding(4)]] StructuredBuffer<uint> neighborIndices;
+[[vk::binding(5)]] StructuredBuffer<float> weights;
+[[vk::binding(6)]] RWStructuredBuffer<float4> hiddenState;
+[[vk::binding(7)]] RWStructuredBuffer<float4> accelerationOut;
+
+static const uint INPUT_DIM = 10;
+static const uint HIDDEN_DIM = 16;
+static const uint INPUT_SCALE_OFFSET = 0;
+static const uint SELF0_OFFSET = 13;
+static const uint NEIGHBOR0_OFFSET = 173;
+static const uint BIAS0_OFFSET = 333;
+
+groupshared float neighborFeature[INPUT_DIM];
+
+float rawFeature(uint vertex, uint channel)
+{
+    Particle particle = particleIn[vertex];
+    if (channel < 3) return particle.pos[channel] - particle.rest[channel];
+    if (channel < 6) return particle.vel[channel - 3];
+    if (channel < 9) return params.gravity[channel - 6];
+    return particle.rest.w;
+}
+
+float scaledFeature(uint vertex, uint channel)
+{
+    return rawFeature(vertex, channel) * weights[INPUT_SCALE_OFFSET + channel];
+}
+
+[numthreads(32, 1, 1)]
+void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint vertex = groupID.x;
+    if (vertex >= params.vertexCount) return;
+
+    if (lane < INPUT_DIM) {
+        const uint begin = vertexOffsets[vertex];
+        const uint end = vertexOffsets[vertex + 1];
+        float sum = 0.0;
+        for (uint edge = begin; edge < end; ++edge) {
+            sum += scaledFeature(neighborIndices[edge], lane);
+        }
+        neighborFeature[lane] = sum / max(float(end - begin), 1.0);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (lane < HIDDEN_DIM) {
+        float value = weights[BIAS0_OFFSET + lane];
+        [unroll]
+        for (uint inputChannel = 0; inputChannel < INPUT_DIM; ++inputChannel) {
+            const uint matrixIndex = lane * INPUT_DIM + inputChannel;
+            value += scaledFeature(vertex, inputChannel) * weights[SELF0_OFFSET + matrixIndex];
+            value += neighborFeature[inputChannel] * weights[NEIGHBOR0_OFFSET + matrixIndex];
+        }
+        hiddenState[vertex * 4 + lane / 4][lane % 4] = max(value, 0.0);
+    }
+}

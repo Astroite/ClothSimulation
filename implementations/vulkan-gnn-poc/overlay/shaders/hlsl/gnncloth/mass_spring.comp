@@ -1,0 +1,89 @@
+// Original computecloth mass-spring path, adapted to the PoC Particle layout and pins.
+// Based on SaschaWillems/Vulkan (MIT), computecloth/cloth.comp.
+
+struct Particle {
+    float4 pos;
+    float4 vel;
+    float4 uv;
+    float4 normal;
+    float4 rest;
+};
+
+struct UBO {
+    float deltaT;
+    float particleMass;
+    float springStiffness;
+    float damping;
+    float restDistH;
+    float restDistV;
+    float restDistD;
+    float sphereRadius;
+    float4 spherePos;
+    float4 gravity;
+    int2 particleCount;
+    uint vertexCount;
+    uint edgeCount;
+    float maxSpeed;
+    float maxAcceleration;
+    float stretchComplianceMicro;
+    float bendComplianceMicro;
+    float xpbdVelocityDamping;
+    float3 sphereVelocity;
+};
+
+[[vk::binding(0)]] StructuredBuffer<Particle> particleIn;
+[[vk::binding(1)]] RWStructuredBuffer<Particle> particleOut;
+cbuffer ubo : register(b2) { UBO params; };
+
+struct PushConstants { uint calculateNormals; };
+[[vk::push_constant]] PushConstants pushConstants;
+
+float3 springForce(float3 p0, float3 p1, float restDistance)
+{
+    const float3 delta = p0 - p1;
+    const float distance = length(delta);
+    return distance > 1.0e-6 ? delta / distance * params.springStiffness * (distance - restDistance) : 0.0;
+}
+
+[numthreads(10, 10, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= uint(params.particleCount.x) || id.y >= uint(params.particleCount.y)) return;
+    const uint index = id.y * params.particleCount.x + id.x;
+    Particle next = particleIn[index];
+    const float3 position = next.pos.xyz;
+
+    if (next.rest.w > 0.5) {
+        next.pos = float4(next.rest.xyz, 1.0);
+        next.vel = 0.0;
+        particleOut[index] = next;
+        return;
+    }
+
+    float3 force = params.gravity.xyz * params.particleMass - params.damping * next.vel.xyz;
+    if (id.x > 0) force += springForce(particleIn[index - 1].pos.xyz, position, params.restDistH);
+    if (id.x + 1 < uint(params.particleCount.x)) force += springForce(particleIn[index + 1].pos.xyz, position, params.restDistH);
+    if (id.y > 0) force += springForce(particleIn[index - params.particleCount.x].pos.xyz, position, params.restDistV);
+    if (id.y + 1 < uint(params.particleCount.y)) force += springForce(particleIn[index + params.particleCount.x].pos.xyz, position, params.restDistV);
+    if (id.x > 0 && id.y > 0) force += springForce(particleIn[index - params.particleCount.x - 1].pos.xyz, position, params.restDistD);
+    if (id.x + 1 < uint(params.particleCount.x) && id.y > 0) force += springForce(particleIn[index - params.particleCount.x + 1].pos.xyz, position, params.restDistD);
+    if (id.x > 0 && id.y + 1 < uint(params.particleCount.y)) force += springForce(particleIn[index + params.particleCount.x - 1].pos.xyz, position, params.restDistD);
+    if (id.x + 1 < uint(params.particleCount.x) && id.y + 1 < uint(params.particleCount.y)) force += springForce(particleIn[index + params.particleCount.x + 1].pos.xyz, position, params.restDistD);
+
+    const float3 acceleration = force / params.particleMass;
+    next.pos = float4(position + next.vel.xyz * params.deltaT + 0.5 * acceleration * params.deltaT * params.deltaT, 1.0);
+    next.vel = float4(next.vel.xyz + acceleration * params.deltaT, 0.0);
+
+    const float3 sphereDelta = next.pos.xyz - params.spherePos.xyz;
+    const float distance = length(sphereDelta);
+    if (params.sphereRadius > 0.0 && distance < params.sphereRadius + 0.01) {
+        float3 fallbackDirection = next.rest.xyz - params.spherePos.xyz;
+        const float fallbackLength = length(fallbackDirection);
+        fallbackDirection = fallbackLength > 1.0e-7 ? fallbackDirection / fallbackLength : float3(0.0, -1.0, 0.0);
+        const float3 direction = distance > 1.0e-7 ? sphereDelta / distance : fallbackDirection;
+        next.pos.xyz = params.spherePos.xyz + direction * (params.sphereRadius + 0.01);
+        const float inwardSpeed = dot(next.vel.xyz - params.sphereVelocity, direction);
+        if (inwardSpeed < 0.0) next.vel.xyz -= direction * inwardSpeed;
+    }
+    particleOut[index] = next;
+}

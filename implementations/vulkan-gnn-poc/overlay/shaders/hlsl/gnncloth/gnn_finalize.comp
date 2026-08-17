@@ -1,0 +1,86 @@
+// Finalize an XPBD time step: restore hard pins, project collision, and derive
+// velocity from the corrected position rather than the unconstrained prediction.
+
+struct Particle {
+    float4 pos;
+    float4 vel;
+    float4 uv;
+    float4 normal; // previous position written by gnn_layer1_integrate
+    float4 rest;
+};
+
+struct UBO {
+    float deltaT;
+    float particleMass;
+    float springStiffness;
+    float damping;
+    float restDistH;
+    float restDistV;
+    float restDistD;
+    float sphereRadius;
+    float4 spherePos;
+    float4 gravity;
+    int2 particleCount;
+    uint vertexCount;
+    uint edgeCount;
+    float maxSpeed;
+    float maxAcceleration;
+    float stretchComplianceMicro;
+    float bendComplianceMicro;
+    float xpbdVelocityDamping;
+    float3 sphereVelocity;
+};
+
+[[vk::binding(1)]] RWStructuredBuffer<Particle> particles;
+cbuffer ubo : register(b2) { UBO params; };
+
+float3 clampMagnitude(float3 value, float maximum)
+{
+    const float magnitude = length(value);
+    return (magnitude > maximum && magnitude > 0.0) ? value * (maximum / magnitude) : value;
+}
+
+[numthreads(128, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    const uint vertex = id.x;
+    if (vertex >= params.vertexCount) return;
+    Particle next = particles[vertex];
+
+    if (next.rest.w > 0.5) {
+        next.pos = float4(next.rest.xyz, 1.0);
+        next.vel = 0.0;
+        next.normal = float4(next.rest.xyz, 1.0);
+        particles[vertex] = next;
+        return;
+    }
+    if (params.deltaT <= 0.0) return;
+
+    float3 correctedPosition = next.pos.xyz;
+    float3 correctedVelocity = (correctedPosition - next.normal.xyz) / max(params.deltaT, 1.0e-4);
+    const float3 sphereDelta = correctedPosition - params.spherePos.xyz;
+    const float collisionRadius = params.sphereRadius + 0.01;
+    const float sphereDistance = length(sphereDelta);
+    if (params.sphereRadius > 0.0 && sphereDistance < collisionRadius) {
+        float3 fallbackDirection = next.rest.xyz - params.spherePos.xyz;
+        const float fallbackLength = length(fallbackDirection);
+        fallbackDirection = fallbackLength > 1.0e-7 ? fallbackDirection / fallbackLength : float3(0.0, -1.0, 0.0);
+        const float3 direction = sphereDistance > 1.0e-7 ? sphereDelta / sphereDistance : fallbackDirection;
+        correctedPosition = params.spherePos.xyz + direction * collisionRadius;
+        // Zero restitution: retain tangential motion but remove velocity that
+        // would continue into the sphere. Do not turn the positional collision
+        // correction itself into an artificial outward launch velocity.
+        const float inwardSpeed = dot(correctedVelocity - params.sphereVelocity, direction);
+        if (inwardSpeed < 0.0) correctedVelocity -= direction * inwardSpeed;
+    }
+
+    correctedVelocity *= exp(-max(params.xpbdVelocityDamping, 0.0) * params.deltaT);
+    if (!all(isfinite(correctedPosition)) || !all(isfinite(correctedVelocity))) {
+        correctedPosition = next.rest.xyz;
+        correctedVelocity = 0.0;
+    }
+    next.pos = float4(correctedPosition, 1.0);
+    next.vel = float4(clampMagnitude(correctedVelocity, params.maxSpeed), 0.0);
+    next.normal = float4(correctedPosition, 1.0);
+    particles[vertex] = next;
+}
