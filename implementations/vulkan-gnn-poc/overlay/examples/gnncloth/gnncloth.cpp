@@ -21,6 +21,12 @@ class VulkanExample : public VulkanExampleBase
 public:
 	enum Solver : int32_t { MassSpring = 0, GNN = 1 };
 	static constexpr uint32_t xpbdColorCount = 16;
+	// Must match BAND_ROWS in gnn_constraints_tiled.comp.
+	static constexpr uint32_t xpbdBandRows = 8;
+	// Six constraint families, each addressed analytically as [type][y][x] so a
+	// constraint keeps its lambda across tile passes.
+	static constexpr uint32_t xpbdConstraintTypes = 6;
+	enum XpbdMode : int32_t { XpbdColored = 0, XpbdTiled = 1 };
 
 	struct Particle {
 		glm::vec4 pos{};
@@ -59,6 +65,14 @@ public:
 	std::vector<glm::vec4> repeatabilityBaseline;
 	int32_t solver{ GNN };
 	int32_t xpbdIterations{ 8 };
+	// Colored by default: the tiled path cuts dispatches 128 -> 4 and wins at
+	// 16x16, but loses at 64x64 because row bands yield only 8 workgroups and the
+	// sweep filters all candidates once per color. See results/RESULTS.md.
+	int32_t xpbdMode{ XpbdColored };
+	// Tile passes alternate the band origin so band-crossing constraints move
+	// inside on the next pass. Each pass runs xpbdLocalIterations local sweeps.
+	int32_t xpbdTilePasses{ 4 };
+	int32_t xpbdLocalIterations{ 4 };
 	// Where the acceleration comes from. Matches the shader's ABLATE_* constants.
 	enum Ablation : int32_t { AblateGnn = 0, AblateAnalytic = 1, AblateZero = 2, AblateGravity = 3 };
 	int32_t ablation{ AblateGnn };
@@ -151,6 +165,7 @@ public:
 		VkPipeline layer0Pipeline{ VK_NULL_HANDLE };
 		VkPipeline layer1Pipeline{ VK_NULL_HANDLE };
 		VkPipeline xpbdPipeline{ VK_NULL_HANDLE };
+		VkPipeline xpbdTiledPipeline{ VK_NULL_HANDLE };
 		VkPipeline finalizePipeline{ VK_NULL_HANDLE };
 		struct alignas(16) UniformData {
 			float deltaT{ 0.0f };
@@ -205,6 +220,7 @@ public:
 		const uint32_t grid = (requestedGrid == 16 || requestedGrid == 32 || requestedGrid == 64) ? requestedGrid : 32;
 		cloth.gridSize = verifyMode ? glm::uvec2(32) : glm::uvec2(grid);
 		benchmarkOutput = argumentValue("--gnn-benchmark-output", "gnn_benchmark.csv");
+		xpbdMode = argumentValue("--gnn-xpbd-mode", "colored") == "tiled" ? XpbdTiled : XpbdColored;
 		const std::string ablationName = argumentValue("--gnn-ablate", "gnn");
 		ablation = ablationName == "analytic" ? AblateAnalytic
 			: (ablationName == "zero" ? AblateZero
@@ -262,6 +278,7 @@ public:
 		vkDestroyPipeline(device, compute.layer0Pipeline, nullptr);
 		vkDestroyPipeline(device, compute.layer1Pipeline, nullptr);
 		vkDestroyPipeline(device, compute.xpbdPipeline, nullptr);
+		vkDestroyPipeline(device, compute.xpbdTiledPipeline, nullptr);
 		vkDestroyPipeline(device, compute.finalizePipeline, nullptr);
 		vkDestroyPipelineLayout(device, compute.pipelineLayout, nullptr);
 		vkDestroyDescriptorSetLayout(device, compute.descriptorSetLayout, nullptr);
@@ -483,6 +500,19 @@ public:
 			0, 0, nullptr, static_cast<uint32_t>(barriers.size()), barriers.data(), 0, nullptr);
 	}
 
+	// The colored path indexes lambdas by edge, the tiled path by (type, x, y).
+	// One buffer serves both, so it has to hold whichever needs more.
+	uint32_t lambdaSlotCount() const
+	{
+		const uint32_t analytic = xpbdConstraintTypes * cloth.gridSize.x * cloth.gridSize.y;
+		return std::max(static_cast<uint32_t>(xpbdEdges.size()), analytic);
+	}
+
+	uint32_t xpbdTileGroupCount(uint32_t offsetRows) const
+	{
+		return (cloth.gridSize.y + offsetRows + xpbdBandRows - 1) / xpbdBandRows;
+	}
+
 	void prepareBuffers()
 	{
 		const VkDeviceSize particleBytes = initialParticles.size() * sizeof(Particle);
@@ -503,7 +533,7 @@ public:
 		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &graphBuffers.offsets, vertexOffsets.size() * sizeof(uint32_t), vertexOffsets.data());
 		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &graphBuffers.neighbors, neighborIndices.size() * sizeof(uint32_t), neighborIndices.data());
 		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &xpbdBuffers.edges, xpbdEdges.size() * sizeof(glm::uvec4), xpbdEdges.data());
-		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &xpbdBuffers.lambdas, xpbdEdges.size() * sizeof(float));
+		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &xpbdBuffers.lambdas, lambdaSlotCount() * sizeof(float));
 		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &gnnBuffers.weights, model.payload.size() * sizeof(float), model.payload.data());
 		const uint32_t vertexCount = static_cast<uint32_t>(initialParticles.size());
 		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &gnnBuffers.hidden, static_cast<VkDeviceSize>(vertexCount) * 4 * sizeof(glm::vec4));
@@ -693,6 +723,7 @@ public:
 		makePipeline("gnn_layer0.comp.spv", compute.layer0Pipeline);
 		makePipeline("gnn_layer1_integrate.comp.spv", compute.layer1Pipeline);
 		makePipeline("gnn_constraints.comp.spv", compute.xpbdPipeline);
+		makePipeline("gnn_constraints_tiled.comp.spv", compute.xpbdTiledPipeline);
 		makePipeline("gnn_finalize.comp.spv", compute.finalizePipeline);
 
 		VkCommandPoolCreateInfo poolInfo{ .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = vulkanDevice->queueFamilyIndices.compute };
@@ -839,15 +870,30 @@ public:
 			if (xpbdIterations > 0) {
 				vkCmdFillBuffer(commandBuffer, xpbdBuffers.lambdas.buffer, 0, VK_WHOLE_SIZE, 0);
 				beginXpbdBarriers(commandBuffer, readSet);
-				vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.xpbdPipeline);
-				for (int32_t iteration = 0; iteration < xpbdIterations; ++iteration) {
-					for (uint32_t color = 0; color < xpbdColorCount; ++color) {
-						const uint32_t edgeOffset = xpbdBuffers.colorOffsets[color];
-						const uint32_t edgeCount = xpbdBuffers.colorOffsets[color + 1] - edgeOffset;
-						const uint32_t pushConstants[2] = { edgeOffset, edgeCount };
+				if (xpbdMode == XpbdTiled) {
+					// One dispatch per tile pass instead of one per (iteration, color).
+					// Each pass runs its sweeps inside the workgroup with groupshared
+					// barriers, and alternating the band origin brings band-crossing
+					// constraints inside on the following pass.
+					vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.xpbdTiledPipeline);
+					for (int32_t pass = 0; pass < xpbdTilePasses; ++pass) {
+						const uint32_t offsetRows = (pass % 2 == 0) ? 0u : xpbdBandRows / 2u;
+						const uint32_t pushConstants[2] = { offsetRows, static_cast<uint32_t>(xpbdLocalIterations) };
 						vkCmdPushConstants(commandBuffer, compute.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), pushConstants);
-						vkCmdDispatch(commandBuffer, (edgeCount + 127) / 128, 1, 1);
+						vkCmdDispatch(commandBuffer, xpbdTileGroupCount(offsetRows), 1, 1);
 						xpbdIterationBarrier(commandBuffer, readSet);
+					}
+				} else {
+					vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.xpbdPipeline);
+					for (int32_t iteration = 0; iteration < xpbdIterations; ++iteration) {
+						for (uint32_t color = 0; color < xpbdColorCount; ++color) {
+							const uint32_t edgeOffset = xpbdBuffers.colorOffsets[color];
+							const uint32_t edgeCount = xpbdBuffers.colorOffsets[color + 1] - edgeOffset;
+							const uint32_t pushConstants[2] = { edgeOffset, edgeCount };
+							vkCmdPushConstants(commandBuffer, compute.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), pushConstants);
+							vkCmdDispatch(commandBuffer, (edgeCount + 127) / 128, 1, 1);
+							xpbdIterationBarrier(commandBuffer, readSet);
+						}
 					}
 				}
 			} else {
@@ -1235,10 +1281,15 @@ public:
 			driver << VK_VERSION_MAJOR(deviceProperties.driverVersion) << '.' << VK_VERSION_MINOR(deviceProperties.driverVersion)
 				<< '.' << VK_VERSION_PATCH(deviceProperties.driverVersion);
 		}
-		stream << "device,driver_version,driver_raw,grid,nodes,directed_edges,xpbd_constraints,xpbd_iterations,xpbd_colors,samples,"
+		const uint32_t xpbdDispatches = xpbdIterations <= 0 ? 0u
+			: (xpbdMode == XpbdTiled ? static_cast<uint32_t>(xpbdTilePasses)
+			: static_cast<uint32_t>(xpbdIterations) * xpbdColorCount);
+		stream << "device,driver_version,driver_raw,grid,nodes,directed_edges,xpbd_constraints,xpbd_mode,xpbd_dispatches,xpbd_iterations,xpbd_colors,samples,"
 			"layer0_median_ms,layer1_integrate_median_ms,xpbd_median_ms,finalize_median_ms,total_median_ms,total_p95_ms\n";
 		stream << '"' << deviceProperties.deviceName << '"' << ',' << driver.str() << ',' << deviceProperties.driverVersion << ',' << cloth.gridSize.x << ','
-			<< initialParticles.size() << ',' << graphBuffers.edgeCount << ',' << xpbdBuffers.edgeCount << ',' << xpbdIterations << ',' << xpbdColorCount << ','
+			<< initialParticles.size() << ',' << graphBuffers.edgeCount << ',' << xpbdBuffers.edgeCount << ','
+			<< (xpbdMode == XpbdTiled ? "tiled" : "colored") << ',' << xpbdDispatches << ','
+			<< (xpbdMode == XpbdTiled ? xpbdLocalIterations * xpbdTilePasses : xpbdIterations) << ',' << xpbdColorCount << ','
 			<< timingSamples.size() << ','
 			<< std::fixed << std::setprecision(6) << percentile(layer0, 0.5) << ',' << percentile(layer1, 0.5) << ','
 			<< percentile(xpbd, 0.5) << ',' << percentile(finalize, 0.5) << ','
@@ -1269,7 +1320,13 @@ public:
 		}
 		if (solver == GNN) {
 			if (overlay->comboBox("Acceleration", &ablation, { "GNN 10-16-3", "Analytic target", "Zero", "Gravity only" })) resetRequested = true;
-			overlay->sliderInt("XPBD iterations", &xpbdIterations, 0, 16);
+			if (overlay->comboBox("XPBD dispatch", &xpbdMode, { "Colored (128 dispatches)", "Tiled groupshared" })) resetRequested = true;
+			if (xpbdMode == XpbdTiled) {
+				overlay->sliderInt("Tile passes", &xpbdTilePasses, 1, 8);
+				overlay->sliderInt("Local sweeps per pass", &xpbdLocalIterations, 1, 8);
+			} else {
+				overlay->sliderInt("XPBD iterations", &xpbdIterations, 0, 16);
+			}
 			overlay->sliderFloat("Stretch compliance (x1e-6)", &compute.uniformData.stretchComplianceMicro, 0.0f, 100.0f);
 			overlay->sliderFloat("Bend compliance (x1e-6)", &compute.uniformData.bendComplianceMicro, 0.0f, 50000.0f);
 			overlay->sliderFloat("XPBD velocity damping", &compute.uniformData.xpbdVelocityDamping, 0.0f, 5.0f);

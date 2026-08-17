@@ -59,6 +59,49 @@ So the headline cost is the constraint solver's dispatch structure, not the
 network. Reducing the color count or moving to tile-local Gauss-Seidel inside a
 workgroup is where the time is.
 
+### Tile-local XPBD: attempted, measured, not adopted
+
+`gnn_constraints_tiled.comp` collapses the iteration/color loops into one
+dispatch per tile pass: a workgroup owns a horizontal band of rows, copies it to
+groupshared memory, runs several Gauss-Seidel sweeps separated only by
+`GroupMemoryBarrierWithGroupSync`, and alternates the band origin between passes
+so band-crossing constraints move inside on the next pass. That takes the
+dispatch count from 128 to 4. Select it with `--gnn-xpbd-mode tiled` or the
+`XPBD dispatch` dropdown.
+
+It is **not the default**, because it is only faster on the smallest grid:
+
+| Grid | Colored dispatches | Colored XPBD | Tiled dispatches | Tiled XPBD | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 16×16 | 128 | 0.272608 ms | 4 | 0.204512 ms | 1.33x faster |
+| 32×32 | 128 | 0.323040 ms | 4 | 0.332544 ms | 0.97x, a wash |
+| 64×64 | 128 | 0.364320 ms | 4 | 0.638592 ms | 0.57x, clearly worse |
+
+The premise still holds -- at 64×64 the colored path spends 0.0455 ms per
+iteration, and 16 dispatch/barrier pairs at roughly 2.8 µs each account for
+0.0448 ms of it, so it is very nearly all launch overhead. The tiled path fails
+for two reasons that are implementation choices rather than properties of the
+approach:
+
+1. **Occupancy.** Row bands of 8 give `height/8` workgroups: 2, 4 and 8 for the
+   three grids. Eight workgroups leave most of a 34-SM GPU idle, so each sweep
+   costs 0.0399 ms -- nearly as much as a whole colored iteration.
+2. **Redundant filtering.** Each thread walks all `6 x bandVertices` candidate
+   constraints once per color and discards those of other colors, with an integer
+   divide and modulo per candidate. That is 16x more index arithmetic than needed.
+
+Fixing both means 2D tiles small enough to fill the GPU (8×8 gives 64 workgroups
+at 64×64) plus exact per-(type, color) enumeration instead of filtering. That is
+a larger change than this pass, so the measurement is recorded here rather than
+guessed at.
+
+Correctness of the tiled path was verified independently of its speed: bands
+never overlap within a pass, so each vertex has one writer, and
+`reset_replay_max_abs` stayed exactly 0 across a reset and replay, which is a
+direct race check. Synchronization validation was clean. Quality was slightly
+worse at these settings (max stretch strain 0.886 versus 0.813 for colored,
+bend 0.481 versus 0.501), which is the second reason not to make it the default.
+
 The timings are measurable and total time increases monotonically with graph
 size. This is only a deployment-chain measurement: the synthetic one-step target
 plus XPBD fallback is not evidence of production cloth quality. A benchmark run

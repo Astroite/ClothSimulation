@@ -1,0 +1,201 @@
+// Tile-local XPBD for the GNN cloth path.
+//
+// The colored path costs one dispatch plus one global barrier per (iteration,
+// color) pair: 8 x 16 = 128 dispatches and 256 barriers per frame. Measured on an
+// RTX 4060 Ti that was 90% of the compute time at 64x64 and grew only 1.34x for a
+// 16x vertex increase, so it was launch overhead rather than work.
+//
+// Here one workgroup owns a horizontal band of rows, copies it into groupshared
+// memory, and runs several Gauss-Seidel sweeps locally, separated only by
+// GroupMemoryBarrierWithGroupSync. Constraints that leave the band are skipped
+// and picked up by the next pass, which shifts the band grid by half a band, so
+// alternating passes cover every constraint. Bands never overlap within a pass,
+// so each vertex has exactly one writer and the result stays deterministic.
+//
+// Rest lengths come from restDistH/V/D in the UBO rather than from rest positions,
+// which keeps rest data out of groupshared entirely.
+
+struct Particle {
+    float4 pos;
+    float4 vel;
+    float4 uv;
+    float4 normal;
+    float4 rest;
+};
+
+struct UBO {
+    float deltaT;
+    float particleMass;
+    float springStiffness;
+    float damping;
+    float restDistH;
+    float restDistV;
+    float restDistD;
+    float sphereRadius;
+    float4 spherePos;
+    float4 gravity;
+    int2 particleCount;
+    uint vertexCount;
+    uint edgeCount;
+    float maxSpeed;
+    float maxAcceleration;
+    float stretchComplianceMicro;
+    float bendComplianceMicro;
+    float xpbdVelocityDamping;
+    float3 sphereVelocity;
+};
+
+struct PushConstants {
+    int bandOffsetRows;      // shifts the band grid so boundary constraints move inside
+    uint localIterations;
+};
+
+[[vk::binding(1)]] RWStructuredBuffer<Particle> particles;
+cbuffer ubo : register(b2) { UBO params; };
+[[vk::binding(9)]] RWStructuredBuffer<float> constraintLambdas;
+[[vk::push_constant]] PushConstants pushConstants;
+
+static const uint BAND_ROWS = 8;
+static const uint MAX_WIDTH = 64;
+static const uint THREADS = 256;
+static const uint CONSTRAINT_TYPES = 6;
+
+// xyz = position, w = inverse mass (zero for pinned vertices).
+groupshared float4 tile[BAND_ROWS * MAX_WIDTH];
+
+// Lambda slots are addressed analytically so a constraint keeps its accumulated
+// multiplier across passes, which matters because the default bend compliance
+// makes alpha tilde larger than the inverse-mass sum.
+uint lambdaIndex(uint type, uint x, uint y, uint width, uint height)
+{
+    return (type * height + y) * width + x;
+}
+
+float restLengthFor(uint type)
+{
+    if (type == 0) return params.restDistH;
+    if (type == 1) return params.restDistV;
+    if (type == 2 || type == 3) return params.restDistD;
+    if (type == 4) return 2.0 * params.restDistH;
+    return 2.0 * params.restDistV;
+}
+
+bool isBendType(uint type)
+{
+    return type >= 4;
+}
+
+// Colors match the host's colored path so that constraints processed together
+// inside a sweep never share a vertex.
+uint colorOf(uint type, uint x, uint y)
+{
+    if (type == 0) return x & 1u;
+    if (type == 1) return 2u + (y & 1u);
+    if (type == 2) return 4u + (x & 1u);
+    if (type == 3) return 6u + (x & 1u);
+    if (type == 4) return 8u + (x & 3u);
+    return 12u + (y & 3u);
+}
+
+// Second endpoint of a constraint, in grid coordinates.
+int2 secondEndpoint(uint type, int x, int y)
+{
+    if (type == 0) return int2(x + 1, y);
+    if (type == 1) return int2(x, y + 1);
+    if (type == 2) return int2(x + 1, y + 1);
+    if (type == 3) return int2(x - 1, y + 1);
+    if (type == 4) return int2(x + 2, y);
+    return int2(x, y + 2);
+}
+
+[numthreads(THREADS, 1, 1)]
+void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    if (params.deltaT <= 0.0) return;
+
+    const uint width = uint(params.particleCount.x);
+    const uint height = uint(params.particleCount.y);
+    const int bandStart = int(groupID.x * BAND_ROWS) - pushConstants.bandOffsetRows;
+    const uint localCount = BAND_ROWS * width;
+
+    // Load the band. Rows outside the cloth are marked immovable so constraints
+    // touching them are skipped rather than reading undefined data.
+    for (uint local = lane; local < localCount; local += THREADS) {
+        const int row = bandStart + int(local / width);
+        const uint column = local % width;
+        if (row < 0 || row >= int(height)) {
+            tile[local] = float4(0.0, 0.0, 0.0, -1.0);
+        } else {
+            const Particle particle = particles[uint(row) * width + column];
+            const float inverseMass = particle.rest.w > 0.5 ? 0.0 : 1.0 / max(params.particleMass, 1.0e-6);
+            tile[local] = float4(particle.pos.xyz, inverseMass);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    const float inverseDeltaSquared = 1.0 / max(params.deltaT * params.deltaT, 1.0e-8);
+    const uint candidates = CONSTRAINT_TYPES * localCount;
+
+    for (uint iteration = 0; iteration < pushConstants.localIterations; ++iteration) {
+        for (uint color = 0; color < 16; ++color) {
+            for (uint candidate = lane; candidate < candidates; candidate += THREADS) {
+                const uint type = candidate / localCount;
+                const uint local = candidate % localCount;
+                const uint localRow = local / width;
+                const uint x0 = local % width;
+                const int y0 = bandStart + int(localRow);
+                if (y0 < 0 || y0 >= int(height)) continue;
+                if (colorOf(type, x0, uint(y0)) != color) continue;
+
+                const int2 second = secondEndpoint(type, int(x0), y0);
+                if (second.x < 0 || second.x >= int(width) || second.y < 0 || second.y >= int(height)) continue;
+                // Skip anything leaving the band; the offset pass owns it.
+                const int secondLocalRow = second.y - bandStart;
+                if (secondLocalRow < 0 || secondLocalRow >= int(BAND_ROWS)) continue;
+
+                const uint localA = local;
+                const uint localB = uint(secondLocalRow) * width + uint(second.x);
+                const float4 a = tile[localA];
+                const float4 b = tile[localB];
+                if (a.w < 0.0 || b.w < 0.0) continue;
+                const float inverseMassSum = a.w + b.w;
+                if (inverseMassSum <= 0.0) continue;
+
+                const float restLength = restLengthFor(type);
+                if (restLength <= 1.0e-7) continue;
+                const float3 delta = a.xyz - b.xyz;
+                const float distance = length(delta);
+                if (distance <= 1.0e-7) continue;
+                const float3 gradient = delta / distance;
+                const float constraintValue = distance - restLength;
+
+                const float complianceMicro = isBendType(type) ? params.bendComplianceMicro : params.stretchComplianceMicro;
+                const float alphaTilde = max(complianceMicro, 0.0) * 1.0e-6 * inverseDeltaSquared;
+                const uint slot = lambdaIndex(type, x0, uint(y0), width, height);
+                const float lambda = constraintLambdas[slot];
+                const float deltaLambda = (-constraintValue - alphaTilde * lambda) / (inverseMassSum + alphaTilde);
+
+                const float3 correctionA = a.w * gradient * deltaLambda;
+                const float3 correctionB = -b.w * gradient * deltaLambda;
+                if (all(isfinite(correctionA)) && all(isfinite(correctionB)) && isfinite(deltaLambda)) {
+                    tile[localA] = float4(a.xyz + correctionA, a.w);
+                    tile[localB] = float4(b.xyz + correctionB, b.w);
+                    constraintLambdas[slot] = lambda + deltaLambda;
+                } else {
+                    constraintLambdas[slot] = 0.0;
+                }
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+
+    // Write back. Pinned vertices keep their position; finalize re-pins anyway.
+    for (uint store = lane; store < localCount; store += THREADS) {
+        const int row = bandStart + int(store / width);
+        const uint column = store % width;
+        if (row < 0 || row >= int(height)) continue;
+        const float4 value = tile[store];
+        if (value.w <= 0.0) continue;
+        particles[uint(row) * width + column].pos = float4(value.xyz, 1.0);
+    }
+}
