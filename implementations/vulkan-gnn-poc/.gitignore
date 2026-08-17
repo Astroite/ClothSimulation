@@ -3,5 +3,7 @@
 /build/
 /tests/build/
 /results/benchmark_*.csv
+# Regenerable position dumps; the derived gnn_ablation.json report is tracked.
+/results/ablation_*.bin
 __pycache__/
 *.pyc

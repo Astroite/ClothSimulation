@@ -53,6 +53,14 @@ public:
 	std::vector<glm::vec4> repeatabilityBaseline;
 	int32_t solver{ GNN };
 	int32_t xpbdIterations{ 8 };
+	// Where the acceleration comes from. Matches the shader's ABLATE_* constants.
+	enum Ablation : int32_t { AblateGnn = 0, AblateAnalytic = 1, AblateZero = 2, AblateGravity = 3 };
+	int32_t ablation{ AblateGnn };
+	bool ablationDumpMode{ false };
+	bool ablationDumpDone{ false };
+	uint32_t ablationDumpFrame{ 600 };
+	uint32_t ablationFrameCounter{ 0 };
+	std::filesystem::path ablationDumpOutput;
 	uint32_t timestampWarmup{ 200 };
 	std::filesystem::path benchmarkOutput{ "gnn_benchmark.csv" };
 	std::vector<TimingSample> timingSamples;
@@ -184,7 +192,16 @@ public:
 		const uint32_t grid = (requestedGrid == 16 || requestedGrid == 32 || requestedGrid == 64) ? requestedGrid : 32;
 		cloth.gridSize = verifyMode ? glm::uvec2(32) : glm::uvec2(grid);
 		benchmarkOutput = argumentValue("--gnn-benchmark-output", "gnn_benchmark.csv");
-		if (gnnBenchmarkMode || verifyMode) {
+		const std::string ablationName = argumentValue("--gnn-ablate", "gnn");
+		ablation = ablationName == "analytic" ? AblateAnalytic
+			: (ablationName == "zero" ? AblateZero
+			: (ablationName == "gravity" ? AblateGravity : AblateGnn));
+		if (hasArgument("--gnn-ablate-dump")) {
+			ablationDumpMode = true;
+			ablationDumpOutput = argumentValue("--gnn-ablate-dump", "gnn_ablation_gnn.bin");
+			ablationDumpFrame = static_cast<uint32_t>(std::strtoul(argumentValue("--gnn-ablate-frames", "600").c_str(), nullptr, 10));
+		}
+		if (gnnBenchmarkMode || verifyMode || ablationDumpMode) {
 			benchmark.active = true;
 			// Upstream only silences exitFatal when benchmark mode comes from the
 			// -b command line flag. This sample sets benchmark.active directly, so
@@ -193,7 +210,7 @@ public:
 			vks::tools::errorModeSilent = true;
 			benchmark.warmup = 0;
 			benchmark.duration = 600;
-			benchmark.outputFrames = 1204;
+			benchmark.outputFrames = ablationDumpMode ? static_cast<int32_t>(ablationDumpFrame + 4) : 1204;
 			settings.overlay = false;
 #if defined(_WIN32)
 			setupConsole("Vulkan GNN cloth");
@@ -670,8 +687,9 @@ public:
 
 	void updateComputeUniform()
 	{
-		if (verifyMode) {
-			// A fixed step makes the 600-frame reset/replay check deterministic.
+		if (verifyMode || ablationDumpMode) {
+			// A fixed step makes the 600-frame reset/replay check deterministic, and
+			// makes the three ablation runs directly comparable.
 			compute.uniformData.deltaT = 1.0f / 60.0f;
 		} else if (paused) {
 			compute.uniformData.deltaT = 0.0f;
@@ -680,7 +698,7 @@ public:
 		} else {
 			compute.uniformData.deltaT = std::min(frameTimer, 0.02f);
 		}
-		if (!verifyMode && !gnnBenchmarkMode) {
+		if (!verifyMode && !gnnBenchmarkMode && !ablationDumpMode) {
 			if (animateSphere && !paused) sphereMotionTime += std::min(frameTimer, 0.05f);
 			if (animateSphere) {
 				const float xPhase = 0.7f * sphereMotionTime;
@@ -762,20 +780,26 @@ public:
 			readSet = 1 - readSet;
 			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.pipelineLayout, 0, 1, &compute.descriptorSets[readSet], 0, nullptr);
 			vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, compute.queryPools[currentBuffer], 0);
-			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.layer0Pipeline);
-			vkCmdDispatch(commandBuffer, compute.uniformData.vertexCount, 1, 1);
+			// Layer 0 only produces the hidden state the network needs, so the
+			// ablation modes skip it entirely rather than compute and discard it.
+			if (ablation == AblateGnn) {
+				vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.layer0Pipeline);
+				vkCmdDispatch(commandBuffer, compute.uniformData.vertexCount, 1, 1);
 
-			VkBufferMemoryBarrier hiddenBarrier = vks::initializers::bufferMemoryBarrier();
-			hiddenBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-			hiddenBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-			hiddenBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			hiddenBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			hiddenBarrier.buffer = gnnBuffers.hidden.buffer;
-			hiddenBarrier.size = VK_WHOLE_SIZE;
-			vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &hiddenBarrier, 0, nullptr);
+				VkBufferMemoryBarrier hiddenBarrier = vks::initializers::bufferMemoryBarrier();
+				hiddenBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+				hiddenBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				hiddenBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				hiddenBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				hiddenBarrier.buffer = gnnBuffers.hidden.buffer;
+				hiddenBarrier.size = VK_WHOLE_SIZE;
+				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &hiddenBarrier, 0, nullptr);
+			}
 			vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, compute.queryPools[currentBuffer], 1);
 
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.layer1Pipeline);
+			const uint32_t layer1PushConstants[2] = { static_cast<uint32_t>(ablation), 0u };
+			vkCmdPushConstants(commandBuffer, compute.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(layer1PushConstants), layer1PushConstants);
 			vkCmdDispatch(commandBuffer, compute.uniformData.vertexCount, 1, 1);
 
 
@@ -801,8 +825,8 @@ public:
 				particleComputeBarrier(commandBuffer, readSet);
 			}
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.finalizePipeline);
-			// Only verification runs need the position mirror.
-			const uint32_t finalizePushConstants[2] = { verifyMode ? 1u : 0u, 0u };
+			// Only verification and ablation runs need the position mirror.
+			const uint32_t finalizePushConstants[2] = { (verifyMode || ablationDumpMode) ? 1u : 0u, 0u };
 			vkCmdPushConstants(commandBuffer, compute.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(finalizePushConstants), finalizePushConstants);
 			vkCmdDispatch(commandBuffer, (compute.uniformData.vertexCount + 127) / 128, 1, 1);
 			vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, compute.queryPools[currentBuffer], 2);
@@ -916,10 +940,13 @@ public:
 
 	std::vector<glm::vec4> readAccelerationForVerification()
 	{
-		const VkDeviceSize bytes = static_cast<VkDeviceSize>(golden.vertexCount) * sizeof(glm::vec4);
+		// initialParticles rather than golden.vertexCount: the ablation dump mode
+		// does not load a golden case, and the two are equal when it does.
+		const uint32_t vertexCount = static_cast<uint32_t>(initialParticles.size());
+		const VkDeviceSize bytes = static_cast<VkDeviceSize>(vertexCount) * sizeof(glm::vec4);
 		const std::vector<uint8_t> raw = readbackForVerification(gnnBuffers.acceleration.buffer, bytes);
 		const glm::vec4* values = reinterpret_cast<const glm::vec4*>(raw.data());
-		return std::vector<glm::vec4>(values, values + golden.vertexCount);
+		return std::vector<glm::vec4>(values, values + vertexCount);
 	}
 
 	std::vector<glm::vec4> readPositionsForVerification()
@@ -1054,6 +1081,37 @@ public:
 		}
 	}
 
+	// Dumps the simulated positions after a fixed number of deterministic steps so
+	// the three ablation modes can be compared offline. Deliberately separate from
+	// the verification schedule: this measures how much the network's output
+	// actually changes the cloth, which is not a pass/fail property.
+	void dumpAblationPositions()
+	{
+		if (!ablationDumpMode || ablationDumpDone) return;
+		++ablationFrameCounter;
+		if (ablationFrameCounter != ablationDumpFrame) return;
+
+		const std::vector<glm::vec4> positions = readPositionsForVerification();
+		const uint32_t vertexCount = static_cast<uint32_t>(positions.size());
+		if (ablationDumpOutput.has_parent_path()) std::filesystem::create_directories(ablationDumpOutput.parent_path());
+		std::ofstream stream(ablationDumpOutput, std::ios::binary);
+		const uint32_t header[4]{ 1u, vertexCount, static_cast<uint32_t>(ablation), ablationDumpFrame };
+		stream.write("VABL", 4);
+		stream.write(reinterpret_cast<const char*>(header), sizeof(header));
+		for (const glm::vec4& position : positions) {
+			const float xyz[3]{ position.x, position.y, position.z };
+			stream.write(reinterpret_cast<const char*>(xyz), sizeof(xyz));
+		}
+		stream.close();
+
+		const PhysicalHealth health = measurePhysicalHealth(positions, readAccelerationForVerification());
+		std::cout << "Ablation dump mode=" << ablation << " frames=" << ablationDumpFrame
+			<< " vertices=" << vertexCount << " -> " << ablationDumpOutput.string()
+			<< "\n  aabb_extent=" << health.aabbExtent << " max_stretch_strain=" << health.maxStretchStrain
+			<< " acceleration_clamped=" << health.accelerationClampedVertices << "\n";
+		ablationDumpDone = true;
+	}
+
 	void render() override
 	{
 		if (!prepared) return;
@@ -1075,6 +1133,7 @@ public:
 		computeSubmit.pCommandBuffers = &compute.commandBuffers[currentBuffer];
 		VK_CHECK_RESULT(vkQueueSubmit(compute.queue, 1, &computeSubmit, compute.fences[currentBuffer]));
 		verifyAcceleration();
+		dumpAblationPositions();
 
 		VK_CHECK_RESULT(vkWaitForFences(device, 1, &waitFences[currentBuffer], VK_TRUE, UINT64_MAX));
 		VK_CHECK_RESULT(vkResetFences(device, 1, &waitFences[currentBuffer]));
@@ -1154,6 +1213,7 @@ public:
 			sphereMotionTime = 0.0f;
 		}
 		if (solver == GNN) {
+			if (overlay->comboBox("Acceleration", &ablation, { "GNN 10-16-3", "Analytic target", "Zero", "Gravity only" })) resetRequested = true;
 			overlay->sliderInt("XPBD iterations", &xpbdIterations, 0, 16);
 			overlay->sliderFloat("Stretch compliance (x1e-6)", &compute.uniformData.stretchComplianceMicro, 0.0f, 100.0f);
 			overlay->sliderFloat("Bend compliance (x1e-6)", &compute.uniformData.bendComplianceMicro, 0.0f, 50000.0f);

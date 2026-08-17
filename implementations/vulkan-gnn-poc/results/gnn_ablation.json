@@ -1,0 +1,33 @@
+{
+  "analytic_vs_gravity": {
+    "l2_norm": 0.14358828159265188,
+    "max_vertex_distance": 0.015095440138881125,
+    "mean_vertex_distance": 0.003460815363592424
+  },
+  "analytic_vs_zero": {
+    "l2_norm": 7.365268343782451,
+    "max_vertex_distance": 0.36528365687061326,
+    "mean_vertex_distance": 0.21659214427261617
+  },
+  "coupling_effect_l2": 0.14358828159265188,
+  "frames": 600,
+  "gnn_vs_analytic": {
+    "l2_norm": 2.1158022727818806,
+    "max_vertex_distance": 0.29415425804264256,
+    "mean_vertex_distance": 0.04514654340556567
+  },
+  "gnn_vs_gravity": {
+    "l2_norm": 2.0519931478560007,
+    "max_vertex_distance": 0.296909162144217,
+    "mean_vertex_distance": 0.04314189994759579
+  },
+  "gnn_vs_zero": {
+    "l2_norm": 8.062148210703516,
+    "max_vertex_distance": 0.4053971311821124,
+    "mean_vertex_distance": 0.2362665645168821
+  },
+  "interpretation": "coupling_effect_l2 is |analytic - gravity|: everything graph message passing contributes, since those two modes differ only by the neighbour term. network_error_l2 is |gnn - analytic|: how far the network drifts from the target it was trained to reproduce. A ratio above 1 means the network's approximation error is larger than the effect it exists to model, so the graph is not earning its cost in this scenario. That is expected here: XPBD's near-rigid distance constraints already enforce what the Laplacian term was approximating. It bounds what this PoC demonstrates to the deployment chain, not learned dynamics.",
+  "network_error_l2": 2.1158022727818806,
+  "network_error_over_coupling_effect": 14.73520157295452,
+  "vertices": 1024
+}

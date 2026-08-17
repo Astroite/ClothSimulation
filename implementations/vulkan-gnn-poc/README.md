@@ -79,8 +79,24 @@ synchronization validation。交互 smoke test 会先让移动球与 GNN/XPBD �
 结果写入 `results/gnn_verify.json` 与 `results/validation_output.txt`。
 
 当前 RTX 4060 Ti 实测：`max_abs=1.907348633e-06`、
-`mean_abs=3.117110078e-07`、健康异常 0、重置回放差 0。完整记录见
+`mean_abs=3.117110078e-07`、健康异常 0、重置回放差 0。1200 帧检查同时报告
+布料 AABB、最大拉伸/弯曲应变，以及命中加速度/速度钳位的顶点数——黄金场景
+下 402/1024 顶点触发加速度钳位、最大拉伸应变 0.81。完整记录见
 [`results/RESULTS.md`](results/RESULTS.md)。
+
+## 消融：网络到底贡献了什么
+
+```powershell
+.\ablation.ps1
+```
+
+同一个确定性 600 步场景跑四次，只改加速度来源（`gnn`、`analytic` 直接求值训练
+目标、`gravity` 去掉邻居耦合、`zero` 完全无加速度），比较末帧位置，结果写入
+`results/gnn_ablation.json`。UI 的 `Acceleration` 下拉可交互切换同样四种模式。
+
+实测结论：整个图消息传递带来的差异只有 3.5 mm 平均位移（近刚性 XPBD 已经
+把 Laplacian 项要近似的东西约束住了），而网络相对其训练目标的自身误差是该
+效应的 **14.7 倍**。因此本 PoC 证明的是部署链路，不是学习到的动力学。
 
 ## Benchmark
 
