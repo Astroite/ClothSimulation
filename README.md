@@ -5,10 +5,15 @@
 ## 目录结构
 
 - `papers/`：论文原文、论文链接与阅读摘要
-- `notes/`：概念梳理、公式推导和学习记录
-- `tutorials/`：课程、文章、视频等教程资料
+  - `gnn/`：GNN 相关（Scarselli / Kipf-Welling / Pfaff，含中文导读）
+  - `xpbd/`：XPBD/PBD 出处与中文导读——**当前实现的物理实际依据**
+- `plans/`：技术方案与可行性分析
 - `implementations/`：算法实现、示例工程和实验代码
-- `assets/`：网格、材质、场景等测试素材
+  - `vulkan-gnn-poc/`：目前唯一的实质实现
+- `notes/`、`tutorials/`、`assets/`：**尚未填充**，仅有占位 README
+
+当前内容重心明显偏向 `implementations/vulkan-gnn-poc/` 与其相关论文；上面标注
+「尚未填充」的三个目录只是预留结构，不要误以为里面有资料。
 
 ## 建议的整理方式
 
