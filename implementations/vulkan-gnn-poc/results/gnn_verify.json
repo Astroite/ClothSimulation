@@ -6,5 +6,14 @@
   "stability_frames": 1200,
   "health_failures": 0,
   "reset_replay_max_abs": 0,
+  "cloth_aabb_extent": 5,
+  "cloth_aabb_extent_limit": 15,
+  "max_stretch_strain": 0.8128330557,
+  "max_stretch_strain_limit": 2,
+  "max_bend_strain": 0.501447061,
+  "bend_strain_note": "reported only; the bend term is a long-edge distance approximation, not a dihedral constraint",
+  "acceleration_clamped_vertices": 402,
+  "speed_clamped_vertices": 0,
+  "clamp_telemetry_note": "nonzero means the network ran outside its training distribution and the clamps absorbed it",
   "passed": true
 }

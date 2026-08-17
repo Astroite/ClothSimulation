@@ -33,6 +33,15 @@ struct UBO {
 
 [[vk::binding(1)]] RWStructuredBuffer<Particle> particles;
 cbuffer ubo : register(b2) { UBO params; };
+// Verification mirror of the final position. Written only when the host asks for
+// it, so benchmark and interactive runs do not pay for the extra store.
+[[vk::binding(10)]] RWStructuredBuffer<float4> verificationPositions;
+
+struct PushConstants {
+    uint mirrorPositions;
+    uint unused;
+};
+[[vk::push_constant]] PushConstants pushConstants;
 
 float3 clampMagnitude(float3 value, float maximum)
 {
@@ -52,8 +61,10 @@ void main(uint3 id : SV_DispatchThreadID)
         next.vel = 0.0;
         next.normal = float4(next.rest.xyz, 1.0);
         particles[vertex] = next;
+        if (pushConstants.mirrorPositions != 0) verificationPositions[vertex] = next.pos;
         return;
     }
+    // A frozen step leaves the mirror untouched, which still matches the state.
     if (params.deltaT <= 0.0) return;
 
     float3 correctedPosition = next.pos.xyz;
@@ -83,4 +94,5 @@ void main(uint3 id : SV_DispatchThreadID)
     next.vel = float4(clampMagnitude(correctedVelocity, params.maxSpeed), 0.0);
     next.normal = float4(correctedPosition, 1.0);
     particles[vertex] = next;
+    if (pushConstants.mirrorPositions != 0) verificationPositions[vertex] = next.pos;
 }

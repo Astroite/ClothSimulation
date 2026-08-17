@@ -98,20 +98,35 @@ void main(uint3 groupID : SV_GroupID, uint lane : SV_GroupIndex)
             predictedAcceleration[0],
             predictedAcceleration[1],
             predictedAcceleration[2]);
+        bool accelerationClamped = false;
+        bool speedClamped = false;
         if (next.rest.w > 0.5) {
             acceleration = 0.0;
             next.pos = float4(next.rest.xyz, 1.0);
             next.vel = 0.0;
             next.normal = float4(next.rest.xyz, 1.0);
         } else {
+            accelerationClamped = length(acceleration) > params.maxAcceleration;
             acceleration = clampMagnitude(acceleration, params.maxAcceleration);
-            float3 velocity = clampMagnitude(next.vel.xyz + acceleration * params.deltaT, params.maxSpeed);
+            const float3 predictedVelocity = next.vel.xyz + acceleration * params.deltaT;
+            speedClamped = length(predictedVelocity) > params.maxSpeed;
+            float3 velocity = clampMagnitude(predictedVelocity, params.maxSpeed);
             float3 position = next.pos.xyz + velocity * params.deltaT;
             next.pos = float4(position, 1.0);
             next.vel = float4(velocity, 0.0);
         }
         const bool finiteState = all(isfinite(next.pos)) && all(isfinite(next.vel)) && all(isfinite(next.normal)) && all(isfinite(acceleration));
-        accelerationOut[vertex] = float4(acceleration, (finiteState && !pinnedInputDrift) ? 0.0 : 1.0);
+        // w carries a status bitfield rather than a plain health flag:
+        //   1 = non-finite state or pinned drift (hard failure)
+        //   2 = acceleration clamp engaged
+        //   4 = speed clamp engaged
+        // Bits 2 and 4 are telemetry. The clamps are the only thing keeping the
+        // network stable outside its training distribution, so without this a
+        // saturating clamp is indistinguishable from a network behaving well.
+        const float status = ((finiteState && !pinnedInputDrift) ? 0.0 : 1.0)
+            + (accelerationClamped ? 2.0 : 0.0)
+            + (speedClamped ? 4.0 : 0.0);
+        accelerationOut[vertex] = float4(acceleration, status);
         particleOut[vertex] = next;
     }
 }

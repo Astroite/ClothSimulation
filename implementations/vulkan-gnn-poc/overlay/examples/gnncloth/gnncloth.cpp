@@ -8,9 +8,11 @@
 #include "vulkanexamplebase.h"
 #include "vgnn_format.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <numeric>
 #include <sstream>
 
@@ -83,6 +85,13 @@ public:
 		vks::Buffer weights;
 		vks::Buffer hidden;
 		vks::Buffer acceleration;
+		// Final positions mirrored by gnn_finalize for verification. The particle
+		// buffers cannot serve this purpose: they are released to the graphics
+		// queue at the end of the compute command buffer, so reading them back on
+		// the compute queue would skip the ownership acquire. This buffer is only
+		// ever touched by compute, and the mirroring store is push-constant gated
+		// so benchmark runs pay nothing for it.
+		vks::Buffer verificationPositions;
 	} gnnBuffers;
 
 	struct Graphics {
@@ -177,6 +186,11 @@ public:
 		benchmarkOutput = argumentValue("--gnn-benchmark-output", "gnn_benchmark.csv");
 		if (gnnBenchmarkMode || verifyMode) {
 			benchmark.active = true;
+			// Upstream only silences exitFatal when benchmark mode comes from the
+			// -b command line flag. This sample sets benchmark.active directly, so
+			// without this a failing verification would block on a modal message
+			// box behind a hidden window instead of reporting a non-zero exit.
+			vks::tools::errorModeSilent = true;
 			benchmark.warmup = 0;
 			benchmark.duration = 600;
 			benchmark.outputFrames = 1204;
@@ -232,6 +246,7 @@ public:
 		gnnBuffers.weights.destroy();
 		gnnBuffers.hidden.destroy();
 		gnnBuffers.acceleration.destroy();
+		gnnBuffers.verificationPositions.destroy();
 	}
 
 	void generateGraph(uint32_t gridSize)
@@ -456,6 +471,7 @@ public:
 		const uint32_t vertexCount = static_cast<uint32_t>(initialParticles.size());
 		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &gnnBuffers.hidden, static_cast<VkDeviceSize>(vertexCount) * 4 * sizeof(glm::vec4));
 		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &gnnBuffers.acceleration, static_cast<VkDeviceSize>(vertexCount) * sizeof(glm::vec4));
+		vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &gnnBuffers.verificationPositions, static_cast<VkDeviceSize>(vertexCount) * sizeof(glm::vec4));
 
 		std::vector<uint32_t> indices;
 		for (uint32_t y = 0; y < cloth.gridSize.y - 1; ++y) {
@@ -591,6 +607,7 @@ public:
 			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 7),
 			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 8),
 			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 9),
+			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 10),
 		};
 		VkDescriptorSetLayoutCreateInfo descriptorLayout = vks::initializers::descriptorSetLayoutCreateInfo(layoutBindings);
 		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorLayout, nullptr, &compute.descriptorSetLayout));
@@ -616,6 +633,7 @@ public:
 				vks::initializers::writeDescriptorSet(compute.descriptorSets[setIndex], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7, &gnnBuffers.acceleration.descriptor),
 				vks::initializers::writeDescriptorSet(compute.descriptorSets[setIndex], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8, &xpbdBuffers.edges.descriptor),
 				vks::initializers::writeDescriptorSet(compute.descriptorSets[setIndex], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9, &xpbdBuffers.lambdas.descriptor),
+				vks::initializers::writeDescriptorSet(compute.descriptorSets[setIndex], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10, &gnnBuffers.verificationPositions.descriptor),
 			};
 			vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 		}
@@ -783,6 +801,9 @@ public:
 				particleComputeBarrier(commandBuffer, readSet);
 			}
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.finalizePipeline);
+			// Only verification runs need the position mirror.
+			const uint32_t finalizePushConstants[2] = { verifyMode ? 1u : 0u, 0u };
+			vkCmdPushConstants(commandBuffer, compute.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(finalizePushConstants), finalizePushConstants);
 			vkCmdDispatch(commandBuffer, (compute.uniformData.vertexCount + 127) / 128, 1, 1);
 			vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, compute.queryPools[currentBuffer], 2);
 			compute.queryWritten[currentBuffer] = true;
@@ -856,10 +877,11 @@ public:
 
 	TimingSample lastTiming{};
 
-	std::vector<glm::vec4> readAccelerationForVerification()
+	// Copies a device-local buffer to host memory. Verification only; the normal
+	// and benchmark paths never read back from the GPU.
+	std::vector<uint8_t> readbackForVerification(VkBuffer source, VkDeviceSize bytes)
 	{
 		VK_CHECK_RESULT(vkWaitForFences(device, 1, &compute.fences[currentBuffer], VK_TRUE, UINT64_MAX));
-		const VkDeviceSize bytes = static_cast<VkDeviceSize>(golden.vertexCount) * sizeof(glm::vec4);
 		vks::Buffer readback;
 		vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &readback, bytes);
 		VkCommandBufferAllocateInfo allocate = vks::initializers::commandBufferAllocateInfo(compute.commandPool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1);
@@ -872,11 +894,11 @@ public:
 		barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		barrier.buffer = gnnBuffers.acceleration.buffer;
+		barrier.buffer = source;
 		barrier.size = VK_WHOLE_SIZE;
 		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &barrier, 0, nullptr);
 		VkBufferCopy copy{ .size = bytes };
-		vkCmdCopyBuffer(commandBuffer, gnnBuffers.acceleration.buffer, readback.buffer, 1, &copy);
+		vkCmdCopyBuffer(commandBuffer, source, readback.buffer, 1, &copy);
 		VK_CHECK_RESULT(vkEndCommandBuffer(commandBuffer));
 		VkSubmitInfo submit = vks::initializers::submitInfo();
 		submit.commandBufferCount = 1;
@@ -884,12 +906,71 @@ public:
 		VK_CHECK_RESULT(vkQueueSubmit(compute.queue, 1, &submit, VK_NULL_HANDLE));
 		VK_CHECK_RESULT(vkQueueWaitIdle(compute.queue));
 		VK_CHECK_RESULT(readback.map());
-		const glm::vec4* actual = reinterpret_cast<const glm::vec4*>(readback.mapped);
-		std::vector<glm::vec4> values(actual, actual + golden.vertexCount);
+		const uint8_t* mapped = reinterpret_cast<const uint8_t*>(readback.mapped);
+		std::vector<uint8_t> bytesOut(mapped, mapped + bytes);
 		readback.unmap();
 		readback.destroy();
 		vkFreeCommandBuffers(device, compute.commandPool, 1, &commandBuffer);
-		return values;
+		return bytesOut;
+	}
+
+	std::vector<glm::vec4> readAccelerationForVerification()
+	{
+		const VkDeviceSize bytes = static_cast<VkDeviceSize>(golden.vertexCount) * sizeof(glm::vec4);
+		const std::vector<uint8_t> raw = readbackForVerification(gnnBuffers.acceleration.buffer, bytes);
+		const glm::vec4* values = reinterpret_cast<const glm::vec4*>(raw.data());
+		return std::vector<glm::vec4>(values, values + golden.vertexCount);
+	}
+
+	std::vector<glm::vec4> readPositionsForVerification()
+	{
+		const VkDeviceSize bytes = initialParticles.size() * sizeof(glm::vec4);
+		const std::vector<uint8_t> raw = readbackForVerification(gnnBuffers.verificationPositions.buffer, bytes);
+		const glm::vec4* values = reinterpret_cast<const glm::vec4*>(raw.data());
+		return std::vector<glm::vec4>(values, values + initialParticles.size());
+	}
+
+	// Physical sanity of the simulated state. "Finite" is far too weak on its
+	// own: a cloth can stay entirely finite while blowing up to a hundred metres
+	// across, which the previous health check would have reported as passing.
+	struct PhysicalHealth {
+		double aabbExtent{};        // largest per-axis extent of the cloth
+		double maxStretchStrain{};  // max |len/restLen - 1| over stretch/shear edges
+		double maxBendStrain{};     // same over the two-hop bend-distance edges
+		uint32_t accelerationClampedVertices{};
+		uint32_t speedClampedVertices{};
+	};
+
+	PhysicalHealth measurePhysicalHealth(const std::vector<glm::vec4>& positions, const std::vector<glm::vec4>& acceleration) const
+	{
+		PhysicalHealth health{};
+		glm::vec3 minimum(std::numeric_limits<float>::max());
+		glm::vec3 maximum(std::numeric_limits<float>::lowest());
+		for (const glm::vec4& position : positions) {
+			minimum = glm::min(minimum, glm::vec3(position));
+			maximum = glm::max(maximum, glm::vec3(position));
+		}
+		const glm::vec3 extent = maximum - minimum;
+		health.aabbExtent = std::max({ extent.x, extent.y, extent.z });
+
+		// Rest positions never change, so they come from the host-side initial
+		// state rather than a second readback.
+		for (const glm::uvec4& edge : xpbdEdges) {
+			const glm::vec3 restDelta = glm::vec3(initialParticles[edge.x].rest) - glm::vec3(initialParticles[edge.y].rest);
+			const float restLength = glm::length(restDelta);
+			if (restLength <= 1.0e-7f) continue;
+			const float length = glm::length(glm::vec3(positions[edge.x]) - glm::vec3(positions[edge.y]));
+			const double strain = std::abs(static_cast<double>(length) / restLength - 1.0);
+			double& target = edge.z == 0 ? health.maxStretchStrain : health.maxBendStrain;
+			target = std::max(target, strain);
+		}
+
+		for (const glm::vec4& value : acceleration) {
+			const int32_t status = static_cast<int32_t>(value.w);
+			if (status & 2) ++health.accelerationClampedVertices;
+			if (status & 4) ++health.speedClampedVertices;
+		}
+		return health;
 	}
 
 	void verifyAcceleration()
@@ -924,7 +1005,9 @@ public:
 		double repeatabilityMaxAbsolute = 0.0;
 		uint32_t healthFailures = 0;
 		for (uint32_t vertex = 0; vertex < golden.vertexCount; ++vertex) {
-			if (!std::isfinite(actual[vertex].x) || !std::isfinite(actual[vertex].y) || !std::isfinite(actual[vertex].z) || actual[vertex].w != 0.0f) {
+			// Bit 0 of w is the hard failure flag; bits 1 and 2 are clamp telemetry.
+			const bool hardFailure = (static_cast<int32_t>(actual[vertex].w) & 1) != 0;
+			if (!std::isfinite(actual[vertex].x) || !std::isfinite(actual[vertex].y) || !std::isfinite(actual[vertex].z) || hardFailure) {
 				++healthFailures;
 			}
 			for (uint32_t channel = 0; channel < 4; ++channel) {
@@ -932,17 +1015,39 @@ public:
 					std::abs(static_cast<double>(actual[vertex][channel]) - repeatabilityBaseline[vertex][channel]));
 			}
 		}
+
+		const PhysicalHealth health = measurePhysicalHealth(readPositionsForVerification(), actual);
+		// These bounds exist to catch divergence, not to certify quality. A
+		// diverging sheet grows without bound; the golden scenario measures about
+		// 0.81 stretch strain because it hangs a 32-wide sheet from only two
+		// corners and eight Gauss-Seidel iterations cannot propagate tension that
+		// far. That is poor convergence, not a blow-up, so the gate sits above it
+		// and the measured value is reported for tracking.
+		const double aabbExtentLimit = 3.0 * static_cast<double>(std::max(cloth.size.x, cloth.size.y));
+		const double stretchStrainLimit = 2.0;
 		const bool repeatable = repeatabilityMaxAbsolute == 0.0;
-		const bool passed = goldenMaxAbsolute <= 1.0e-4 && goldenMeanAbsolute <= 1.0e-5 && healthFailures == 0 && repeatable;
+		const bool physical = health.aabbExtent <= aabbExtentLimit && health.maxStretchStrain <= stretchStrainLimit;
+		const bool passed = goldenMaxAbsolute <= 1.0e-4 && goldenMeanAbsolute <= 1.0e-5 && healthFailures == 0 && repeatable && physical;
 
 		std::ofstream report("gnn_verify.json");
 		report << std::setprecision(10) << "{\n  \"golden_max_abs\": " << goldenMaxAbsolute << ",\n  \"golden_mean_abs\": " << goldenMeanAbsolute
 			<< ",\n  \"max_limit\": 0.0001,\n  \"mean_limit\": 0.00001,\n  \"stability_frames\": 1200,"
 			<< "\n  \"health_failures\": " << healthFailures << ",\n  \"reset_replay_max_abs\": " << repeatabilityMaxAbsolute
+			<< ",\n  \"cloth_aabb_extent\": " << health.aabbExtent << ",\n  \"cloth_aabb_extent_limit\": " << aabbExtentLimit
+			<< ",\n  \"max_stretch_strain\": " << health.maxStretchStrain << ",\n  \"max_stretch_strain_limit\": " << stretchStrainLimit
+			<< ",\n  \"max_bend_strain\": " << health.maxBendStrain
+			<< ",\n  \"bend_strain_note\": \"reported only; the bend term is a long-edge distance approximation, not a dihedral constraint\""
+			<< ",\n  \"acceleration_clamped_vertices\": " << health.accelerationClampedVertices
+			<< ",\n  \"speed_clamped_vertices\": " << health.speedClampedVertices
+			<< ",\n  \"clamp_telemetry_note\": \"nonzero means the network ran outside its training distribution and the clamps absorbed it\""
 			<< ",\n  \"passed\": " << (passed ? "true" : "false") << "\n}\n";
 		report.close();
 		std::cout << std::setprecision(10) << "Vulkan verification max_abs=" << goldenMaxAbsolute << " mean_abs=" << goldenMeanAbsolute
-			<< " health_failures=" << healthFailures << " reset_replay_max_abs=" << repeatabilityMaxAbsolute << "\n";
+			<< " health_failures=" << healthFailures << " reset_replay_max_abs=" << repeatabilityMaxAbsolute
+			<< "\n  aabb_extent=" << health.aabbExtent << " (limit " << aabbExtentLimit << ")"
+			<< " max_stretch_strain=" << health.maxStretchStrain << " (limit " << stretchStrainLimit << ")"
+			<< " max_bend_strain=" << health.maxBendStrain
+			<< "\n  clamped vertices: acceleration=" << health.accelerationClampedVertices << " speed=" << health.speedClampedVertices << "\n";
 		verificationDone = true;
 		if (!passed) {
 			vks::tools::exitFatal("Vulkan GNN verification failed; see gnn_verify.json", -1);
