@@ -29,8 +29,9 @@ inline std::span<const float> tensorFloats(const TensorView& view)
 	return { reinterpret_cast<const float*>(view.bytes.data()), view.count };
 }
 
-inline Fine15GpuModel buildGpuModel(const TensorAsset& asset)
+inline Fine15GpuModel buildGpuModelFor(const TensorAsset& asset, uint32_t latent, uint32_t blocks)
 {
+	if ((latent != 128 && latent != 64) || (blocks != 15 && blocks != 4)) throw std::runtime_error("Unsupported HOOD GPU architecture");
 	Fine15GpuModel result;
 	auto append = [&](const TensorView& tensor) {
 		const uint32_t offset = static_cast<uint32_t>(result.weights.size());
@@ -39,16 +40,16 @@ inline Fine15GpuModel buildGpuModel(const TensorAsset& asset)
 		return offset;
 	};
 	auto addMlp = [&](uint32_t id, const std::string& prefix, uint32_t input, uint32_t output, bool layerNorm) {
-		if (id >= result.mlps.size()) throw std::runtime_error("Fine15 MLP id is out of range");
+		if (id >= result.mlps.size()) throw std::runtime_error("HOOD MLP id is out of range");
 		const std::string network = asset.tensors.contains(prefix + ".0.layers.0.weight") ? prefix + ".0" : prefix;
 		MlpGpu descriptor{};
 		descriptor.inputDimension = input;
 		descriptor.outputDimension = output;
-		descriptor.w0 = append(asset.require(network + ".layers.0.weight", { 128, input }));
-		descriptor.b0 = append(asset.require(network + ".layers.0.bias", { 128 }));
-		descriptor.w1 = append(asset.require(network + ".layers.2.weight", { 128, 128 }));
-		descriptor.b1 = append(asset.require(network + ".layers.2.bias", { 128 }));
-		descriptor.w2 = append(asset.require(network + ".layers.4.weight", { output, 128 }));
+		descriptor.w0 = append(asset.require(network + ".layers.0.weight", { latent, input }));
+		descriptor.b0 = append(asset.require(network + ".layers.0.bias", { latent }));
+		descriptor.w1 = append(asset.require(network + ".layers.2.weight", { latent, latent }));
+		descriptor.b1 = append(asset.require(network + ".layers.2.bias", { latent }));
+		descriptor.w2 = append(asset.require(network + ".layers.4.weight", { output, latent }));
 		descriptor.b2 = append(asset.require(network + ".layers.4.bias", { output }));
 		if (layerNorm) {
 			descriptor.layerNormWeight = append(asset.require(prefix + ".1.weight", { output }));
@@ -57,16 +58,16 @@ inline Fine15GpuModel buildGpuModel(const TensorAsset& asset)
 		}
 		result.mlps[id] = descriptor;
 	};
-	addMlp(0, "model._learned_model.node_encoder", 20, 128, true);
-	addMlp(1, "model._learned_model.edgeset_encoders.mesh", 12, 128, true);
-	addMlp(2, "model._learned_model.edgeset_encoders.world", 9, 128, true);
-	for (uint32_t block = 0; block < processorBlocks; ++block) {
+	addMlp(0, "model._learned_model.node_encoder", 20, latent, true);
+	addMlp(1, "model._learned_model.edgeset_encoders.mesh", 12, latent, true);
+	addMlp(2, "model._learned_model.edgeset_encoders.world", 9, latent, true);
+	for (uint32_t block = 0; block < blocks; ++block) {
 		const std::string base = "model._learned_model.processor_steps." + std::to_string(block);
-		addMlp(3 + block * 3, base + ".mesh_edge_processor", 384, 128, true);
-		addMlp(4 + block * 3, base + ".world_edge_processor", 384, 128, true);
-		addMlp(5 + block * 3, base + ".node_processor", 384, 128, true);
+		addMlp(3 + block * 3, base + ".mesh_edge_processor", latent * 3, latent, true);
+		addMlp(4 + block * 3, base + ".world_edge_processor", latent * 3, latent, true);
+		addMlp(5 + block * 3, base + ".node_processor", latent * 3, latent, true);
 	}
-	addMlp(48, "model._learned_model.decoder", 128, 3, false);
+	addMlp(3 + blocks * 3, "model._learned_model.decoder", latent, 3, false);
 	result.embeddingOffset = append(asset.require("model.nodetype_embedding.weight", { 9, 9 }));
 
 	for (const auto& [label, count] : std::array<std::pair<const char*, uint32_t>, 4>{ {
@@ -87,4 +88,7 @@ inline Fine15GpuModel buildGpuModel(const TensorAsset& asset)
 	}
 	return result;
 }
+
+inline Fine15GpuModel buildGpuModel(const TensorAsset& asset) { return buildGpuModelFor(asset, 128, 15); }
+inline Fine15GpuModel buildTinyGpuModel(const TensorAsset& asset) { return buildGpuModelFor(asset, 64, 4); }
 }

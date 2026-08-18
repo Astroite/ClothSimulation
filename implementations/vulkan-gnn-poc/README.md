@@ -121,6 +121,48 @@ Y-up 向量转换到该模型训练时的 +Y-down 坐标，但不额外添加 XP
 两种模型的性能和第 10 步视觉对比见
 [`results/HOOD_MODEL_COMPARISON.md`](results/HOOD_MODEL_COMPARISON.md)。
 
+## Grid64 + 球体 + Fine15（无 XPBD）
+
+可以让同一份 Fine15 权重直接驱动确定性的 `64×64` 规则布片。该路径复用真实角色链路的
+VCHAR/VANIM/VCLTH、world edge、15 层推理和 timestamp，不调用规则网格 PoC 的 XPBD：
+
+```powershell
+.\tools\bake_hood_grid_scene.ps1
+.\run.ps1 -Scene HoodGrid64
+.\benchmark_hood_static.ps1 -Scene HoodGrid64 -Warmup 5 -Samples 120
+.\capture_screenshot.ps1 -Scene HoodGrid64 -SimulationSteps 40 -WarmupMilliseconds 30000
+```
+
+RTX 4060 Ti 上连续 129 步后没有 NaN/Inf、塌边、超过 1.5× 的拉伸边或退化三角形；
+Fine15 保持了完整布片而没有拉成条。总 GPU 时间均值 `551.81 ms/步`，其中 15 个
+processor block 占 `531.57 ms`。详细结构指标、逐阶段时间和截图见
+[`results/HOOD_GRID64_RESULTS.md`](results/HOOD_GRID64_RESULTS.md)。公开轻量权重与架构筛选见
+[`results/LIGHTWEIGHT_GNN_CANDIDATES.md`](results/LIGHTWEIGHT_GNN_CANDIDATES.md)。
+
+## TinyHOOD 64×4 实验
+
+已经实现并训练一个保持 HOOD `20/12/9` 特征和身体 world edge、但使用 64 latent 与
+4 个 GraphNet block 的学生模型。它包含 286,275 个参数，训练后导出为严格校验的
+`VHOOD`，并使用独立的 64-lane HLSL shader：
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\train_tinyhood.py --epochs 20 --train-steps 48 --static-steps 120 --dagger-rounds 0
+.\.venv\Scripts\python.exe .\tools\run_tinyhood_reference.py `
+  --asset-root .\.work\real_scene\ch10032_tpose --motion ch10032_tpose --steps 10 `
+  --golden .\.work\real_scene\ch10032_tpose\tinyhood64x4_rollout.vhgold
+.\build.ps1
+.\verify_hood.ps1 -Motion ch10032_tpose -Solver TinyHood
+.\run.ps1 -StaticPose -Solver TinyHood
+.\benchmark_hood_static.ps1 -Scene CH10032 -Solver TinyHood -Warmup 5 -Samples 50
+.\benchmark_hood_static.ps1 -Scene HoodGrid64 -Solver TinyHood -Warmup 5 -Samples 50
+```
+
+Vulkan 与 Python 的 10 步最大误差为 `9.54e-7`。CH10032 初始 compute 时间约
+`15.79 ms`，相对 Fine15 提速约 `34.4×`；但当前只使用一段 61 帧 Fine15 rollout
+训练，纯 TinyHOOD 闭环会快速拉伸，第 5 步 edge ratio P95 已为 `6.49`，不能作为
+独立模拟器使用。完整训练、性能、失败消融和后续混合 XPBD 建议见
+[`results/TINYHOOD_64X4_RESULTS.md`](results/TINYHOOD_64X4_RESULTS.md)。
+
 启动真实角色：
 
 ```powershell

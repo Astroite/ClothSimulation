@@ -45,10 +45,17 @@ class RuntimeScene:
         return int(self.skin_matrices.shape[0])
 
     @classmethod
-    def load(cls, root: Path | str, motion: str, device: torch.device | str = "cpu") -> "RuntimeScene":
+    def load(
+        cls,
+        root: Path | str,
+        motion: str,
+        device: torch.device | str = "cpu",
+        asset_stem: str = "ch10032",
+    ) -> "RuntimeScene":
         root = Path(root)
-        character = load_sectioned(root / "ch10032.vchar", expected_magic=b"VCHAR001", expected_version=1)
-        cloth = load_sectioned(root / "ch10032_lower.vcloth2", expected_magic=b"VCLTH002", expected_version=2)
+        character = load_sectioned(root / f"{asset_stem}.vchar", expected_magic=b"VCHAR001", expected_version=1)
+        cloth_name = "ch10032_lower.vcloth2" if asset_stem == "ch10032" else f"{asset_stem}.vcloth2"
+        cloth = load_sectioned(root / cloth_name, expected_magic=b"VCLTH002", expected_version=2)
         animation = load_sectioned(root / f"{motion}.vanim", expected_magic=b"VANIM001", expected_version=1)
         render_vertices, _, bone_count, proxy_vertices, _, _ = struct.unpack("<6I", character.require("info", count=6, stride=4).data)
         frame_count, animation_bones, fps, _ = struct.unpack("<4I", animation.require("info", count=4, stride=4).data)

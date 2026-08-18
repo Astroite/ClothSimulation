@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import torch
+
 POC_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(POC_ROOT))
 
@@ -16,9 +18,67 @@ from real_scene.formats import (  # noqa: E402
     write_sectioned,
     write_tensor_asset,
 )
+from real_scene.fine15 import Fine15Graph  # noqa: E402
+from real_scene.tinyhood import TinyHood  # noqa: E402
+from tools.bake_hood_grid_scene import make_grid, make_uv_sphere  # noqa: E402
 
 
 class RealFormatTests(unittest.TestCase):
+    def test_tinyhood_architecture_and_world_edge_contract(self) -> None:
+        model = TinyHood().eval()
+        self.assertEqual(model.parameter_count, 286_275)
+        graph = Fine15Graph(
+            effective_position=torch.zeros((2, 3)),
+            effective_previous=torch.zeros((2, 3)),
+            pin_mask=torch.zeros(2, dtype=torch.bool),
+            pin_target=torch.zeros((2, 3)),
+            cloth_nodes=torch.zeros((2, 20)),
+            obstacle_nodes=torch.zeros((1, 20)),
+            mesh_edges=torch.zeros((2, 12)),
+            direct_world=torch.zeros((1, 9)),
+            inverse_world=torch.zeros((1, 9)),
+            mesh_senders=torch.tensor([1, 0]),
+            mesh_receivers=torch.tensor([0, 1]),
+            world_cloth=torch.tensor([0]),
+            world_obstacle=torch.tensor([0]),
+            active_obstacle=torch.tensor([0]),
+        )
+        with torch.no_grad():
+            output = model(graph)
+        self.assertEqual(tuple(output.shape), (2, 3))
+        self.assertTrue(torch.isfinite(output).all())
+
+        graph.obstacle_nodes = torch.zeros((0, 20))
+        graph.direct_world = torch.zeros((0, 9))
+        graph.inverse_world = torch.zeros((0, 9))
+        graph.world_cloth = torch.zeros(0, dtype=torch.long)
+        graph.world_obstacle = torch.zeros(0, dtype=torch.long)
+        graph.active_obstacle = torch.zeros(0, dtype=torch.long)
+        with torch.no_grad():
+            no_contact_output = model(graph)
+        self.assertEqual(tuple(no_contact_output.shape), (2, 3))
+        self.assertTrue(torch.isfinite(no_contact_output).all())
+
+    def test_hood_grid64_geometry_contract(self) -> None:
+        positions, uvs, triangles, offsets, neighbors, masses = make_grid(64, 1.2, 1.2, 0.2)
+        self.assertEqual(len(positions), 4096)
+        self.assertEqual(len(uvs), 4096)
+        self.assertEqual(len(triangles), 7938)
+        self.assertEqual(len(offsets), 4097)
+        self.assertEqual(len(neighbors), 32004)
+        self.assertEqual(offsets[-1], len(neighbors))
+        self.assertTrue(all(mass > 0.0 for mass in masses))
+        for vertex in range(4096):
+            self.assertNotIn(vertex, neighbors[offsets[vertex] : offsets[vertex + 1]])
+
+        sphere_positions, sphere_normals, sphere_uvs, sphere_triangles = make_uv_sphere(
+            (0.0, -0.15, 0.28), 0.3, 32, 64
+        )
+        self.assertEqual(len(sphere_positions), 1986)
+        self.assertEqual(len(sphere_normals), len(sphere_positions))
+        self.assertEqual(len(sphere_uvs), len(sphere_positions))
+        self.assertEqual(len(sphere_triangles), 3968)
+
     def test_sectioned_roundtrip_and_rejections(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

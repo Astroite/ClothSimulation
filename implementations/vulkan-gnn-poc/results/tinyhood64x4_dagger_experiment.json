@@ -1,0 +1,153 @@
+{
+  "architecture": {
+    "blocks": 4,
+    "latent": 64,
+    "mesh_edge": 12,
+    "node": 20,
+    "world_edge": 9
+  },
+  "checkpoint_sha256": "1d6ae87209e3a555dbeb19ccbea64b3a229b57d01dcbd426ebbca5cb7ebc9534",
+  "dagger": [
+    {
+      "collection_seconds": 16.504390900001454,
+      "epoch_losses": [
+        0.16572480569205558,
+        0.09824873774440662,
+        0.08740883281258731
+      ],
+      "on_policy_samples": 90,
+      "round": 1,
+      "student_blend": 0.25,
+      "validation": {
+        "acceleration_max_abs": 0.07613244652748108,
+        "acceleration_mean_abs": 0.0016835797358875555,
+        "normalized_mse": 0.05824219777759236,
+        "samples": 13
+      }
+    }
+  ],
+  "epochs": 20,
+  "feature_cache_seconds": 0.4244159000008949,
+  "final_history": {
+    "epoch": 20,
+    "learning_rate": 0.0,
+    "train_normalized_mse": 0.027413235618344817,
+    "validation_normalized_mse": 0.06060993106355174
+  },
+  "fine15_packed_float_count": 3854164,
+  "parameter_count": 286275,
+  "parameter_ratio_vs_fine15": 0.07427680814827807,
+  "rollouts": {
+    "ch10032_sprint": {
+      "active_world_edges": 72,
+      "area_ratio_mean": 1883.9063720703125,
+      "bounds_max": [
+        3.7366068363189697,
+        0.09667469561100006,
+        4.679359436035156
+      ],
+      "bounds_min": [
+        -0.1455598622560501,
+        -5.1073079109191895,
+        -9.138429641723633
+      ],
+      "collapsed_fraction_lt_0_5": 0.0005067139863967896,
+      "completed_steps": 61,
+      "degenerate_fraction_lt_0_1": 0.0,
+      "edge_ratio_max": 2187.780517578125,
+      "edge_ratio_mean": 93.53448486328125,
+      "edge_ratio_p95": 233.74351501464844,
+      "flipped_fraction": 0.4879377484321594,
+      "invalid_vertices": 0,
+      "pin_max_abs": 0.0,
+      "requested_steps": 61,
+      "seconds": 0.9347123000043212,
+      "stretched_fraction_gt_1_5": 0.9774512052536011,
+      "teacher_position_max_abs": 13.69267463684082,
+      "teacher_position_mean_abs": 2.4031338444674466
+    },
+    "ch10032_tpose": {
+      "active_world_edges": 72,
+      "area_ratio_mean": 8457.1923828125,
+      "bounds_max": [
+        12.382894515991211,
+        -0.021137237548828125,
+        0.10841771215200424
+      ],
+      "bounds_min": [
+        -0.11446931958198547,
+        -14.003337860107422,
+        -23.31171989440918
+      ],
+      "collapsed_fraction_lt_0_5": 0.0,
+      "completed_steps": 120,
+      "degenerate_fraction_lt_0_1": 0.0,
+      "edge_ratio_max": 4262.9765625,
+      "edge_ratio_mean": 205.72280883789062,
+      "edge_ratio_p95": 569.185791015625,
+      "flipped_fraction": 0.48482489585876465,
+      "invalid_vertices": 0,
+      "pin_max_abs": 0.0,
+      "requested_steps": 120,
+      "seconds": 1.8132016000017757,
+      "stretched_fraction_gt_1_5": 0.9817582964897156,
+      "teacher_position_max_abs": null,
+      "teacher_position_mean_abs": null
+    },
+    "hood_grid64": {
+      "active_world_edges": 0,
+      "area_ratio_mean": 350.4772644042969,
+      "bounds_max": [
+        15.106825828552246,
+        0.6000000238418579,
+        0.0
+      ],
+      "bounds_min": [
+        -0.6000000238418579,
+        -16.429656982421875,
+        -28.413501739501953
+      ],
+      "collapsed_fraction_lt_0_5": 6.249218859011307e-05,
+      "completed_steps": 120,
+      "degenerate_fraction_lt_0_1": 0.0,
+      "edge_ratio_max": 1437.14599609375,
+      "edge_ratio_mean": 37.804847717285156,
+      "edge_ratio_p95": 68.42008972167969,
+      "flipped_fraction": 0.414588063955307,
+      "invalid_vertices": 0,
+      "pin_max_abs": 0.0,
+      "requested_steps": 120,
+      "seconds": 4.34113570000045,
+      "stretched_fraction_gt_1_5": 0.946631669998169,
+      "teacher_position_max_abs": null,
+      "teacher_position_mean_abs": null
+    }
+  },
+  "seed": 20260818,
+  "teacher_forced_train": {
+    "acceleration_max_abs": 0.2133907526731491,
+    "acceleration_mean_abs": 0.0025890833141957005,
+    "normalized_mse": 0.10298788795019694,
+    "samples": 48
+  },
+  "teacher_forced_validation": {
+    "acceleration_max_abs": 0.07613244652748108,
+    "acceleration_mean_abs": 0.0016835797358875555,
+    "normalized_mse": 0.05824219777759236,
+    "samples": 13
+  },
+  "threads": 16,
+  "training_samples": 48,
+  "training_seconds": 86.00516479999351,
+  "validation_samples": 13,
+  "vhood": {
+    "checkpoint_sha256": "1d6ae87209e3a555dbeb19ccbea64b3a229b57d01dcbd426ebbca5cb7ebc9534",
+    "file_bytes": 1174884,
+    "file_sha256": "81b9b2e19659b4348d16288bcbc343e94f9c9e9e5a383cf904d56eefcd67604e",
+    "magic": "VHOOD001",
+    "payload_sha256": "97761ac432d425838770925150822cc35da1e5fc61a674bd1b1b339a10bef991",
+    "tensor_count": 139,
+    "version": 1
+  },
+  "vhood_reload_max_abs": 0.0
+}

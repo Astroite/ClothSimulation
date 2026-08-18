@@ -1,5 +1,7 @@
 	struct HoodPlain3 { float x, y, z; };
 	static_assert(sizeof(HoodPlain3) == 12);
+	struct HoodPlainU3 { uint32_t x, y, z; };
+	static_assert(sizeof(HoodPlainU3) == 12);
 	struct HoodSkinParams {
 		uint32_t frameIndex{}, nextFrameIndex{}, boneCount{}, characterCount{};
 		uint32_t proxyCount{}, clothCount{}, resetState{}, renderFrameIndex{};
@@ -25,6 +27,7 @@
 	};
 
 	bool realSceneMode{ false };
+	bool hoodGridScene{ false };
 	bool hoodPaused{ false };
 	bool hoodRequestReset{ true };
 	bool hoodFirstStep{ true };
@@ -33,7 +36,7 @@
 	bool hoodVerifyMode{ false };
 	bool hoodVerifyWritten{ false };
 	bool hoodStaticBenchmarkMode{ false };
-	enum HoodSolver : int32_t { HoodFine15 = 0, HoodToy2L = 1 };
+	enum HoodSolver : int32_t { HoodFine15 = 0, HoodToy2L = 1, HoodTiny64x4 = 2 };
 	int32_t hoodSolver{ HoodFine15 };
 	std::filesystem::path hoodAssetRoot;
 	std::filesystem::path hoodModelPath;
@@ -41,6 +44,7 @@
 	std::filesystem::path hoodGoldenPath;
 	std::filesystem::path hoodVerifyOutput;
 	std::filesystem::path hoodStaticBenchmarkOutput{ "hood_static_timing.csv" };
+	std::filesystem::path hoodStabilityOutput;
 	std::string hoodMotion{ "ch10032_sprint" };
 	float hoodAccumulator{};
 	uint32_t hoodFrame{};
@@ -52,6 +56,9 @@
 	uint32_t hoodCharacterCount{}, hoodCharacterIndexCount{}, hoodProxyCount{};
 	uint32_t hoodClothCount{}, hoodClothIndexCount{}, hoodTriangleCount{}, hoodMeshEdgeCount{};
 	std::vector<glm::vec3> hoodRootPositions;
+	std::vector<glm::vec3> hoodRestPositionsCpu;
+	std::vector<uint32_t> hoodPinMaskCpu, hoodMeshSendersCpu, hoodMeshReceiversCpu;
+	std::vector<HoodPlainU3> hoodTrianglesCpu;
 	std::vector<HoodPlain3> hoodGoldenPositions;
 	std::vector<HoodPlain3> hoodGoldenAcceleration;
 	std::vector<uint32_t> hoodGoldenWorld;
@@ -71,6 +78,8 @@
 	uint32_t hoodStaticBenchmarkDiscarded{};
 	static constexpr uint32_t hoodProcessorBlocks = 15;
 	static constexpr uint32_t hoodTimestampCount = 8 + hoodProcessorBlocks * 2;
+	uint32_t hoodLatentSize{ 128 };
+	uint32_t hoodActiveProcessorBlocks{ 15 };
 
 	struct HoodBuffers {
 		vks::Buffer skinMatrices, characterRestPosition, characterRestNormal, characterBoneIndices, characterBoneWeights;
@@ -191,12 +200,16 @@
 
 	void hoodLoadAssets()
 	{
-		if (hoodAssetRoot.empty()) throw std::runtime_error("CH10032 requires --asset-root <baked scene directory>");
+		if (hoodAssetRoot.empty()) throw std::runtime_error("HOOD requires --asset-root <baked scene directory>");
 		if (hoodModelPath.empty()) hoodModelPath = hoodAssetRoot.parent_path().parent_path() / "hood_data" / "fine15.vhood";
-		const auto character = vhood::loadSectioned(hoodAssetRoot / "ch10032.vchar", "VCHAR001", 1);
+		const std::string assetStem = hoodGridScene ? "hood_grid64" : "ch10032";
+		const auto character = vhood::loadSectioned(hoodAssetRoot / (assetStem + ".vchar"), "VCHAR001", 1);
 		const auto animation = vhood::loadSectioned(hoodAssetRoot / (hoodMotion + ".vanim"), "VANIM001", 1);
-		const auto cloth = vhood::loadSectioned(hoodAssetRoot / "ch10032_lower.vcloth2", "VCLTH002", 2);
-		const auto model = vhood::buildGpuModel(vhood::loadTensorAsset(hoodModelPath));
+		const auto cloth = vhood::loadSectioned(hoodAssetRoot / (assetStem + (hoodGridScene ? ".vcloth2" : "_lower.vcloth2")), "VCLTH002", 2);
+		const auto modelAsset = vhood::loadTensorAsset(hoodModelPath);
+		const auto model = hoodSolver == HoodTiny64x4 ? vhood::buildTinyGpuModel(modelAsset) : vhood::buildGpuModel(modelAsset);
+		hoodLatentSize = hoodSolver == HoodTiny64x4 ? 64u : 128u;
+		hoodActiveProcessorBlocks = hoodSolver == HoodTiny64x4 ? 4u : 15u;
 		if (hoodToyModelPath.empty()) hoodToyModelPath = std::filesystem::path(getShadersPath()) / "gnncloth" / "model.bin";
 		const auto toyModel = vgnn::loadModel(hoodToyModelPath);
 		if (hoodVerifyMode) {
@@ -232,6 +245,12 @@
 		const auto proxyPosition = hoodExpandVec3(character.require("proxy_pos", 12, hoodProxyCount).as<HoodPlain3>(12), 1.0f);
 		const auto proxyNormal = hoodExpandVec3(character.require("proxy_nrm", 12, hoodProxyCount).as<HoodPlain3>(12), 0.0f);
 		const auto clothPosition = hoodExpandVec3(cloth.require("positions", 12, hoodClothCount).as<HoodPlain3>(12), 1.0f);
+		hoodRestPositionsCpu.reserve(clothPosition.size());
+		for (const auto& position : clothPosition) hoodRestPositionsCpu.emplace_back(position);
+		const auto pins = cloth.require("pin_mask", 4, hoodClothCount).as<uint32_t>(4);
+		hoodPinMaskCpu.assign(pins.begin(), pins.end());
+		const auto triangles = cloth.require("triangles", 12, hoodTriangleCount).as<HoodPlainU3>(12);
+		hoodTrianglesCpu.assign(triangles.begin(), triangles.end());
 		const auto roots = animation.require("root_pos", 12, hoodFrameCount).as<HoodPlain3>(12);
 		hoodRootPositions.reserve(roots.size());
 		for (const auto& root : roots) hoodRootPositions.emplace_back(root.x, root.y, root.z);
@@ -263,6 +282,8 @@
 		meshReceivers.reserve(hoodMeshEdgeCount);
 		for (uint32_t receiver = 0; receiver < hoodClothCount; ++receiver)
 			for (uint32_t edge = offsets[receiver]; edge < offsets[receiver + 1]; ++edge) meshReceivers.push_back(receiver);
+		hoodMeshSendersCpu = meshSenders;
+		hoodMeshReceiversCpu = meshReceivers;
 		hoodUploadVector(hoodBuffers.meshSenders, storage, meshSenders);
 		hoodUploadVector(hoodBuffers.meshReceivers, storage, meshReceivers);
 		uploadView(hoodBuffers.csrOffsets, storage, cloth.require("csr_offsets", 4, hoodClothCount + 1));
@@ -283,7 +304,7 @@
 		hoodEmpty(hoodBuffers.proxyPosition, storage, hoodProxyCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.proxyNormal, storage, hoodProxyCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.proxyTarget, storage, hoodProxyCount * sizeof(glm::vec4));
-		hoodEmpty(hoodBuffers.pinTarget, storage, hoodClothCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.pinTarget, storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.clothPosition, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.clothPrevious, storage, hoodClothCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.effectivePosition, storage, hoodClothCount * sizeof(glm::vec4));
@@ -297,10 +318,10 @@
 		hoodEmpty(hoodBuffers.worldDirectFeatures, debugStorage, static_cast<VkDeviceSize>(hoodClothCount) * 9 * sizeof(float));
 		hoodEmpty(hoodBuffers.worldInverseFeatures, debugStorage, static_cast<VkDeviceSize>(hoodClothCount) * 9 * sizeof(float));
 		for (uint32_t ping = 0; ping < 2; ++ping) {
-			hoodEmpty(hoodBuffers.nodeLatent[ping], debugStorage, static_cast<VkDeviceSize>(hoodClothCount + hoodProxyCount) * 128 * sizeof(float));
-			hoodEmpty(hoodBuffers.meshLatent[ping], storage, static_cast<VkDeviceSize>(hoodMeshEdgeCount) * 128 * sizeof(float));
-			hoodEmpty(hoodBuffers.worldDirectLatent[ping], storage, static_cast<VkDeviceSize>(hoodClothCount) * 128 * sizeof(float));
-			hoodEmpty(hoodBuffers.worldInverseLatent[ping], storage, static_cast<VkDeviceSize>(hoodClothCount) * 128 * sizeof(float));
+			hoodEmpty(hoodBuffers.nodeLatent[ping], debugStorage, static_cast<VkDeviceSize>(hoodClothCount + hoodProxyCount) * hoodLatentSize * sizeof(float));
+			hoodEmpty(hoodBuffers.meshLatent[ping], storage, static_cast<VkDeviceSize>(hoodMeshEdgeCount) * hoodLatentSize * sizeof(float));
+			hoodEmpty(hoodBuffers.worldDirectLatent[ping], storage, static_cast<VkDeviceSize>(hoodClothCount) * hoodLatentSize * sizeof(float));
+			hoodEmpty(hoodBuffers.worldInverseLatent[ping], storage, static_cast<VkDeviceSize>(hoodClothCount) * hoodLatentSize * sizeof(float));
 		}
 		hoodEmbeddingOffset = model.embeddingOffset;
 	}
@@ -365,7 +386,7 @@
 			hood.integrateSets[frame] = hoodAllocateSet(hood.integrateLayout);
 			hoodWriteSet(hood.integrateSets[frame], {
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.weights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.mlpTable},
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.normalizers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeLatent[1]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.normalizers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeLatent[hoodActiveProcessorBlocks & 1u]},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.effectivePosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.acceleration},
@@ -420,10 +441,10 @@
 		};
 		computePipeline("hood_skin.comp.spv", hood.skinPipeline, hood.skin);
 		computePipeline("hood_features.comp.spv", hood.featuresPipeline, hood.features);
-		computePipeline("hood_encode.comp.spv", hood.encodePipeline, hood.encode);
-		computePipeline("hood_edge_update.comp.spv", hood.edgePipeline, hood.edge);
-		computePipeline("hood_node_update.comp.spv", hood.nodePipeline, hood.node);
-		computePipeline("hood_integrate.comp.spv", hood.integratePipeline, hood.integrate);
+		computePipeline(hoodSolver == HoodTiny64x4 ? "tinyhood_encode.comp.spv" : "hood_encode.comp.spv", hood.encodePipeline, hood.encode);
+		computePipeline(hoodSolver == HoodTiny64x4 ? "tinyhood_edge_update.comp.spv" : "hood_edge_update.comp.spv", hood.edgePipeline, hood.edge);
+		computePipeline(hoodSolver == HoodTiny64x4 ? "tinyhood_node_update.comp.spv" : "hood_node_update.comp.spv", hood.nodePipeline, hood.node);
+		computePipeline(hoodSolver == HoodTiny64x4 ? "tinyhood_integrate.comp.spv" : "hood_integrate.comp.spv", hood.integratePipeline, hood.integrate);
 		computePipeline("hood_toy_layer0.comp.spv", hood.toyPipeline, hood.toyLayer0);
 		computePipeline("hood_toy_layer1.comp.spv", hood.toyPipeline, hood.toyLayer1);
 
@@ -489,9 +510,10 @@
 		// upstream convention preserves its stable translation/root-follow logic.
 		camera.setPerspective(55.0f, static_cast<float>(width) / static_cast<float>(height), 0.05f, 256.0f);
 		camera.setRotation(glm::vec3(-5.0f, 0.0f, 0.0f));
-		std::cout << "CH10032 native scene: " << hoodCharacterCount << " body vertices, " << hoodClothCount
+		std::cout << (hoodGridScene ? "HOOD grid64 sphere scene: " : "CH10032 native scene: ") << hoodCharacterCount
+			<< (hoodGridScene ? " obstacle" : " body") << " vertices, " << hoodClothCount
 			<< " cloth vertices, " << hoodBoneCount << " core bones, " << hoodFrameCount << " frames @ " << hoodFps << " Hz, solver "
-			<< (hoodSolver == HoodToy2L ? "Toy2L" : "Fine15") << "\n";
+			<< (hoodSolver == HoodToy2L ? "Toy2L" : (hoodSolver == HoodTiny64x4 ? "TinyHOOD64x4" : "Fine15")) << "\n";
 	}
 
 	void hoodAdvance()
@@ -611,7 +633,7 @@
 				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 3 + encoder);
 			}
 
-			for (uint32_t block = 0; block < hoodProcessorBlocks; ++block) {
+			for (uint32_t block = 0; block < hoodActiveProcessorBlocks; ++block) {
 				const uint32_t ping = block & 1u;
 				vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.edge);
 				vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.edgePipeline, 0, 1, &hood.edgeSets[ping], 0, nullptr);
@@ -625,6 +647,10 @@
 				vkCmdPushConstants(command, hood.nodePipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, nodePush);
 				vkCmdDispatch(command, hoodClothCount + hoodProxyCount, 1, 1);
 				hoodComputeBarrier(command);
+				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 8 + block * 2);
+			}
+			for (uint32_t block = hoodActiveProcessorBlocks; block < hoodProcessorBlocks; ++block) {
+				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 7 + block * 2);
 				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 8 + block * 2);
 			}
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.integrate);
@@ -690,7 +716,7 @@
 			driver << VK_VERSION_MAJOR(deviceProperties.driverVersion) << '.' << VK_VERSION_MINOR(deviceProperties.driverVersion)
 				<< '.' << VK_VERSION_PATCH(deviceProperties.driverVersion);
 		}
-		const char* solverName = hoodSolver == HoodToy2L ? "toy2l" : "fine15";
+		const char* solverName = hoodSolver == HoodToy2L ? "toy2l" : (hoodSolver == HoodTiny64x4 ? "tinyhood64x4" : "fine15");
 		stream << "device,driver_version,driver_raw,motion,solver,cloth_nodes,directed_mesh_edges,proxy_vertices,samples,stage,mean_ms,min_ms,p95_ms,max_ms\n";
 		auto writeStage = [&](const std::string& stage, const auto& select) {
 			std::vector<double> values;
@@ -712,7 +738,7 @@
 			const std::array<const char*, 4> encoderNames{ "encoder_node", "encoder_mesh", "encoder_world_direct", "encoder_world_inverse" };
 			for (uint32_t encoder = 0; encoder < encoderNames.size(); ++encoder)
 				writeStage(encoderNames[encoder], [encoder](const HoodTiming& value) { return value.encoders[encoder]; });
-			for (uint32_t block = 0; block < hoodProcessorBlocks; ++block) {
+			for (uint32_t block = 0; block < hoodActiveProcessorBlocks; ++block) {
 				std::ostringstream edgeName, nodeName;
 				edgeName << "block_" << std::setfill('0') << std::setw(2) << block << "_edge";
 				nodeName << "block_" << std::setfill('0') << std::setw(2) << block << "_node";
@@ -720,7 +746,7 @@
 				writeStage(nodeName.str(), [block](const HoodTiming& value) { return value.nodeBlocks[block]; });
 			}
 			writeStage("encoder_total", [](const HoodTiming& value) { return value.encodeTotal(); });
-			writeStage("processor_15_total", [](const HoodTiming& value) { return value.processorTotal(); });
+			writeStage(hoodSolver == HoodTiny64x4 ? "processor_4_total" : "processor_15_total", [](const HoodTiming& value) { return value.processorTotal(); });
 			writeStage("decoder_integrate", [](const HoodTiming& value) { return value.integrate; });
 		}
 		writeStage("total", [](const HoodTiming& value) { return value.total; });
@@ -748,6 +774,96 @@
 		std::memcpy(result.data(), readback.mapped, static_cast<size_t>(bytes));
 		readback.destroy();
 		return result;
+	}
+
+	void hoodWriteStabilityJson()
+	{
+		if (hoodStabilityOutput.empty()) return;
+		const auto positions = hoodReadback<glm::vec4>(hoodBuffers.clothPosition.buffer, hoodClothCount);
+		const auto pinTargets = hoodReadback<glm::vec4>(hoodBuffers.pinTarget.buffer, hoodClothCount);
+		const auto world = hoodReadback<uint32_t>(hoodBuffers.worldObstacle.buffer, hoodClothCount);
+		uint32_t invalidVertices = 0, activeWorldEdges = 0, collapsedEdges = 0, stretchedEdges = 0;
+		uint32_t degenerateTriangles = 0, flippedTriangles = 0;
+		double maximumDisplacement = 0.0, maximumPinnedError = 0.0;
+		glm::dvec3 minimum(std::numeric_limits<double>::max()), maximum(-std::numeric_limits<double>::max());
+		std::vector<double> edgeRatios, triangleAreaRatios;
+		edgeRatios.reserve(hoodMeshSendersCpu.size());
+		triangleAreaRatios.reserve(hoodTrianglesCpu.size());
+		auto finite3 = [](const glm::vec4& value) {
+			return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+		};
+		for (uint32_t vertex = 0; vertex < hoodClothCount; ++vertex) {
+			if (world[vertex] != 0xffffffffu) ++activeWorldEdges;
+			if (!finite3(positions[vertex])) { ++invalidVertices; continue; }
+			const glm::dvec3 position(positions[vertex]);
+			const glm::dvec3 rest(hoodRestPositionsCpu[vertex]);
+			minimum = glm::min(minimum, position); maximum = glm::max(maximum, position);
+			const double displacement = glm::length(position - rest);
+			maximumDisplacement = std::max(maximumDisplacement, displacement);
+			if (hoodPinMaskCpu[vertex] && finite3(pinTargets[vertex])) {
+				maximumPinnedError = std::max(maximumPinnedError,
+					glm::length(position - glm::dvec3(pinTargets[vertex])));
+			}
+		}
+		if (invalidVertices == hoodClothCount) {
+			minimum = glm::dvec3(0.0);
+			maximum = glm::dvec3(0.0);
+		}
+		for (size_t edge = 0; edge < hoodMeshSendersCpu.size(); ++edge) {
+			const uint32_t sender = hoodMeshSendersCpu[edge], receiver = hoodMeshReceiversCpu[edge];
+			if (!finite3(positions[sender]) || !finite3(positions[receiver])) continue;
+			const double restLength = glm::length(glm::dvec3(hoodRestPositionsCpu[sender]) - glm::dvec3(hoodRestPositionsCpu[receiver]));
+			if (restLength <= 1.0e-12) continue;
+			const double ratio = glm::length(glm::dvec3(positions[sender]) - glm::dvec3(positions[receiver])) / restLength;
+			edgeRatios.push_back(ratio);
+			if (ratio < 0.5) ++collapsedEdges;
+			if (ratio > 1.5) ++stretchedEdges;
+		}
+		for (const auto& triangle : hoodTrianglesCpu) {
+			const uint32_t ids[3] = { triangle.x, triangle.y, triangle.z };
+			if (!finite3(positions[ids[0]]) || !finite3(positions[ids[1]]) || !finite3(positions[ids[2]])) continue;
+			const glm::dvec3 restA(hoodRestPositionsCpu[ids[0]]), restB(hoodRestPositionsCpu[ids[1]]), restC(hoodRestPositionsCpu[ids[2]]);
+			const glm::dvec3 nowA(positions[ids[0]]), nowB(positions[ids[1]]), nowC(positions[ids[2]]);
+			const glm::dvec3 restNormal = glm::cross(restB - restA, restC - restA);
+			const glm::dvec3 nowNormal = glm::cross(nowB - nowA, nowC - nowA);
+			const double restArea2 = glm::length(restNormal);
+			if (restArea2 <= 1.0e-15) continue;
+			const double areaRatio = glm::length(nowNormal) / restArea2;
+			triangleAreaRatios.push_back(areaRatio);
+			if (areaRatio < 0.1) ++degenerateTriangles;
+			if (glm::dot(restNormal, nowNormal) < 0.0) ++flippedTriangles;
+		}
+		const double edgeMean = edgeRatios.empty() ? 0.0
+			: std::accumulate(edgeRatios.begin(), edgeRatios.end(), 0.0) / static_cast<double>(edgeRatios.size());
+		const double areaMean = triangleAreaRatios.empty() ? 0.0
+			: std::accumulate(triangleAreaRatios.begin(), triangleAreaRatios.end(), 0.0) / static_cast<double>(triangleAreaRatios.size());
+		const double edgeP95 = edgeRatios.empty() ? 0.0 : percentile(edgeRatios, 0.95);
+		const double edgeMaximum = edgeRatios.empty() ? 0.0 : *std::max_element(edgeRatios.begin(), edgeRatios.end());
+		const double areaMedian = triangleAreaRatios.empty() ? 0.0 : percentile(triangleAreaRatios, 0.5);
+		const double collapsedFraction = hoodMeshSendersCpu.empty() ? 0.0 : collapsedEdges / static_cast<double>(hoodMeshSendersCpu.size());
+		const double stretchedFraction = hoodMeshSendersCpu.empty() ? 0.0 : stretchedEdges / static_cast<double>(hoodMeshSendersCpu.size());
+		const double degenerateFraction = hoodTrianglesCpu.empty() ? 0.0 : degenerateTriangles / static_cast<double>(hoodTrianglesCpu.size());
+		const double flippedFraction = hoodTrianglesCpu.empty() ? 0.0 : flippedTriangles / static_cast<double>(hoodTrianglesCpu.size());
+		const bool structurePreserved = invalidVertices == 0 && maximumPinnedError <= 1.0e-5 && edgeP95 <= 2.0
+			&& collapsedFraction <= 0.05 && degenerateFraction <= 0.05;
+		if (hoodStabilityOutput.has_parent_path()) std::filesystem::create_directories(hoodStabilityOutput.parent_path());
+		std::ofstream output(hoodStabilityOutput);
+		if (!output) throw std::runtime_error("Could not create HOOD stability JSON");
+		output << std::setprecision(10)
+			<< "{\n  \"scene\": \"" << (hoodGridScene ? "hood_grid64" : "ch10032") << "\","
+			<< "\n  \"solver\": \"" << (hoodSolver == HoodToy2L ? "toy2l" : (hoodSolver == HoodTiny64x4 ? "tinyhood64x4" : "fine15")) << "\","
+			<< "\n  \"xpbd\": false,\n  \"collision_projection\": " << (hoodCollisionProjection ? "true" : "false") << ','
+			<< "\n  \"completed_steps\": " << hoodCompletedSteps << ",\n  \"structure_preserved\": " << (structurePreserved ? "true" : "false") << ','
+			<< "\n  \"invalid_vertices\": " << invalidVertices << ",\n  \"active_world_edges\": " << activeWorldEdges << ','
+			<< "\n  \"maximum_displacement_m\": " << maximumDisplacement << ",\n  \"maximum_pinned_error_m\": " << maximumPinnedError << ','
+			<< "\n  \"edge_length_ratio\": {\"mean\": " << edgeMean << ", \"p95\": " << edgeP95 << ", \"max\": " << edgeMaximum
+			<< ", \"collapsed_fraction_lt_0_5\": " << collapsedFraction << ", \"stretched_fraction_gt_1_5\": " << stretchedFraction << "},"
+			<< "\n  \"triangle_area_ratio\": {\"mean\": " << areaMean << ", \"median\": " << areaMedian
+			<< ", \"degenerate_fraction_lt_0_1\": " << degenerateFraction << ", \"flipped_fraction\": " << flippedFraction << "},"
+			<< "\n  \"bounds_min_m\": [" << minimum.x << ", " << minimum.y << ", " << minimum.z << "],"
+			<< "\n  \"bounds_max_m\": [" << maximum.x << ", " << maximum.y << ", " << maximum.z << "]\n}\n";
+		std::cout << "Wrote " << hoodStabilityOutput << " after " << hoodCompletedSteps << " steps; structure "
+			<< (structurePreserved ? "preserved" : "failed") << ", edge p95=" << edgeP95 << ", degenerate triangles=" << degenerateFraction << "\n";
 	}
 
 	void hoodVerifyCurrentStep()
@@ -788,8 +904,8 @@
 			dumpFloats("mesh_features", hoodBuffers.meshFeatures.buffer, hoodMeshEdgeCount * 12);
 			dumpFloats("world_direct_features", hoodBuffers.worldDirectFeatures.buffer, hoodClothCount * 9);
 			dumpFloats("world_inverse_features", hoodBuffers.worldInverseFeatures.buffer, hoodClothCount * 9);
-			dumpFloats("node_latent", hoodBuffers.nodeLatent[1].buffer, (hoodClothCount + hoodProxyCount) * 128);
-			std::cout << "Fine15 Vulkan step 1: position max=" << stepMaximum << " mean=" << stepSum / (hoodClothCount * 3)
+			dumpFloats("node_latent", hoodBuffers.nodeLatent[hoodActiveProcessorBlocks & 1u].buffer, (hoodClothCount + hoodProxyCount) * hoodLatentSize);
+			std::cout << (hoodSolver == HoodTiny64x4 ? "TinyHOOD" : "Fine15") << " Vulkan step 1: position max=" << stepMaximum << " mean=" << stepSum / (hoodClothCount * 3)
 				<< " acceleration max=" << hoodVerifyAccelerationMaximum << " world mismatches=" << hoodVerifyWorldMismatches << "\n";
 		}
 		++hoodVerifyStep;
@@ -808,9 +924,9 @@
 					<< ", \"mean_abs_error\": " << hoodVerifyStepMeans[step] << "}" << (step + 1 == hoodVerifyStep ? "\n" : ",\n");
 			}
 			output << "  ]\n}\n";
-			std::cout << "Fine15 Vulkan " << hoodVerifyStep << " step max=" << hoodVerifyMaximum << " mean=" << hoodVerifyMeanSum / hoodVerifyValueCount << "\n";
+			std::cout << (hoodSolver == HoodTiny64x4 ? "TinyHOOD" : "Fine15") << " Vulkan " << hoodVerifyStep << " step max=" << hoodVerifyMaximum << " mean=" << hoodVerifyMeanSum / hoodVerifyValueCount << "\n";
 			hoodVerifyWritten = true;
-			if (!passed) throw std::runtime_error("Fine15 Vulkan verification exceeded the one-step or ten-step error threshold");
+			if (!passed) throw std::runtime_error("HOOD Vulkan verification exceeded the one-step or ten-step error threshold");
 		}
 	}
 
@@ -862,23 +978,26 @@
 
 	void hoodUI(vks::UIOverlay* overlay)
 	{
-		if (!overlay->header(hoodSolver == HoodToy2L ? "CH10032 + Toy GNN 10-16-3" : "CH10032 + HOOD Fine15")) return;
+		const char* header = hoodGridScene ? (hoodSolver == HoodTiny64x4 ? "Grid64 + sphere + TinyHOOD 64x4" : "Grid64 + sphere + HOOD Fine15")
+			: (hoodSolver == HoodToy2L ? "CH10032 + Toy GNN 10-16-3" : (hoodSolver == HoodTiny64x4 ? "CH10032 + TinyHOOD 64x4" : "CH10032 + HOOD Fine15"));
+		if (!overlay->header(header)) return;
 		overlay->checkBox("Paused", &hoodPaused);
-		if (hoodSolver == HoodFine15) overlay->checkBox("Body collision projection", &hoodCollisionProjection);
+		if (hoodSolver != HoodToy2L) overlay->checkBox("Body collision projection", &hoodCollisionProjection);
 		if (overlay->button("Reset")) hoodRequestReset = true;
 		overlay->text(hoodFrameCount == 1 ? "Pose: static %s" : "Native animation: %s", hoodMotion.c_str());
 		if (hoodFrameCount > 1) overlay->text("Time: %.2f / %.2f s (%u/%u)", hoodFrame / float(hoodFps), (hoodFrameCount - 1) / float(hoodFps), hoodFrame, hoodFrameCount - 1);
 		overlay->text("Core bones: %u", hoodBoneCount);
 		overlay->text("Cloth: %u nodes, %u mesh edges", hoodClothCount, hoodMeshEdgeCount);
-		overlay->text("Collision proxy: %u vertices", hoodProxyCount);
+		overlay->text("%s: %u vertices", hoodGridScene ? "Sphere proxy" : "Collision proxy", hoodProxyCount);
 		overlay->text("Simulation steps: %u", hoodCompletedSteps);
+		if (hoodGridScene) overlay->text("Constraints: top edge pins only; XPBD off");
 		if (hoodSolver == HoodToy2L) {
 			overlay->text("Toy model: 10 -> 16 -> 3, no XPBD/collision");
 			overlay->text("GPU skin %.3f, layer 0 %.3f ms", hoodTiming.skin, hoodTiming.features);
 			overlay->text("Layer 1 + integrate %.3f, total %.3f ms", hoodTiming.encoders[0], hoodTiming.total);
 		} else {
 			overlay->text("GPU skin %.3f, features/world %.3f ms", hoodTiming.skin, hoodTiming.features);
-			overlay->text("GPU encoders %.3f, 15 blocks %.3f ms", hoodTiming.encodeTotal(), hoodTiming.processorTotal());
+			overlay->text("GPU encoders %.3f, %u blocks %.3f ms", hoodTiming.encodeTotal(), hoodActiveProcessorBlocks, hoodTiming.processorTotal());
 			overlay->text("Block 0 edge/node %.3f / %.3f ms", hoodTiming.edgeBlocks[0], hoodTiming.nodeBlocks[0]);
 			overlay->text("GPU integrate %.3f, total %.3f ms", hoodTiming.integrate, hoodTiming.total);
 		}

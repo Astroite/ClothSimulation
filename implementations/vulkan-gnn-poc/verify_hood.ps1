@@ -1,5 +1,7 @@
 param(
     [string]$Motion = 'ch10032_sprint',
+    [ValidateSet('Fine15', 'TinyHood')]
+    [string]$Solver = 'Fine15',
     [string]$AssetRoot = '',
     [string]$HoodModel = ''
 )
@@ -9,17 +11,17 @@ $PocRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $UpstreamRoot = Join-Path $PocRoot '.work/Vulkan'
 $Executable = Join-Path $UpstreamRoot 'build-gnn/bin/gnncloth.exe'
 if (-not $AssetRoot) { $AssetRoot = Join-Path $PocRoot ".work/real_scene/$Motion" }
-if (-not $HoodModel) { $HoodModel = Join-Path $PocRoot '.work/hood_data/fine15.vhood' }
-$Golden = Join-Path $AssetRoot 'fine15_rollout.vhgold'
+if (-not $HoodModel) { $HoodModel = Join-Path $PocRoot ($Solver -eq 'TinyHood' ? '.work/hood_data/tinyhood64x4.vhood' : '.work/hood_data/fine15.vhood') }
+$Golden = Join-Path $AssetRoot ($Solver -eq 'TinyHood' ? 'tinyhood64x4_rollout.vhgold' : 'fine15_rollout.vhgold')
 $StaticPose = $Motion -eq 'ch10032_tpose'
-$Output = Join-Path $PocRoot ($StaticPose ? 'results/hood_static_verify.json' : 'results/hood_verify.json')
+$Output = Join-Path $PocRoot ($Solver -eq 'TinyHood' ? 'results/tinyhood_verify.json' : ($StaticPose ? 'results/hood_static_verify.json' : 'results/hood_verify.json'))
 $ValidationSource = Join-Path $UpstreamRoot 'validation_output.txt'
-$ValidationOutput = Join-Path $PocRoot ($StaticPose ? 'results/hood_static_verify_validation_output.txt' : 'results/hood_validation_output.txt')
+$ValidationOutput = Join-Path $PocRoot ($Solver -eq 'TinyHood' ? 'results/tinyhood_verify_validation_output.txt' : ($StaticPose ? 'results/hood_static_verify_validation_output.txt' : 'results/hood_validation_output.txt'))
 if (Test-Path -LiteralPath $Output -PathType Leaf) { Remove-Item -LiteralPath $Output -Force }
 if (Test-Path -LiteralPath $ValidationSource -PathType Leaf) { Remove-Item -LiteralPath $ValidationSource -Force }
 
 $Arguments = @(
-    '--scene', 'ch10032', '--motion', $Motion, '--solver', 'fine15',
+    '--scene', 'ch10032', '--motion', $Motion, '--solver', ($Solver -eq 'TinyHood' ? 'tinyhood' : 'fine15'),
     '--asset-root', ('"{0}"' -f $AssetRoot), '--hood-model', ('"{0}"' -f $HoodModel),
     '--hood-verify', '--hood-golden', ('"{0}"' -f $Golden), '--hood-verify-output', ('"{0}"' -f $Output),
     '-v', '-vl', '-s', 'hlsl'
@@ -31,13 +33,13 @@ try {
 } finally {
     $env:VK_LAYER_ENABLES = $PreviousLayerEnables
 }
-if ($Process.ExitCode -ne 0) { throw "Fine15 Vulkan verification failed with exit code $($Process.ExitCode)" }
-if (-not (Test-Path -LiteralPath $Output -PathType Leaf)) { throw 'Fine15 Vulkan verification did not produce a result file' }
+if ($Process.ExitCode -ne 0) { throw "$Solver Vulkan verification failed with exit code $($Process.ExitCode)" }
+if (-not (Test-Path -LiteralPath $Output -PathType Leaf)) { throw "$Solver Vulkan verification did not produce a result file" }
 $Result = Get-Content -LiteralPath $Output -Raw | ConvertFrom-Json
-if (-not $Result.passed) { throw "Fine15 Vulkan verification exceeded its error thresholds: $Output" }
+if (-not $Result.passed) { throw "$Solver Vulkan verification exceeded its error thresholds: $Output" }
 if (-not (Test-Path -LiteralPath $ValidationSource -PathType Leaf)) { throw 'Khronos validation did not produce a log file' }
 Copy-Item -LiteralPath $ValidationSource -Destination $ValidationOutput -Force
 if (Select-String -LiteralPath $ValidationOutput -Pattern 'VUID-|Validation Error|SYNC-HAZARD' -Quiet) {
     throw "Khronos validation reported an error: $ValidationOutput"
 }
-Write-Host "Fine15 Vulkan verification passed: $Output"
+Write-Host "$Solver Vulkan verification passed: $Output"

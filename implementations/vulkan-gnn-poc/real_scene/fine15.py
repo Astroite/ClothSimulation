@@ -36,6 +36,24 @@ class Fine15Output:
     world_obstacle: torch.Tensor
 
 
+@dataclass
+class Fine15Graph:
+    effective_position: torch.Tensor
+    effective_previous: torch.Tensor
+    pin_mask: torch.Tensor
+    pin_target: torch.Tensor
+    cloth_nodes: torch.Tensor
+    obstacle_nodes: torch.Tensor
+    mesh_edges: torch.Tensor
+    direct_world: torch.Tensor
+    inverse_world: torch.Tensor
+    mesh_senders: torch.Tensor
+    mesh_receivers: torch.Tensor
+    world_cloth: torch.Tensor
+    world_obstacle: torch.Tensor
+    active_obstacle: torch.Tensor
+
+
 class Fine15Weights:
     def __init__(self, tensors: Mapping[str, torch.Tensor], device: torch.device | str = "cpu"):
         self.device = torch.device(device)
@@ -167,7 +185,7 @@ class Fine15:
         ts = torch.full((velocity.shape[0], 1), timestep, dtype=torch.float32, device=self.device)
         return torch.cat((velocity, embedding, normals, ts, log_mass, material), dim=-1)
 
-    def step(
+    def prepare_graph(
         self,
         *,
         position: torch.Tensor,
@@ -183,8 +201,7 @@ class Fine15:
         obstacle_target: torch.Tensor,
         obstacle_normals: torch.Tensor,
         timestep: float,
-        trace: dict[str, torch.Tensor] | None = None,
-    ) -> Fine15Output:
+    ) -> Fine15Graph:
         w = self.weights
         position = position.to(self.device, dtype=torch.float32)
         previous = previous.to(self.device, dtype=torch.float32)
@@ -276,8 +293,150 @@ class Fine15:
             ),
             dim=-1,
         )
-        direct_world = w.normalize("world_edge", direct_world)
-        inverse_world = w.normalize("world_edge", inverse_world)
+        return Fine15Graph(
+            effective_position=effective_position,
+            effective_previous=effective_previous,
+            pin_mask=pin_mask,
+            pin_target=pin_target,
+            cloth_nodes=cloth_nodes,
+            obstacle_nodes=obstacle_nodes,
+            mesh_edges=mesh_edges,
+            direct_world=w.normalize("world_edge", direct_world),
+            inverse_world=w.normalize("world_edge", inverse_world),
+            mesh_senders=mesh_senders,
+            mesh_receivers=mesh_receivers,
+            world_cloth=world_cloth,
+            world_obstacle=world_obstacle,
+            active_obstacle=active_obstacle,
+        )
+
+    def predict_graph(
+        self,
+        graph: Fine15Graph,
+        trace: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Return normalized acceleration for an already constructed graph."""
+
+        w = self.weights
+        cloth_latent = w.mlp("model._learned_model.node_encoder", graph.cloth_nodes)
+        obstacle_latent = w.mlp("model._learned_model.node_encoder", graph.obstacle_nodes)
+        mesh_latent = w.mlp("model._learned_model.edgeset_encoders.mesh", graph.mesh_edges)
+        combined_world = w.mlp(
+            "model._learned_model.edgeset_encoders.world",
+            torch.cat((graph.direct_world, graph.inverse_world), dim=0),
+        )
+        if len(graph.world_cloth):
+            direct_latent, inverse_latent = combined_world.split(len(graph.world_cloth), dim=0)
+        else:
+            direct_latent = combined_world
+            inverse_latent = combined_world
+
+        for block in range(15):
+            prefix = f"model._learned_model.processor_steps.{block}"
+            mesh_update = w.mlp(
+                f"{prefix}.mesh_edge_processor",
+                torch.cat(
+                    (
+                        cloth_latent[graph.mesh_receivers],
+                        cloth_latent[graph.mesh_senders],
+                        mesh_latent,
+                    ),
+                    dim=-1,
+                ),
+            )
+            direct_update = w.mlp(
+                f"{prefix}.world_edge_processor",
+                torch.cat(
+                    (
+                        obstacle_latent[graph.world_obstacle],
+                        cloth_latent[graph.world_cloth],
+                        direct_latent,
+                    ),
+                    dim=-1,
+                ),
+            )
+            inverse_update = w.mlp(
+                f"{prefix}.world_edge_processor",
+                torch.cat(
+                    (
+                        cloth_latent[graph.world_cloth],
+                        obstacle_latent[graph.world_obstacle],
+                        inverse_latent,
+                    ),
+                    dim=-1,
+                ),
+            )
+            mesh_aggregate = aggregate_sum(mesh_update, graph.mesh_receivers, len(graph.cloth_nodes))
+            cloth_world_aggregate = aggregate_sum(inverse_update, graph.world_cloth, len(graph.cloth_nodes))
+            obstacle_world_aggregate = aggregate_sum(
+                direct_update, graph.world_obstacle, len(graph.obstacle_nodes)
+            )
+            cloth_update = w.mlp(
+                f"{prefix}.node_processor",
+                torch.cat((mesh_aggregate, cloth_world_aggregate, cloth_latent), dim=-1),
+            )
+            obstacle_update = w.mlp(
+                f"{prefix}.node_processor",
+                torch.cat(
+                    (
+                        torch.zeros_like(obstacle_world_aggregate),
+                        obstacle_world_aggregate,
+                        obstacle_latent,
+                    ),
+                    dim=-1,
+                ),
+            )
+            cloth_latent = cloth_latent + cloth_update
+            obstacle_latent = obstacle_latent + obstacle_update
+            mesh_latent = mesh_latent + mesh_update
+            direct_latent = direct_latent + direct_update
+            inverse_latent = inverse_latent + inverse_update
+
+        normalized_acceleration = w.mlp("model._learned_model.decoder", cloth_latent, layer_norm=False)
+        if trace is not None:
+            trace["cloth_node_latent"] = cloth_latent.detach()
+        return normalized_acceleration
+
+    def step(
+        self,
+        *,
+        position: torch.Tensor,
+        previous: torch.Tensor,
+        rest_position: torch.Tensor,
+        triangles: torch.Tensor,
+        mesh_senders: torch.Tensor,
+        mesh_receivers: torch.Tensor,
+        mass: torch.Tensor,
+        pin_mask: torch.Tensor,
+        pin_target: torch.Tensor,
+        obstacle_position: torch.Tensor,
+        obstacle_target: torch.Tensor,
+        obstacle_normals: torch.Tensor,
+        timestep: float,
+        trace: dict[str, torch.Tensor] | None = None,
+    ) -> Fine15Output:
+        w = self.weights
+        graph = self.prepare_graph(
+            position=position,
+            previous=previous,
+            rest_position=rest_position,
+            triangles=triangles,
+            mesh_senders=mesh_senders,
+            mesh_receivers=mesh_receivers,
+            mass=mass,
+            pin_mask=pin_mask,
+            pin_target=pin_target,
+            obstacle_position=obstacle_position,
+            obstacle_target=obstacle_target,
+            obstacle_normals=obstacle_normals,
+            timestep=timestep,
+        )
+        effective_position, effective_previous = graph.effective_position, graph.effective_previous
+        pin_mask, pin_target = graph.pin_mask, graph.pin_target
+        cloth_nodes, obstacle_nodes = graph.cloth_nodes, graph.obstacle_nodes
+        mesh_edges, direct_world, inverse_world = graph.mesh_edges, graph.direct_world, graph.inverse_world
+        mesh_senders, mesh_receivers = graph.mesh_senders, graph.mesh_receivers
+        world_cloth, world_obstacle, active_obstacle = graph.world_cloth, graph.world_obstacle, graph.active_obstacle
 
         if trace is not None:
             trace.update(
@@ -291,47 +450,9 @@ class Fine15:
                 active_obstacle=active_obstacle.detach(),
             )
 
-        cloth_latent = w.mlp("model._learned_model.node_encoder", cloth_nodes)
-        obstacle_latent = w.mlp("model._learned_model.node_encoder", obstacle_nodes)
-        mesh_latent = w.mlp("model._learned_model.edgeset_encoders.mesh", mesh_edges)
-        combined_world = w.mlp("model._learned_model.edgeset_encoders.world", torch.cat((direct_world, inverse_world), dim=0))
-        direct_latent, inverse_latent = combined_world.split(len(world_cloth), dim=0)
-
-        for block in range(15):
-            prefix = f"model._learned_model.processor_steps.{block}"
-            mesh_update = w.mlp(
-                f"{prefix}.mesh_edge_processor",
-                torch.cat((cloth_latent[mesh_receivers], cloth_latent[mesh_senders], mesh_latent), dim=-1),
-            )
-            direct_update = w.mlp(
-                f"{prefix}.world_edge_processor",
-                torch.cat((obstacle_latent[world_obstacle], cloth_latent[world_cloth], direct_latent), dim=-1),
-            )
-            inverse_update = w.mlp(
-                f"{prefix}.world_edge_processor",
-                torch.cat((cloth_latent[world_cloth], obstacle_latent[world_obstacle], inverse_latent), dim=-1),
-            )
-            mesh_aggregate = aggregate_sum(mesh_update, mesh_receivers, len(position))
-            cloth_world_aggregate = aggregate_sum(inverse_update, world_cloth, len(position))
-            obstacle_world_aggregate = aggregate_sum(direct_update, world_obstacle, len(active_obstacle))
-            cloth_update = w.mlp(
-                f"{prefix}.node_processor",
-                torch.cat((mesh_aggregate, cloth_world_aggregate, cloth_latent), dim=-1),
-            )
-            obstacle_update = w.mlp(
-                f"{prefix}.node_processor",
-                torch.cat((torch.zeros_like(obstacle_world_aggregate), obstacle_world_aggregate, obstacle_latent), dim=-1),
-            )
-            cloth_latent = cloth_latent + cloth_update
-            obstacle_latent = obstacle_latent + obstacle_update
-            mesh_latent = mesh_latent + mesh_update
-            direct_latent = direct_latent + direct_update
-            inverse_latent = inverse_latent + inverse_update
-
-        normalized_acceleration = w.mlp("model._learned_model.decoder", cloth_latent, layer_norm=False)
+        normalized_acceleration = self.predict_graph(graph, trace)
         acceleration = w.inverse("output", normalized_acceleration)
         if trace is not None:
-            trace["cloth_node_latent"] = cloth_latent.detach()
             trace["acceleration"] = acceleration.detach()
         velocity = effective_position - effective_previous + acceleration
         predicted = effective_position + velocity

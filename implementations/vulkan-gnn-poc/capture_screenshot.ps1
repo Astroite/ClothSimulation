@@ -1,29 +1,33 @@
 param(
-    [ValidateSet('Grid', 'CH10032')]
+    [ValidateSet('Grid', 'CH10032', 'HoodGrid64')]
     [string]$Scene = 'Grid',
     [ValidateSet(16, 32, 64)]
     [int]$Grid = 32,
     [string]$Motion = 'ch10032_sprint',
-    [ValidateSet('Fine15', 'Toy2L')]
+    [ValidateSet('Fine15', 'TinyHood', 'Toy2L')]
     [string]$Solver = 'Fine15',
     [ValidateRange(0, 10000)]
     [int]$SimulationSteps = 0,
     [ValidateRange(0, 30000)]
-    [int]$WarmupMilliseconds = 2000
+    [int]$WarmupMilliseconds = 2000,
+    [string]$AssetRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $PocRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $UpstreamRoot = Join-Path $PocRoot '.work/Vulkan'
 $Executable = Join-Path $UpstreamRoot 'build-gnn/bin/gnncloth.exe'
-$OutputName = if ($Scene -eq 'CH10032' -and $Motion -eq 'ch10032_tpose' -and $Solver -eq 'Toy2L') { 'results/hood_ch10032_tpose_toy2l.png' } elseif ($Scene -eq 'CH10032' -and $Motion -eq 'ch10032_tpose') { 'results/hood_ch10032_tpose.png' } elseif ($Scene -eq 'CH10032') { 'results/hood_ch10032.png' } else { 'results/gnn_cloth.png' }
+$OutputName = if ($Solver -eq 'TinyHood' -and $Scene -eq 'HoodGrid64') { 'results/tinyhood_grid64.png' } elseif ($Solver -eq 'TinyHood' -and $Motion -eq 'ch10032_tpose') { 'results/tinyhood_ch10032_tpose.png' } elseif ($Solver -eq 'TinyHood') { 'results/tinyhood_ch10032.png' } elseif ($Scene -eq 'HoodGrid64') { 'results/hood_grid64_fine15.png' } elseif ($Scene -eq 'CH10032' -and $Motion -eq 'ch10032_tpose' -and $Solver -eq 'Toy2L') { 'results/hood_ch10032_tpose_toy2l.png' } elseif ($Scene -eq 'CH10032' -and $Motion -eq 'ch10032_tpose') { 'results/hood_ch10032_tpose.png' } elseif ($Scene -eq 'CH10032') { 'results/hood_ch10032.png' } else { 'results/gnn_cloth.png' }
 $Output = Join-Path $PocRoot $OutputName
 $Arguments = @('-s', 'hlsl', '-vs', '-w', '1280', '-h', '720')
-if ($Scene -eq 'CH10032') {
+if ($Scene -in @('CH10032', 'HoodGrid64')) {
+    $IsHoodGrid = $Scene -eq 'HoodGrid64'
+    if ($IsHoodGrid) { $Motion = 'hood_grid64' }
+    if (-not $AssetRoot) { $AssetRoot = Join-Path $PocRoot ($IsHoodGrid ? '.work/real_scene/hood_grid64' : ".work/real_scene/$Motion") }
     $Arguments += @(
-        '--scene', 'ch10032', '--motion', $Motion, '--solver', ($Solver -eq 'Toy2L' ? 'toy2l' : 'fine15'),
-        '--asset-root', (Join-Path $PocRoot ".work/real_scene/$Motion"),
-        '--hood-model', (Join-Path $PocRoot '.work/hood_data/fine15.vhood')
+        '--scene', ($IsHoodGrid ? 'hoodgrid' : 'ch10032'), '--motion', $Motion, '--solver', ($Solver -eq 'Toy2L' ? 'toy2l' : ($Solver -eq 'TinyHood' ? 'tinyhood' : 'fine15')),
+        '--asset-root', $AssetRoot,
+        '--hood-model', (Join-Path $PocRoot ($Solver -eq 'TinyHood' ? '.work/hood_data/tinyhood64x4.vhood' : '.work/hood_data/fine15.vhood'))
     )
     if ($SimulationSteps -gt 0) { $Arguments += @('--hood-pause-after', $SimulationSteps) }
 } else {
@@ -47,6 +51,8 @@ public static class GnnWindowCapture {
     public static extern bool SetWindowPos(IntPtr handle, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern bool PrintWindow(IntPtr handle, IntPtr deviceContext, uint flags);
 }
 '@
 
@@ -73,7 +79,18 @@ try {
     $Bitmap = New-Object System.Drawing.Bitmap($Width, $Height)
     $Graphics = [System.Drawing.Graphics]::FromImage($Bitmap)
     try {
-        $Graphics.CopyFromScreen($Rect.Left, $Rect.Top, 0, 0, $Bitmap.Size)
+        try {
+            $Graphics.CopyFromScreen($Rect.Left, $Rect.Top, 0, 0, $Bitmap.Size)
+        } catch {
+            $DeviceContext = $Graphics.GetHdc()
+            try {
+                if (-not [GnnWindowCapture]::PrintWindow($Process.MainWindowHandle, $DeviceContext, 2)) {
+                    throw 'CopyFromScreen and PrintWindow both failed'
+                }
+            } finally {
+                $Graphics.ReleaseHdc($DeviceContext)
+            }
+        }
         $Bitmap.Save($Output, [System.Drawing.Imaging.ImageFormat]::Png)
     } finally {
         $Graphics.Dispose()
