@@ -53,7 +53,10 @@ Unreal Editor、Blender 4.5、`uv` 和 Python 3.11/PyTorch。运行时不解析 
 
 ## 一键 bootstrap 与构建
 
-在本目录的 PowerShell 中执行：
+全部命令、参数与默认值的完整参考见 [`COMMANDS.md`](COMMANDS.md)。
+注意脚本使用 PowerShell 7 语法，必须用 `pwsh` 而不是 `powershell`。
+
+在本目录的 PowerShell 7 中执行：
 
 ```powershell
 .\bootstrap.ps1
@@ -281,6 +284,7 @@ CRC32。`model.json` 额外保存训练参数和 SHA-256。
 - `tools/`：shader 与本机构建包装器。
 - `tests/`：不依赖 Vulkan 的 C++ 格式加载器测试。
 - `results/`：RTX 4060 Ti 验证、benchmark 和截图。
+- `COMMANDS.md`：全部启动命令、参数与默认值的完整参考。
 - `upstream.lock.json`：上游源码锁定。
 
 本 PoC 使用 MIT 许可；上游归属和参考说明见
