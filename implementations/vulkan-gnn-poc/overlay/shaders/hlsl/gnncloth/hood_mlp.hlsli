@@ -24,11 +24,15 @@ groupshared float hoodScratchB[128];
 groupshared float hoodMean;
 groupshared float hoodInvStd;
 
-float hiddenLinear(StructuredBuffer<float> weights, uint weightOffset, uint biasOffset, uint output, uint inputCount, bool useA)
+// Weights are stored transposed as [input][output] by buildGpuModelFor, so that adjacent
+// lanes -- which own adjacent output channels -- read adjacent floats. `outputCount` is the
+// matrix's output width and therefore its row stride; it is not always the latent width
+// (the decoder's third layer emits 3).
+float hiddenLinear(StructuredBuffer<float> weights, uint weightOffset, uint biasOffset, uint output, uint inputCount, uint outputCount, bool useA)
 {
     float value = weights[biasOffset + output];
     [loop] for (uint input = 0; input < inputCount; ++input) {
-        value += weights[weightOffset + output * inputCount + input] * (useA ? hoodScratchA[input] : hoodScratchB[input]);
+        value += weights[weightOffset + input * outputCount + output] * (useA ? hoodScratchA[input] : hoodScratchB[input]);
     }
     return value;
 }

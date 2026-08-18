@@ -35,12 +35,12 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
     const MlpDesc mlp = loadMlp(mlpTable, push.mlpId);
     float value = weights[mlp.b0 + lane];
     [loop] for (uint input = 0; input < mlp.inputDimension; ++input)
-        value += weights[mlp.w0 + lane * mlp.inputDimension + input] * readInput(element, input);
+        value += weights[mlp.w0 + input * TINY_LATENT + lane] * readInput(element, input);
     tinyScratchA[lane] = max(value, 0.0);
     GroupMemoryBarrierWithGroupSync();
-    tinyScratchB[lane] = max(tinyHiddenLinear(weights, mlp.w1, mlp.b1, lane, TINY_LATENT, true), 0.0);
+    tinyScratchB[lane] = max(tinyHiddenLinear(weights, mlp.w1, mlp.b1, lane, TINY_LATENT, TINY_LATENT, true), 0.0);
     GroupMemoryBarrierWithGroupSync();
-    tinyScratchA[lane] = tinyHiddenLinear(weights, mlp.w2, mlp.b2, lane, TINY_LATENT, false);
+    tinyScratchA[lane] = tinyHiddenLinear(weights, mlp.w2, mlp.b2, lane, TINY_LATENT, TINY_LATENT, false);
     tinyLayerNorm(lane, TINY_LATENT);
     writeOutput(element, lane, (tinyScratchA[lane] - tinyMean) * tinyInvStd * weights[mlp.lnWeight + lane] + weights[mlp.lnBias + lane]);
 }

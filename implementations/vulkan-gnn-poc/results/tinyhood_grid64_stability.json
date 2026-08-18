@@ -3,14 +3,14 @@
   "solver": "tinyhood64x4",
   "xpbd": false,
   "collision_projection": false,
-  "completed_steps": 59,
+  "completed_steps": 74,
   "structure_preserved": false,
   "invalid_vertices": 0,
   "active_world_edges": 0,
-  "maximum_displacement_m": 4.208982524,
+  "maximum_displacement_m": 5.295958731,
   "maximum_pinned_error_m": 0,
-  "edge_length_ratio": {"mean": 3.366083496, "p95": 2.981599432, "max": 220.985988, "collapsed_fraction_lt_0_5": 0.005249343832, "stretched_fraction_gt_1_5": 0.1880389951},
-  "triangle_area_ratio": {"mean": 4.955678855, "median": 1.041558306, "degenerate_fraction_lt_0_1": 0.0001259763165, "flipped_fraction": 0.1279919375},
-  "bounds_min_m": [-0.6000000238, -0.512277782, 0],
-  "bounds_max_m": [0.8219498992, 0.6272220612, 4.208596706]
+  "edge_length_ratio": {"mean": 4.178392436, "p95": 3.655070546, "max": 278.0567759, "collapsed_fraction_lt_0_5": 0.005124359455, "stretched_fraction_gt_1_5": 0.3442069741},
+  "triangle_area_ratio": {"mean": 6.388101609, "median": 1.387248185, "degenerate_fraction_lt_0_1": 0, "flipped_fraction": 0.1916099773},
+  "bounds_min_m": [-0.6000000238, -0.5501177311, 0],
+  "bounds_max_m": [0.8594058156, 0.6022363901, 5.295109272]
 }

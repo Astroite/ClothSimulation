@@ -26,11 +26,15 @@ groupshared float tinyScratchB[TINY_LATENT];
 groupshared float tinyMean;
 groupshared float tinyInvStd;
 
-float tinyHiddenLinear(StructuredBuffer<float> weights, uint weightOffset, uint biasOffset, uint output, uint inputCount, bool useA)
+// Weights are stored transposed as [input][output] by buildGpuModelFor, so that adjacent
+// lanes -- which own adjacent output channels -- read adjacent floats. `outputCount` is the
+// matrix's output width and therefore its row stride; it is not always TINY_LATENT (the
+// decoder's third layer emits 3).
+float tinyHiddenLinear(StructuredBuffer<float> weights, uint weightOffset, uint biasOffset, uint output, uint inputCount, uint outputCount, bool useA)
 {
     float value = weights[biasOffset + output];
     [loop] for (uint input = 0; input < inputCount; ++input)
-        value += weights[weightOffset + output * inputCount + input] * (useA ? tinyScratchA[input] : tinyScratchB[input]);
+        value += weights[weightOffset + input * outputCount + output] * (useA ? tinyScratchA[input] : tinyScratchB[input]);
     return value;
 }
 

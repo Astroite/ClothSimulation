@@ -24,12 +24,12 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
     const MlpDesc mlp = loadMlp(mlpTable, 15);
     tinyScratchA[lane] = nodeLatent[vertex * TINY_LATENT + lane];
     GroupMemoryBarrierWithGroupSync();
-    tinyScratchB[lane] = max(tinyHiddenLinear(weights, mlp.w0, mlp.b0, lane, TINY_LATENT, true), 0.0);
+    tinyScratchB[lane] = max(tinyHiddenLinear(weights, mlp.w0, mlp.b0, lane, TINY_LATENT, TINY_LATENT, true), 0.0);
     GroupMemoryBarrierWithGroupSync();
-    tinyScratchA[lane] = max(tinyHiddenLinear(weights, mlp.w1, mlp.b1, lane, TINY_LATENT, false), 0.0);
+    tinyScratchA[lane] = max(tinyHiddenLinear(weights, mlp.w1, mlp.b1, lane, TINY_LATENT, TINY_LATENT, false), 0.0);
     GroupMemoryBarrierWithGroupSync();
     if (lane < 3)
-        tinyScratchB[lane] = tinyHiddenLinear(weights, mlp.w2, mlp.b2, lane, TINY_LATENT, true) * normalizers[73 + lane] + normalizers[70 + lane];
+        tinyScratchB[lane] = tinyHiddenLinear(weights, mlp.w2, mlp.b2, lane, TINY_LATENT, 3, true) * normalizers[73 + lane] + normalizers[70 + lane];
     GroupMemoryBarrierWithGroupSync();
     if (lane == 0) {
         const float3 acceleration = float3(tinyScratchB[0], tinyScratchB[1], tinyScratchB[2]);

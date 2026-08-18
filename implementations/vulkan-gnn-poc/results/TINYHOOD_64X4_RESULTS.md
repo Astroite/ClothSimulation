@@ -72,6 +72,13 @@ teacher-forced 状态上的加速度拟合看起来尚可：
 
 ## RTX 4060 Ti GPU 时间
 
+> **计时已被取代。** 本节的时间是在启用 Khronos validation + synchronization validation
+> 且未锁定 GPU 时钟的条件下测得的，同一份工作量在不同运行之间会有最多 2.2 倍差异，
+> 因此不能用作任何加速比的分母。干净的可复现测量、方法说明，以及权重布局转置后的
+> A/B 数据见 [`KERNEL_OPTIMISATION_RESULTS.md`](KERNEL_OPTIMISATION_RESULTS.md)。
+> 结构指标与数值验证结论不受影响。
+
+
 时间戳包含阶段间 compute barrier，不包含 graphics/present。
 
 | 场景/模型 | features | encoders | processor | decoder + integrate | total |

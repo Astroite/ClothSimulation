@@ -51,13 +51,13 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
     float value = weights[mlp.b0 + lane];
     [loop] for (uint input = 0; input < 384; ++input) {
         const float inputValue = input < 128 ? aggregateMesh[input] : (input < 256 ? aggregateWorld[input - 128] : oldNodeValue[input - 256]);
-        value += weights[mlp.w0 + lane * 384 + input] * inputValue;
+        value += weights[mlp.w0 + input * 128 + lane] * inputValue;
     }
     hoodScratchA[lane] = max(value, 0.0);
     GroupMemoryBarrierWithGroupSync();
-    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, true), 0.0);
+    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, 128, true), 0.0);
     GroupMemoryBarrierWithGroupSync();
-    hoodScratchA[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, false);
+    hoodScratchA[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, 128, false);
     calculateLayerNorm(lane, 128);
     const float update = (hoodScratchA[lane] - hoodMean) * hoodInvStd * weights[mlp.lnWeight + lane] + weights[mlp.lnBias + lane];
     nodeOut[node * 128 + lane] = nodeIn[node * 128 + lane] + update;

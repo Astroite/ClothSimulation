@@ -14,6 +14,14 @@ The optional body projection was disabled. Vulkan matched the pure-PyTorch one-s
 
 ## Detailed GPU timings
 
+> **These timings are superseded.** They were measured with Khronos validation and
+> synchronization validation enabled and with the GPU clock unlocked, which makes identical
+> work vary by up to 2.2x between runs, so they cannot serve as the denominator of any
+> speedup. For the clean reproducible measurements, the method behind them, and the A/B data
+> for the weight-layout transpose, see [`KERNEL_OPTIMISATION_RESULTS.md`](KERNEL_OPTIMISATION_RESULTS.md).
+> The structural metrics and the numerical verification conclusions are unaffected.
+
+
 The run discarded 5 warmup samples and recorded 20 samples with Vulkan GPU timestamps. Times include the required compute barriers between stages, but exclude CPU command submission, graphics drawing and present. Full mean/min/p95/max rows are in [`hood_static_timing.csv`](hood_static_timing.csv).
 
 | Stage | Mean (ms) | P95 (ms) | Share of total |

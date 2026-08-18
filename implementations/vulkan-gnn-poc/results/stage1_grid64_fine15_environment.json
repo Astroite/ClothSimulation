@@ -1,0 +1,26 @@
+{
+  "scene": "HoodGrid64",
+  "solver": "Fine15",
+  "motion": "hood_grid64",
+  "warmup": 10,
+  "samples": 60,
+  "validation_layers": false,
+  "synchronization_validation": false,
+  "locked_sm_clock_mhz": 2700,
+  "gpu_before": {
+    "sm_clock": "2745 MHz",
+    "memory_clock": "9001 MHz",
+    "temperature_c": "47",
+    "power_draw": "63.23 W",
+    "utilization": "19 %",
+    "throttle_reasons": "0x0000000000000000"
+  },
+  "gpu_after": {
+    "sm_clock": "2700 MHz",
+    "memory_clock": "9001 MHz",
+    "temperature_c": "56",
+    "power_draw": "93.39 W",
+    "utilization": "69 %",
+    "throttle_reasons": "0x0000000000000001"
+  }
+}

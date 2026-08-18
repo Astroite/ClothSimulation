@@ -35,12 +35,14 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
     if (element >= push.count) return;
     const MlpDesc mlp = loadMlp(mlpTable, push.mlpId);
     float value = weights[mlp.b0 + lane];
-    [loop] for (uint input = 0; input < mlp.inputDimension; ++input) value += weights[mlp.w0 + lane * mlp.inputDimension + input] * readInput(element, input);
+    // w0 is transposed to [input][latent]; every encoder's first layer emits 128 channels
+    // regardless of its input width, so 128 is the row stride here.
+    [loop] for (uint input = 0; input < mlp.inputDimension; ++input) value += weights[mlp.w0 + input * 128 + lane] * readInput(element, input);
     hoodScratchA[lane] = max(value, 0.0);
     GroupMemoryBarrierWithGroupSync();
-    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, true), 0.0);
+    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, 128, true), 0.0);
     GroupMemoryBarrierWithGroupSync();
-    hoodScratchA[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, false);
+    hoodScratchA[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, 128, false);
     calculateLayerNorm(lane, 128);
     writeOutput(element, lane, (hoodScratchA[lane] - hoodMean) * hoodInvStd * weights[mlp.lnWeight + lane] + weights[mlp.lnBias + lane]);
 }

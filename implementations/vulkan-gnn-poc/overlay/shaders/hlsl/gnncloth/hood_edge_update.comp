@@ -44,19 +44,31 @@ void writeEdge(uint element, uint lane, float value)
     else worldInverseOut[element * 128 + lane] = value;
 }
 
+// Every lane consumes all 384 inputs, so a per-lane global gather issues 128 x 384 loads to
+// read 384 distinct floats. Stage the vector cooperatively instead -- three coalesced loads
+// per lane -- and take the inner loop from groupshared, the way hood_node_update.comp
+// already does with its aggregates.
+groupshared float edgeInput[384];
+
 [numthreads(128, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const uint element = groupId.x;
+    // Both terms are uniform across the workgroup, so the whole group exits together and the
+    // barriers below stay well formed.
     if (element >= push.count || (push.kind != 0 && worldObstacle[element] == 0xffffffffu)) return;
+    edgeInput[lane] = edgeValue(element, lane);
+    edgeInput[lane + 128] = edgeValue(element, lane + 128);
+    edgeInput[lane + 256] = edgeValue(element, lane + 256);
+    GroupMemoryBarrierWithGroupSync();
     const MlpDesc mlp = loadMlp(mlpTable, 3 + push.block * 3 + (push.kind == 0 ? 0 : 1));
     float value = weights[mlp.b0 + lane];
-    [loop] for (uint input = 0; input < 384; ++input) value += weights[mlp.w0 + lane * 384 + input] * edgeValue(element, input);
+    [loop] for (uint input = 0; input < 384; ++input) value += weights[mlp.w0 + input * 128 + lane] * edgeInput[input];
     hoodScratchA[lane] = max(value, 0.0);
     GroupMemoryBarrierWithGroupSync();
-    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, true), 0.0);
+    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, 128, true), 0.0);
     GroupMemoryBarrierWithGroupSync();
-    hoodScratchA[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, false);
+    hoodScratchA[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, 128, false);
     calculateLayerNorm(lane, 128);
     const float update = (hoodScratchA[lane] - hoodMean) * hoodInvStd * weights[mlp.lnWeight + lane] + weights[mlp.lnBias + lane];
     writeEdge(element, lane, oldEdge(element, lane) + update);

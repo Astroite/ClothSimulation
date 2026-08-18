@@ -39,17 +39,35 @@ inline Fine15GpuModel buildGpuModelFor(const TensorAsset& asset, uint32_t latent
 		result.weights.insert(result.weights.end(), values.begin(), values.end());
 		return offset;
 	};
+	// PyTorch stores nn.Linear.weight as [out][in]. The shaders give each lane one output
+	// channel and walk the inputs, so a row-major matrix makes adjacent lanes read addresses
+	// `in` floats apart: a 32-lane warp then touches 32 distinct cache lines to consume 128
+	// useful bytes, and a 128-lane workgroup's layer-0 footprint (128 x 384 x 4 B = 192 KB)
+	// exceeds the 128 KB L1, so lines are evicted before they can be reused. Storing the
+	// transpose turns the same access into `weights[w + input * outputs + lane]`, which is
+	// fully coalesced. This is a pure relayout; the arithmetic and its results are unchanged.
+	auto appendTransposed = [&](const TensorView& tensor, uint32_t outputs, uint32_t inputs) {
+		const uint32_t offset = static_cast<uint32_t>(result.weights.size());
+		const auto values = tensorFloats(tensor);
+		if (values.size() != static_cast<size_t>(outputs) * inputs) throw std::runtime_error("HOOD weight matrix has an unexpected element count");
+		result.weights.resize(result.weights.size() + values.size());
+		float* const destination = result.weights.data() + offset;
+		for (uint32_t output = 0; output < outputs; ++output)
+			for (uint32_t input = 0; input < inputs; ++input)
+				destination[static_cast<size_t>(input) * outputs + output] = values[static_cast<size_t>(output) * inputs + input];
+		return offset;
+	};
 	auto addMlp = [&](uint32_t id, const std::string& prefix, uint32_t input, uint32_t output, bool layerNorm) {
 		if (id >= result.mlps.size()) throw std::runtime_error("HOOD MLP id is out of range");
 		const std::string network = asset.tensors.contains(prefix + ".0.layers.0.weight") ? prefix + ".0" : prefix;
 		MlpGpu descriptor{};
 		descriptor.inputDimension = input;
 		descriptor.outputDimension = output;
-		descriptor.w0 = append(asset.require(network + ".layers.0.weight", { latent, input }));
+		descriptor.w0 = appendTransposed(asset.require(network + ".layers.0.weight", { latent, input }), latent, input);
 		descriptor.b0 = append(asset.require(network + ".layers.0.bias", { latent }));
-		descriptor.w1 = append(asset.require(network + ".layers.2.weight", { latent, latent }));
+		descriptor.w1 = appendTransposed(asset.require(network + ".layers.2.weight", { latent, latent }), latent, latent);
 		descriptor.b1 = append(asset.require(network + ".layers.2.bias", { latent }));
-		descriptor.w2 = append(asset.require(network + ".layers.4.weight", { output, latent }));
+		descriptor.w2 = appendTransposed(asset.require(network + ".layers.4.weight", { output, latent }), output, latent);
 		descriptor.b2 = append(asset.require(network + ".layers.4.bias", { output }));
 		if (layerNorm) {
 			descriptor.layerNormWeight = append(asset.require(prefix + ".1.weight", { output }));

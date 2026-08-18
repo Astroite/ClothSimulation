@@ -134,9 +134,11 @@ VCHAR/VANIM/VCLTH、world edge、15 层推理和 timestamp，不调用规则网�
 ```
 
 RTX 4060 Ti 上连续 129 步后没有 NaN/Inf、塌边、超过 1.5× 的拉伸边或退化三角形；
-Fine15 保持了完整布片而没有拉成条。总 GPU 时间均值 `551.81 ms/步`，其中 15 个
-processor block 占 `531.57 ms`。详细结构指标、逐阶段时间和截图见
-[`results/HOOD_GRID64_RESULTS.md`](results/HOOD_GRID64_RESULTS.md)。公开轻量权重与架构筛选见
+Fine15 保持了完整布片而没有拉成条。详细结构指标和截图见
+[`results/HOOD_GRID64_RESULTS.md`](results/HOOD_GRID64_RESULTS.md)。该文件里的逐阶段时间
+已被 [`results/KERNEL_OPTIMISATION_RESULTS.md`](results/KERNEL_OPTIMISATION_RESULTS.md) 取代：它是在启用
+validation 且未锁定时钟的条件下测的，不可比。干净重测（锁 2700 MHz、无 validation）为
+`71.75 ms/步` 最小值。公开轻量权重与架构筛选见
 [`results/LIGHTWEIGHT_GNN_CANDIDATES.md`](results/LIGHTWEIGHT_GNN_CANDIDATES.md)。
 
 ## TinyHOOD 64×4 实验
@@ -157,11 +159,14 @@ processor block 占 `531.57 ms`。详细结构指标、逐阶段时间和截图�
 .\benchmark_hood_static.ps1 -Scene HoodGrid64 -Solver TinyHood -Warmup 5 -Samples 50
 ```
 
-Vulkan 与 Python 的 10 步最大误差为 `9.54e-7`。CH10032 初始 compute 时间约
-`15.79 ms`，相对 Fine15 提速约 `34.4×`；但当前只使用一段 61 帧 Fine15 rollout
+Vulkan 与 Python 的 10 步最大误差为 `9.54e-7`。干净测量（锁 2700 MHz、无 validation）下
+CH10032 compute 时间为 `1.65 ms` 最小值，Grid64 为 `4.14 ms` 最小值，
+两者都在 60 Hz 预算内；但当前只使用一段 61 帧 Fine15 rollout
 训练，纯 TinyHOOD 闭环会快速拉伸，第 5 步 edge ratio P95 已为 `6.49`，不能作为
-独立模拟器使用。完整训练、性能、失败消融和后续混合 XPBD 建议见
-[`results/TINYHOOD_64X4_RESULTS.md`](results/TINYHOOD_64X4_RESULTS.md)。
+独立模拟器使用。也就是说学生模型的瓶颈已经完全是训练与闭环稳定性，不是速度。
+完整训练、性能、失败消融和后续混合 XPBD 建议见
+[`results/TINYHOOD_64X4_RESULTS.md`](results/TINYHOOD_64X4_RESULTS.md)，
+计时方法与布局优化见 [`results/KERNEL_OPTIMISATION_RESULTS.md`](results/KERNEL_OPTIMISATION_RESULTS.md)。
 
 启动真实角色：
 
@@ -180,7 +185,8 @@ Vulkan 与 Python 的 10 步最大误差为 `9.54e-7`。CH10032 初始 compute �
 .\benchmark_hood_static.ps1 -Warmup 5 -Samples 20
 ```
 
-脚本启用 Khronos validation，输出 38 个 Vulkan timestamp 聚合到
+脚本默认锁定 SM 时钟且不启用 validation（正确性由 `verify_hood.ps1` 负责，
+可用 `-Validate` 为验证过的路径计时），输出 38 个 Vulkan timestamp 聚合到
 `results/hood_static_timing.csv`：蒙皮、特征/世界边、4 个 encoder、15 个 block 各自的
 edge/node update、decoder/积分和总时间。时间区间包含阶段间必要的 compute barrier，
 但不包含 CPU 提交、绘制和 present。实测表与结论见

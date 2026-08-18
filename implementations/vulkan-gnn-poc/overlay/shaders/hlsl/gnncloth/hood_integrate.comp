@@ -24,11 +24,12 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
     const MlpDesc mlp = loadMlp(mlpTable, 48);
     hoodScratchA[lane] = nodeLatent[vertex * 128 + lane];
     GroupMemoryBarrierWithGroupSync();
-    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w0, mlp.b0, lane, 128, true), 0.0);
+    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w0, mlp.b0, lane, 128, 128, true), 0.0);
     GroupMemoryBarrierWithGroupSync();
-    hoodScratchA[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, false), 0.0);
+    hoodScratchA[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, 128, false), 0.0);
     GroupMemoryBarrierWithGroupSync();
-    if (lane < 3) hoodScratchB[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, true) * normalizers[73 + lane] + normalizers[70 + lane];
+    // The decoder's third layer emits 3 channels, so its transposed row stride is 3.
+    if (lane < 3) hoodScratchB[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, 3, true) * normalizers[73 + lane] + normalizers[70 + lane];
     GroupMemoryBarrierWithGroupSync();
     if (lane == 0) {
         const float3 acceleration = float3(hoodScratchB[0], hoodScratchB[1], hoodScratchB[2]);
