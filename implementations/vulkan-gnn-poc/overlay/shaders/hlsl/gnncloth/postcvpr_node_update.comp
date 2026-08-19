@@ -1,0 +1,107 @@
+#include "hood_mlp.hlsli"
+
+struct Push { uint mlpId, nodeCount, clothCount, edgeMask, activeLevel; };
+[[vk::push_constant]] Push push;
+[[vk::binding(0)]] StructuredBuffer<float> weights;
+[[vk::binding(1)]] StructuredBuffer<uint4> mlpTable;
+[[vk::binding(2)]] StructuredBuffer<float> nodeIn;
+[[vk::binding(3)]] RWStructuredBuffer<float> nodeOut;
+[[vk::binding(4)]] StructuredBuffer<float> meshIn;
+[[vk::binding(5)]] StructuredBuffer<float> meshOut;
+[[vk::binding(6)]] StructuredBuffer<float> coarse0In;
+[[vk::binding(7)]] StructuredBuffer<float> coarse0Out;
+[[vk::binding(8)]] StructuredBuffer<float> coarse1In;
+[[vk::binding(9)]] StructuredBuffer<float> coarse1Out;
+[[vk::binding(10)]] StructuredBuffer<float> worldDirectIn;
+[[vk::binding(11)]] StructuredBuffer<float> worldDirectOut;
+[[vk::binding(12)]] StructuredBuffer<float> worldInverseIn;
+[[vk::binding(13)]] StructuredBuffer<float> worldInverseOut;
+[[vk::binding(14)]] StructuredBuffer<uint> meshOffsets;
+[[vk::binding(15)]] StructuredBuffer<uint> coarse0Offsets;
+[[vk::binding(16)]] StructuredBuffer<uint> coarse1Offsets;
+[[vk::binding(17)]] StructuredBuffer<uint> worldObstacle;
+[[vk::binding(18)]] StructuredBuffer<uint> vertexLevel;
+[[vk::binding(19)]] StructuredBuffer<uint> activeProxy;
+// Proxy -> cloth reverse CSR from hood_world_reverse.comp, grouped by proxy with ascending
+// cloth index inside each group.
+[[vk::binding(20)]] StructuredBuffer<uint> reverseCloth;
+[[vk::binding(21)]] StructuredBuffer<uint> reverseBegin;
+[[vk::binding(22)]] StructuredBuffer<uint> reverseCount;
+
+groupshared float aggregateCoarse0[128];
+groupshared float aggregateCoarse1[128];
+groupshared float aggregateMesh[128];
+groupshared float aggregateWorld[128];
+groupshared float oldNodeValue[128];
+
+float aggregateEdges(uint node, uint lane, StructuredBuffer<uint> offsets,
+    StructuredBuffer<float> inputValues, StructuredBuffer<float> outputValues)
+{
+    float sum = 0.0;
+    [loop] for (uint edge = offsets[node]; edge < offsets[node + 1]; ++edge)
+        sum += outputValues[edge * 128 + lane] - inputValues[edge * 128 + lane];
+    return sum;
+}
+
+[numthreads(128, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint node = groupId.x;
+    if (node >= push.nodeCount) return;
+    if (node >= push.clothCount && activeProxy[node - push.clothCount] == 0) {
+        nodeOut[node * 128 + lane] = nodeIn[node * 128 + lane];
+        return;
+    }
+    float c0 = 0.0, c1 = 0.0, mesh = 0.0, world = 0.0;
+    if (node < push.clothCount) {
+        if ((push.edgeMask & 2u) != 0) c0 = aggregateEdges(node, lane, coarse0Offsets, coarse0In, coarse0Out);
+        if ((push.edgeMask & 4u) != 0) c1 = aggregateEdges(node, lane, coarse1Offsets, coarse1In, coarse1Out);
+        if ((push.edgeMask & 1u) != 0) mesh = aggregateEdges(node, lane, meshOffsets, meshIn, meshOut);
+        if (worldObstacle[node] != 0xffffffffu && vertexLevel[node] >= push.activeLevel)
+            world = worldInverseOut[node * 128 + lane] - worldInverseIn[node * 128 + lane];
+    } else {
+        const uint proxy = node - push.clothCount;
+        // The CSR prunes cloth vertices that do not target this proxy; the vertexLevel test
+        // varies per block so it stays here. Ascending cloth order is preserved, so this
+        // visits exactly the same subset in the same order as the old full scan.
+        const uint begin = reverseBegin[proxy];
+        const uint count = reverseCount[proxy];
+        [loop] for (uint slot = 0; slot < count; ++slot) {
+            const uint cloth = reverseCloth[begin + slot];
+            if (vertexLevel[cloth] >= push.activeLevel)
+                world += worldDirectOut[cloth * 128 + lane] - worldDirectIn[cloth * 128 + lane];
+        }
+    }
+    aggregateCoarse0[lane] = c0;
+    aggregateCoarse1[lane] = c1;
+    aggregateMesh[lane] = mesh;
+    aggregateWorld[lane] = world;
+    oldNodeValue[lane] = nodeIn[node * 128 + lane];
+    GroupMemoryBarrierWithGroupSync();
+
+    const MlpDesc mlp = loadMlp(mlpTable, push.mlpId);
+    float value = weights[mlp.b0 + lane];
+    [loop] for (uint input = 0; input < mlp.inputDimension; ++input) {
+        uint slot = input / 128;
+        const uint component = input % 128;
+        float inputValue;
+        if (slot == 0) inputValue = oldNodeValue[component];
+        else {
+            uint cursor = 1;
+            inputValue = 0.0;
+            if ((push.edgeMask & 2u) != 0) { if (slot == cursor) inputValue = aggregateCoarse0[component]; ++cursor; }
+            if ((push.edgeMask & 4u) != 0) { if (slot == cursor) inputValue = aggregateCoarse1[component]; ++cursor; }
+            if ((push.edgeMask & 1u) != 0) { if (slot == cursor) inputValue = aggregateMesh[component]; ++cursor; }
+            if (slot == cursor) inputValue = aggregateWorld[component];
+        }
+        value += weights[mlp.w0 + input * 128 + lane] * inputValue;
+    }
+    hoodScratchA[lane] = max(value, 0.0);
+    GroupMemoryBarrierWithGroupSync();
+    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, 128, true), 0.0);
+    GroupMemoryBarrierWithGroupSync();
+    hoodScratchA[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, 128, false);
+    calculateLayerNorm(lane, 128);
+    const float update = (hoodScratchA[lane] - hoodMean) * hoodInvStd * weights[mlp.lnWeight + lane] + weights[mlp.lnBias + lane];
+    nodeOut[node * 128 + lane] = nodeIn[node * 128 + lane] + update;
+}

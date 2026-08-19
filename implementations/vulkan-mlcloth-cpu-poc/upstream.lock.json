@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/SaschaWillems/Vulkan.git",
+  "commit": "15782bf998d90d296d4731d79e00aad49fd2375e",
+  "submodules": {
+    "external/glm": {
+      "repository": "https://github.com/g-truc/glm.git",
+      "commit": "1ad55c5016339b83b7eec98c31007e0aee57d2bf"
+    }
+  }
+}
+

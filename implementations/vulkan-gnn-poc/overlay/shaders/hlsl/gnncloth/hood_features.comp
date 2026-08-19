@@ -30,6 +30,10 @@ cbuffer ubo : register(b20) { Params params; };
 [[vk::binding(18)]] StructuredBuffer<float> normalizers;
 [[vk::binding(19)]] RWStructuredBuffer<float4> effectivePosition;
 [[vk::binding(21)]] RWStructuredBuffer<uint> activeProxy;
+// Vertex -> incident-triangle CSR, derived from clothTriangles once at load time by
+// hoodLoadAssets. Appended after the pre-existing bindings so none of them move.
+[[vk::binding(22)]] StructuredBuffer<uint> clothTriangleOffsets;
+[[vk::binding(23)]] StructuredBuffer<uint> clothTriangleIndices;
 
 float normalizeFeature(float value, uint meanOffset, uint stdOffset, uint index)
 {
@@ -39,9 +43,14 @@ float normalizeFeature(float value, uint meanOffset, uint stdOffset, uint index)
 float3 clothNormal(uint vertex)
 {
     float3 sum = 0.0;
-    [loop] for (uint triIndex = 0; triIndex < params.triangleCount; ++triIndex) {
+    // Walk only the triangles incident to this vertex. The CSR keeps them in ascending
+    // triangle order and stores each one once, so the accumulation is bit-identical to the
+    // old scan over every triangle in the mesh.
+    const uint beginTriangle = clothTriangleOffsets[vertex];
+    const uint endTriangle = clothTriangleOffsets[vertex + 1];
+    [loop] for (uint slot = beginTriangle; slot < endTriangle; ++slot) {
+        const uint triIndex = clothTriangleIndices[slot];
         const uint3 ids = uint3(clothTriangles[triIndex * 3 + 0], clothTriangles[triIndex * 3 + 1], clothTriangles[triIndex * 3 + 2]);
-        if (ids.x != vertex && ids.y != vertex && ids.z != vertex) continue;
         const float3 a = (pinMask[ids.x] != 0 ? pinTarget[ids.x] : clothPosition[ids.x]).xyz;
         const float3 b = (pinMask[ids.y] != 0 ? pinTarget[ids.y] : clothPosition[ids.y]).xyz;
         const float3 c = (pinMask[ids.z] != 0 ? pinTarget[ids.z] : clothPosition[ids.z]).xyz;
@@ -77,17 +86,9 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         writeNode(index, current - previous, pinned ? 3 : 0, clothNormal(index), log(max(clothMass[index], 1.0e-20)),
             float3(params.material0, params.material1, params.material2));
 
-        float minimumSquared = params.collisionRadius * params.collisionRadius;
-        uint nearest = 0xffffffffu;
-        [loop] for (uint proxy = 0; proxy < params.proxyCount; ++proxy) {
-            const float3 difference = current - proxyPosition[proxy].xyz;
-            const float squared = dot(difference, difference);
-            if (squared < minimumSquared) { minimumSquared = squared; nearest = proxy; }
-        }
-        worldObstacle[index] = nearest;
+        // hood_world_nearest.comp already picked the nearest proxy and marked it active.
+        const uint nearest = worldObstacle[index];
         if (nearest != 0xffffffffu) {
-            uint ignored;
-            InterlockedOr(activeProxy[nearest], 1u, ignored);
             const float3 relativeCurrent = current - proxyPosition[nearest].xyz;
             const float3 relativeTarget = current - proxyTarget[nearest].xyz;
             const float direct[9] = { relativeCurrent.x, relativeCurrent.y, relativeCurrent.z, length(relativeCurrent),

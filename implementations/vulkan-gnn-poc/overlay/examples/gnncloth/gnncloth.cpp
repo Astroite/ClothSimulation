@@ -226,9 +226,11 @@ public:
 		hoodStaticBenchmarkMode = hasArgument("--hood-static-benchmark");
 		const std::string realSolverName = argumentValue("--solver", "toy");
 		const std::string sceneName = argumentValue("--scene", "grid");
-		hoodSolver = realSolverName == "toy2l" ? HoodToy2L : (realSolverName == "tinyhood" ? HoodTiny64x4 : HoodFine15);
+		hoodSolver = realSolverName == "toy2l" ? HoodToy2L : (realSolverName == "tinyhood" ? HoodTinyStudent
+			: (realSolverName == "postcvpr" ? HoodPostCvpr : HoodFine15));
 		hoodGridScene = sceneName == "hoodgrid";
-		realSceneMode = sceneName == "ch10032" || hoodGridScene || realSolverName == "fine15" || realSolverName == "tinyhood" || realSolverName == "toy2l";
+		realSceneMode = sceneName == "ch10032" || hoodGridScene || realSolverName == "fine15" || realSolverName == "tinyhood"
+			|| realSolverName == "postcvpr" || realSolverName == "toy2l";
 		hoodAssetRoot = argumentValue("--asset-root", "");
 		hoodMotion = argumentValue("--motion", hoodGridScene ? "hood_grid64" : (hoodStaticBenchmarkMode ? "ch10032_tpose" : "ch10032_sprint"));
 		hoodModelPath = argumentValue("--hood-model", "");
@@ -238,7 +240,8 @@ public:
 		hoodCollisionProjection = hasArgument("--hood-collision-projection");
 		hoodGoldenPath = argumentValue("--hood-golden", "");
 		hoodVerifyOutput = argumentValue("--hood-verify-output", "hood_verify.json");
-		hoodStaticBenchmarkOutput = argumentValue("--hood-benchmark-output", hoodSolver == HoodToy2L ? "hood_static_toy2l_timing.csv" : (hoodSolver == HoodTiny64x4 ? "tinyhood_static_timing.csv" : "hood_static_timing.csv"));
+		hoodStaticBenchmarkOutput = argumentValue("--hood-benchmark-output", hoodSolver == HoodToy2L ? "hood_static_toy2l_timing.csv"
+			: (hoodSolver == HoodTinyStudent ? "tinyhood_static_timing.csv" : (hoodSolver == HoodPostCvpr ? "postcvpr_static_timing.csv" : "hood_static_timing.csv")));
 		hoodStabilityOutput = argumentValue("--hood-stability-output", "");
 		hoodStaticBenchmarkWarmup = static_cast<uint32_t>(std::strtoul(argumentValue("--hood-benchmark-warmup", "5").c_str(), nullptr, 10));
 		hoodStaticBenchmarkTarget = static_cast<uint32_t>(std::strtoul(argumentValue("--hood-benchmark-samples", "20").c_str(), nullptr, 10));
@@ -291,7 +294,7 @@ public:
 			settings.overlay = false;
 			vks::tools::errorModeSilent = true;
 #if defined(_WIN32)
-			setupConsole("CH10032 Fine15 verification");
+			setupConsole(hoodSolver == HoodPostCvpr ? "CH10032 PostCVPR verification" : "CH10032 HOOD verification");
 #endif
 		}
 		if (hoodStaticBenchmarkMode) {
@@ -304,14 +307,19 @@ public:
 			settings.overlay = false;
 			vks::tools::errorModeSilent = true;
 #if defined(_WIN32)
-			setupConsole(hoodGridScene ? (hoodSolver == HoodTiny64x4 ? "Grid64 sphere TinyHOOD benchmark" : "Grid64 sphere Fine15 benchmark")
-				: (hoodSolver == HoodToy2L ? "CH10032 Toy2L static T-pose benchmark" : (hoodSolver == HoodTiny64x4 ? "CH10032 TinyHOOD static T-pose benchmark" : "CH10032 Fine15 static T-pose benchmark")));
+			setupConsole(hoodGridScene ? (hoodSolver == HoodTinyStudent ? "Grid64 sphere TinyHOOD benchmark"
+				: (hoodSolver == HoodPostCvpr ? "Grid64 sphere PostCVPR benchmark" : "Grid64 sphere Fine15 benchmark"))
+				: (hoodSolver == HoodToy2L ? "CH10032 Toy2L static T-pose benchmark" : (hoodSolver == HoodTinyStudent ? "CH10032 TinyHOOD static T-pose benchmark"
+				: (hoodSolver == HoodPostCvpr ? "CH10032 PostCVPR static T-pose benchmark" : "CH10032 Fine15 static T-pose benchmark"))));
 #endif
 		}
-		title = hoodGridScene ? (hoodSolver == HoodTiny64x4 ? "Grid64 + sphere + TinyHOOD 64x4 Vulkan cloth" : "Grid64 + sphere + HOOD Fine15 Vulkan cloth")
+		title = hoodGridScene ? (hoodSolver == HoodTinyStudent ? "Grid64 + sphere + TinyHOOD Vulkan cloth"
+			: (hoodSolver == HoodPostCvpr ? "Grid64 + sphere + HOOD PostCVPR Vulkan cloth" : "Grid64 + sphere + HOOD Fine15 Vulkan cloth"))
 			: (hoodSolver == HoodToy2L && realSceneMode ? "CH10032 + Toy GNN 10-16-3 Vulkan cloth"
-			: (hoodStaticBenchmarkMode ? (hoodSolver == HoodTiny64x4 ? "CH10032 + TinyHOOD 64x4 static T-pose benchmark" : "CH10032 + HOOD Fine15 static T-pose benchmark")
-			: (realSceneMode ? (hoodSolver == HoodTiny64x4 ? "CH10032 + TinyHOOD 64x4 Vulkan cloth" : "CH10032 + HOOD Fine15 Vulkan cloth") : "Vulkan GNN cloth PoC")));
+			: (hoodStaticBenchmarkMode ? (hoodSolver == HoodTinyStudent ? "CH10032 + TinyHOOD static T-pose benchmark"
+			: (hoodSolver == HoodPostCvpr ? "CH10032 + HOOD PostCVPR static T-pose benchmark" : "CH10032 + HOOD Fine15 static T-pose benchmark"))
+			: (realSceneMode ? (hoodSolver == HoodTinyStudent ? "CH10032 + TinyHOOD Vulkan cloth"
+			: (hoodSolver == HoodPostCvpr ? "CH10032 + HOOD PostCVPR Vulkan cloth" : "CH10032 + HOOD Fine15 Vulkan cloth")) : "Vulkan GNN cloth PoC")));
 		camera.type = Camera::CameraType::lookat;
 		camera.setPerspective(60.0f, static_cast<float>(width) / static_cast<float>(height), 0.1f, 512.0f);
 		camera.setRotation(glm::vec3(-30.0f, -45.0f, 0.0f));

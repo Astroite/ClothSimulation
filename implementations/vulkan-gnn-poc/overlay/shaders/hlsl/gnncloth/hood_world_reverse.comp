@@ -1,0 +1,75 @@
+// Transpose of the cloth -> nearest-proxy map, rebuilt once per step.
+//
+// The node processor aggregates, for each body-proxy node, the world-edge updates of every
+// cloth vertex whose nearest proxy it is. That used to be a scan over all `clothCount` cloth
+// vertices inside hood_node_update.comp -- and that shader runs once PER PROCESSOR BLOCK, so
+// on CH10032 Fine15 it cost 15 x 4096 x 1377 index comparisons and accounted for 6.21 of the
+// step's 24.39 ms. It also made every extra processor block carry a fixed scan, which is
+// what stops depth from being cheap.
+//
+// Here the map is inverted once and the block loops read only their own short list. There
+// are at most `clothCount` world edges in total, so the whole structure fits in clothCount
+// entries with an average of well under one per proxy.
+//
+// Ordering is chosen so the result is bit-identical, not merely equivalent. Each cloth vertex
+// computes its own global rank in a (proxy, cloth) lexicographic order, so `reverseCloth`
+// comes out grouped by proxy with ascending cloth index inside each group -- the same order
+// the old ascending scan visited, hence the same floating-point accumulation order. No atomic
+// decides a position, so the layout does not depend on execution order.
+//
+// One 128-lane workgroup owns one cloth vertex and the lanes split that vertex's rank scan
+// between them. A thread-per-cloth-vertex version leaves only ceil(1377 / 128) = 11
+// workgroups resident on a 34-SM part, and measured 0.055 ms; spreading the same comparisons
+// over `clothCount` workgroups keeps the SMs fed. The rank is a sum of integer counts, so
+// splitting and re-summing it is exact and independent of lane order.
+
+struct Push { uint clothCount; };
+[[vk::push_constant]] Push push;
+
+[[vk::binding(0)]] StructuredBuffer<uint> worldObstacle;
+[[vk::binding(1)]] RWStructuredBuffer<uint> reverseCloth;
+[[vk::binding(2)]] RWStructuredBuffer<uint> reverseBegin;
+[[vk::binding(3)]] RWStructuredBuffer<uint> reverseCount;
+
+groupshared uint partialRank[128];
+groupshared uint partialEarlier[128];
+
+[numthreads(128, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint cloth = groupId.x;
+    // Both terms are uniform across the workgroup, so the whole group exits together and the
+    // barriers below stay well formed.
+    if (cloth >= push.clothCount) return;
+    const uint proxy = worldObstacle[cloth];
+    if (proxy == 0xffffffffu) return;
+
+    uint rank = 0;
+    uint sameProxyEarlier = 0;
+    [loop] for (uint other = lane; other < push.clothCount; other += 128) {
+        const uint otherProxy = worldObstacle[other];
+        if (otherProxy == 0xffffffffu) continue;
+        if (otherProxy < proxy) ++rank;
+        else if (otherProxy == proxy && other < cloth) { ++rank; ++sameProxyEarlier; }
+    }
+    partialRank[lane] = rank;
+    partialEarlier[lane] = sameProxyEarlier;
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll] for (uint stride = 64; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            partialRank[lane] += partialRank[lane + stride];
+            partialEarlier[lane] += partialEarlier[lane + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (lane == 0) {
+        const uint total = partialRank[0];
+        reverseCloth[total] = cloth;
+        // The lowest cloth index of a group is the one sitting at the group's start.
+        if (partialEarlier[0] == 0) reverseBegin[proxy] = total;
+        uint ignored;
+        InterlockedAdd(reverseCount[proxy], 1u, ignored);
+    }
+}

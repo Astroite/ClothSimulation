@@ -1,0 +1,56 @@
+#include "hood_mlp.hlsli"
+
+struct Push { uint mlpId, kind, count, inputDimension; };
+[[vk::push_constant]] Push push;
+[[vk::binding(0)]] StructuredBuffer<float> weights;
+[[vk::binding(1)]] StructuredBuffer<uint4> mlpTable;
+[[vk::binding(2)]] StructuredBuffer<float> nodeFeatures;
+[[vk::binding(3)]] StructuredBuffer<float> meshFeatures;
+[[vk::binding(4)]] StructuredBuffer<float> coarse0Features;
+[[vk::binding(5)]] StructuredBuffer<float> coarse1Features;
+[[vk::binding(6)]] StructuredBuffer<float> worldDirectFeatures;
+[[vk::binding(7)]] StructuredBuffer<float> worldInverseFeatures;
+[[vk::binding(8)]] RWStructuredBuffer<float> nodeLatent;
+[[vk::binding(9)]] RWStructuredBuffer<float> meshLatent;
+[[vk::binding(10)]] RWStructuredBuffer<float> coarse0Latent;
+[[vk::binding(11)]] RWStructuredBuffer<float> coarse1Latent;
+[[vk::binding(12)]] RWStructuredBuffer<float> worldDirectLatent;
+[[vk::binding(13)]] RWStructuredBuffer<float> worldInverseLatent;
+
+float readInput(uint element, uint input)
+{
+    if (push.kind == 0) return nodeFeatures[element * push.inputDimension + input];
+    if (push.kind == 1) return meshFeatures[element * push.inputDimension + input];
+    if (push.kind == 2) return coarse0Features[element * push.inputDimension + input];
+    if (push.kind == 3) return coarse1Features[element * push.inputDimension + input];
+    if (push.kind == 4) return worldDirectFeatures[element * push.inputDimension + input];
+    return worldInverseFeatures[element * push.inputDimension + input];
+}
+
+void writeOutput(uint element, uint lane, float value)
+{
+    if (push.kind == 0) nodeLatent[element * 128 + lane] = value;
+    else if (push.kind == 1) meshLatent[element * 128 + lane] = value;
+    else if (push.kind == 2) coarse0Latent[element * 128 + lane] = value;
+    else if (push.kind == 3) coarse1Latent[element * 128 + lane] = value;
+    else if (push.kind == 4) worldDirectLatent[element * 128 + lane] = value;
+    else worldInverseLatent[element * 128 + lane] = value;
+}
+
+[numthreads(128, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint element = groupId.x;
+    if (element >= push.count) return;
+    const MlpDesc mlp = loadMlp(mlpTable, push.mlpId);
+    float value = weights[mlp.b0 + lane];
+    [loop] for (uint input = 0; input < mlp.inputDimension; ++input)
+        value += weights[mlp.w0 + input * 128 + lane] * readInput(element, input);
+    hoodScratchA[lane] = max(value, 0.0);
+    GroupMemoryBarrierWithGroupSync();
+    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, 128, true), 0.0);
+    GroupMemoryBarrierWithGroupSync();
+    hoodScratchA[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, 128, false);
+    calculateLayerNorm(lane, 128);
+    writeOutput(element, lane, (hoodScratchA[lane] - hoodMean) * hoodInvStd * weights[mlp.lnWeight + lane] + weights[mlp.lnBias + lane]);
+}

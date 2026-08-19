@@ -1,6 +1,6 @@
 #include "hood_mlp.hlsli"
 
-struct Params { uint clothCount, firstStep, collisionProjection, reserved; };
+struct Params { uint clothCount, firstStep, collisionProjection, decoderMlp; };
 cbuffer ubo : register(b13) { Params params; };
 [[vk::binding(0)]] StructuredBuffer<float> weights;
 [[vk::binding(1)]] StructuredBuffer<uint4> mlpTable;
@@ -21,7 +21,7 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const uint vertex = groupId.x;
     if (vertex >= params.clothCount) return;
-    const MlpDesc mlp = loadMlp(mlpTable, 48);
+    const MlpDesc mlp = loadMlp(mlpTable, params.decoderMlp);
     hoodScratchA[lane] = nodeLatent[vertex * 128 + lane];
     GroupMemoryBarrierWithGroupSync();
     hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w0, mlp.b0, lane, 128, 128, true), 0.0);

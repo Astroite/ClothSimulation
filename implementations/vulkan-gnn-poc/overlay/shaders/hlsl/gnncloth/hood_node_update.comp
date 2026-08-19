@@ -15,6 +15,11 @@ struct Push { uint block, nodeCount, clothCount, meshEdgeCount; };
 [[vk::binding(10)]] StructuredBuffer<uint> meshReceivers;
 [[vk::binding(11)]] StructuredBuffer<uint> worldObstacle;
 [[vk::binding(12)]] StructuredBuffer<uint> activeProxy;
+// Proxy -> cloth reverse CSR from hood_world_reverse.comp, grouped by proxy with ascending
+// cloth index inside each group.
+[[vk::binding(13)]] StructuredBuffer<uint> reverseCloth;
+[[vk::binding(14)]] StructuredBuffer<uint> reverseBegin;
+[[vk::binding(15)]] StructuredBuffer<uint> reverseCount;
 
 groupshared float aggregateMesh[128];
 groupshared float aggregateWorld[128];
@@ -40,8 +45,12 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
             worldSum = worldInverseOut[node * 128 + lane] - worldInverseIn[node * 128 + lane];
     } else {
         const uint proxy = node - push.clothCount;
-        [loop] for (uint cloth = 0; cloth < push.clothCount; ++cloth) if (worldObstacle[cloth] == proxy)
+        const uint begin = reverseBegin[proxy];
+        const uint count = reverseCount[proxy];
+        [loop] for (uint slot = 0; slot < count; ++slot) {
+            const uint cloth = reverseCloth[begin + slot];
             worldSum += worldDirectOut[cloth * 128 + lane] - worldDirectIn[cloth * 128 + lane];
+        }
     }
     aggregateMesh[lane] = meshSum;
     aggregateWorld[lane] = worldSum;

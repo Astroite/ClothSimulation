@@ -1,4 +1,4 @@
-"""Trainable 64-channel, four-block HOOD-compatible student network."""
+"""Trainable HOOD-compatible student network with a configurable width and depth."""
 
 from __future__ import annotations
 
@@ -14,19 +14,22 @@ from .fine15 import Fine15Graph, Fine15Weights, aggregate_sum
 from .formats import TensorAsset, load_tensor_asset, write_tensor_asset
 
 
+# Defaults describe the first student that shipped (64 wide, 4 blocks). Both are constructor
+# arguments now: GPU cost scales as blocks x latent^2, so depth is far cheaper than width and
+# the useful architectures are narrow and deep rather than the other way round.
 LATENT = 64
 PROCESSOR_BLOCKS = 4
 
 
 class TinyMlp(nn.Module):
-    def __init__(self, input_dimension: int, output_dimension: int, *, layer_norm: bool = True):
+    def __init__(self, input_dimension: int, output_dimension: int, *, latent: int = LATENT, layer_norm: bool = True):
         super().__init__()
         self.layers = nn.Sequential(
-            nn.Linear(input_dimension, LATENT),
+            nn.Linear(input_dimension, latent),
             nn.ReLU(),
-            nn.Linear(LATENT, LATENT),
+            nn.Linear(latent, latent),
             nn.ReLU(),
-            nn.Linear(LATENT, output_dimension),
+            nn.Linear(latent, output_dimension),
         )
         self.norm = nn.LayerNorm(output_dimension, eps=1.0e-5) if layer_norm else None
 
@@ -36,23 +39,31 @@ class TinyMlp(nn.Module):
 
 
 class TinyProcessor(nn.Module):
-    def __init__(self):
+    def __init__(self, latent: int = LATENT):
         super().__init__()
-        self.mesh_edge_processor = TinyMlp(LATENT * 3, LATENT)
-        self.world_edge_processor = TinyMlp(LATENT * 3, LATENT)
-        self.node_processor = TinyMlp(LATENT * 3, LATENT)
+        self.mesh_edge_processor = TinyMlp(latent * 3, latent, latent=latent)
+        self.world_edge_processor = TinyMlp(latent * 3, latent, latent=latent)
+        self.node_processor = TinyMlp(latent * 3, latent, latent=latent)
 
 
 class TinyHood(nn.Module):
-    """HOOD input contract with a 64-wide, four-step processor."""
+    """HOOD input contract (20/12/9) with a configurable-width, configurable-depth processor."""
 
-    def __init__(self):
+    def __init__(self, latent: int = LATENT, blocks: int = PROCESSOR_BLOCKS):
         super().__init__()
-        self.node_encoder = TinyMlp(20, LATENT)
-        self.mesh_encoder = TinyMlp(12, LATENT)
-        self.world_encoder = TinyMlp(9, LATENT)
-        self.processor_steps = nn.ModuleList(TinyProcessor() for _ in range(PROCESSOR_BLOCKS))
-        self.decoder = TinyMlp(LATENT, 3, layer_norm=False)
+        # One lane owns one latent channel on the GPU, so the width must have a compiled
+        # SPIR-V variant; see TINY_LATENT_VARIANTS in tools/compile_shaders.py. The depth is
+        # bounded by the fixed Vulkan timestamp schedule.
+        if latent not in (32, 64):
+            raise ValueError(f"latent width {latent} has no compiled Vulkan shader variant")
+        if not 1 <= blocks <= 15:
+            raise ValueError(f"processor block count {blocks} is outside the Vulkan schedule")
+        self.latent = latent
+        self.node_encoder = TinyMlp(20, latent, latent=latent)
+        self.mesh_encoder = TinyMlp(12, latent, latent=latent)
+        self.world_encoder = TinyMlp(9, latent, latent=latent)
+        self.processor_steps = nn.ModuleList(TinyProcessor(latent) for _ in range(blocks))
+        self.decoder = TinyMlp(latent, 3, latent=latent, layer_norm=False)
 
     def forward(self, graph: Fine15Graph) -> torch.Tensor:
         cloth_count = graph.cloth_nodes.shape[0]
@@ -185,9 +196,28 @@ def _load_mlp(asset: TensorAsset, prefix: str, mlp: TinyMlp) -> None:
             mlp.norm.bias.copy_(_read(asset, f"{prefix}.1.bias", tuple(mlp.norm.bias.shape)))
 
 
+def infer_architecture(asset: TensorAsset) -> tuple[int, int]:
+    """Recover (latent, blocks) from a student checkpoint's tensor shapes.
+
+    Mirrors inferTinyArchitecture in overlay/examples/gnncloth/fine15_gpu_layout.h so the
+    Python reference and the Vulkan runtime agree on what a .vhood contains.
+    """
+    encoder = asset.tensors.get("model._learned_model.node_encoder.0.layers.0.weight")
+    if encoder is None:
+        raise ValueError("student checkpoint has no node encoder weight to infer the latent width from")
+    shape = tuple(encoder.shape)
+    if len(shape) != 2 or shape[1] != 20:
+        raise ValueError(f"student node encoder does not take the expected 20 node features: {shape}")
+    blocks = 0
+    while f"model._learned_model.processor_steps.{blocks}.mesh_edge_processor.0.layers.0.weight" in asset.tensors:
+        blocks += 1
+    return shape[0], blocks
+
+
 def load_tinyhood(path: Path | str, device: torch.device | str = "cpu") -> TinyHood:
     asset = load_tensor_asset(path)
-    model = TinyHood()
+    latent, blocks = infer_architecture(asset)
+    model = TinyHood(latent=latent, blocks=blocks)
     _load_mlp(asset, "model._learned_model.node_encoder", model.node_encoder)
     _load_mlp(asset, "model._learned_model.edgeset_encoders.mesh", model.mesh_encoder)
     _load_mlp(asset, "model._learned_model.edgeset_encoders.world", model.world_encoder)

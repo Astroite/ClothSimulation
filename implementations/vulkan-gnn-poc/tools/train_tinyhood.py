@@ -36,6 +36,8 @@ class DistillationSample:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--latent", type=int, default=LATENT, choices=(32, 64))
+    parser.add_argument("--blocks", type=int, default=PROCESSOR_BLOCKS)
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)
     parser.add_argument("--seed", type=int, default=20260818)
     parser.add_argument("--threads", type=int, default=min(os.cpu_count() or 1, 16))
@@ -321,7 +323,7 @@ def main() -> int:
     )
     train_count = min(args.train_steps, len(samples) - 1)
     train_samples, validation_samples = samples[:train_count], samples[train_count:]
-    model = TinyHood()
+    model = TinyHood(latent=args.latent, blocks=args.blocks)
     if args.resume:
         saved = torch.load(args.checkpoint.resolve(), map_location="cpu", weights_only=True)
         model.load_state_dict(saved["model"], strict=True)
@@ -402,7 +404,7 @@ def main() -> int:
     args.checkpoint.resolve().parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "architecture": {"node": 20, "mesh_edge": 12, "world_edge": 9, "latent": LATENT, "blocks": PROCESSOR_BLOCKS},
+            "architecture": {"node": 20, "mesh_edge": 12, "world_edge": 9, "latent": args.latent, "blocks": args.blocks},
             "seed": args.seed,
             "model": model.state_dict(),
         },
@@ -419,7 +421,7 @@ def main() -> int:
 
     _, _, teacher_rollout = load_golden(args.sprint_root.resolve() / "fine15_rollout.vhgold")
     report = {
-        "architecture": {"node": 20, "mesh_edge": 12, "world_edge": 9, "latent": LATENT, "blocks": PROCESSOR_BLOCKS},
+        "architecture": {"node": 20, "mesh_edge": 12, "world_edge": 9, "latent": args.latent, "blocks": args.blocks},
         "parameter_count": model.parameter_count,
         "fine15_packed_float_count": 3_854_164,
         "parameter_ratio_vs_fine15": model.parameter_count / 3_854_164,

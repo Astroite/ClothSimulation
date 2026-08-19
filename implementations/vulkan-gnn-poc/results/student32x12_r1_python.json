@@ -1,0 +1,3564 @@
+{
+  "architecture": {
+    "blocks": 12,
+    "latent": 32,
+    "mesh_edge": 12,
+    "node": 20,
+    "world_edge": 9
+  },
+  "baseline_variance_explained": 0.6136674508053598,
+  "checkpoint_sha256": "9f437b16391d1eaa0ecb3afc2c111c53449bffe817890c8ab1c4b1bdbabc840e",
+  "confirm_repeats": 4,
+  "eval_repeats": 1,
+  "final_rollout": {
+    "area_ratio_mean": 0.9252846240997314,
+    "collapsed_fraction_lt_0_5": 0.007600709795951843,
+    "completed_steps": 180,
+    "edge_ratio_max": 1.6238188743591309,
+    "edge_ratio_mean": 1.0037611722946167,
+    "edge_ratio_p95": 1.2149401903152466,
+    "flipped_fraction": 0.004669260699301958,
+    "invalid_vertices": 0,
+    "pin_max_abs": 0.0,
+    "requested_steps": 180,
+    "stretched_fraction_gt_1_5": 0.0005067139863967896,
+    "teacher_position_max_abs": 0.32720673084259033,
+    "teacher_position_rms_mean": 0.05931773791348355
+  },
+  "final_variance_explained": 0.5979412067403982,
+  "floor_rejects": 0,
+  "history": [
+    {
+      "accepted": true,
+      "best_score": 0.5504290977311838,
+      "candidate_score": 0.4492609154174311,
+      "iteration": 1,
+      "sigma": 0.001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.5504290977311838,
+      "candidate_score": 0.5799191465653065,
+      "iteration": 2,
+      "sigma": 0.001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.4182751256144709,
+      "candidate_score": 0.2767012792122033,
+      "iteration": 3,
+      "sigma": 0.001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.4182751256144709,
+      "candidate_score": 0.3184660981254031,
+      "iteration": 4,
+      "sigma": 0.001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.279910844431207,
+      "candidate_score": 0.2808732079083307,
+      "iteration": 5,
+      "sigma": 0.001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.279910844431207,
+      "candidate_score": 0.5987525589194977,
+      "iteration": 6,
+      "sigma": 0.001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.279910844431207,
+      "candidate_score": 0.2759627138885359,
+      "iteration": 7,
+      "sigma": 0.001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.279910844431207,
+      "candidate_score": 0.45796633945881493,
+      "iteration": 8,
+      "sigma": 0.001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.279910844431207,
+      "candidate_score": 0.4021128758270708,
+      "iteration": 9,
+      "sigma": 0.001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.279910844431207,
+      "candidate_score": 0.4623994609030584,
+      "iteration": 10,
+      "sigma": 0.001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.279910844431207,
+      "candidate_score": 0.5244214339906144,
+      "iteration": 11,
+      "sigma": 0.001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2772760482155718,
+      "candidate_score": 0.2764617916662246,
+      "iteration": 12,
+      "sigma": 0.0013000000000000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2772760482155718,
+      "candidate_score": 0.6279352515418497,
+      "iteration": 13,
+      "sigma": 0.0016900000000000003
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2772760482155718,
+      "candidate_score": 0.3337330872192979,
+      "iteration": 14,
+      "sigma": 0.0021970000000000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2772760482155718,
+      "candidate_score": 0.9120632755104452,
+      "iteration": 15,
+      "sigma": 0.0028561000000000007
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2772760482155718,
+      "candidate_score": 1.054152528765715,
+      "iteration": 16,
+      "sigma": 0.003712930000000001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2772760482155718,
+      "candidate_score": 0.27766466724893285,
+      "iteration": 17,
+      "sigma": 0.0028561000000000007
+    },
+    {
+      "accepted": true,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.26618974137947793,
+      "iteration": 18,
+      "sigma": 0.003712930000000001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.8060913550150064,
+      "iteration": 19,
+      "sigma": 0.0028561000000000007
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.28238300765968033,
+      "iteration": 20,
+      "sigma": 0.0021970000000000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.26617533943305416,
+      "iteration": 21,
+      "sigma": 0.0016900000000000003
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.4496585241881096,
+      "iteration": 22,
+      "sigma": 0.0013000000000000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.294749590030147,
+      "iteration": 23,
+      "sigma": 0.001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.27863728183632097,
+      "iteration": 24,
+      "sigma": 0.0007692307692307692
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.2667337015995549,
+      "iteration": 25,
+      "sigma": 0.000591715976331361
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.2728671817936831,
+      "iteration": 26,
+      "sigma": 0.0004551661356395084
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.27191401936838194,
+      "iteration": 27,
+      "sigma": 0.0003501277966457757
+    },
+    {
+      "accepted": true,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.26879081430638,
+      "iteration": 28,
+      "sigma": 0.0002693290743429044
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.2749823923636642,
+      "iteration": 29,
+      "sigma": 0.00020717621103300338
+    },
+    {
+      "accepted": true,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.2691634425065584,
+      "iteration": 30,
+      "sigma": 0.00015936631617923335
+    },
+    {
+      "accepted": true,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.26869958008432554,
+      "iteration": 31,
+      "sigma": 0.00020717621103300338
+    },
+    {
+      "accepted": true,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.27101171370595695,
+      "iteration": 32,
+      "sigma": 0.0002693290743429044
+    },
+    {
+      "accepted": true,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.26904443045560683,
+      "iteration": 33,
+      "sigma": 0.00035012779664577576
+    },
+    {
+      "accepted": false,
+      "best_score": 0.27036916241955217,
+      "candidate_score": 0.2697914712803645,
+      "iteration": 34,
+      "sigma": 0.0004551661356395085
+    },
+    {
+      "accepted": true,
+      "best_score": 0.26697375277160773,
+      "candidate_score": 0.26965834830059776,
+      "iteration": 35,
+      "sigma": 0.0005917159763313611
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2643212717569744,
+      "candidate_score": 0.2654789870501392,
+      "iteration": 36,
+      "sigma": 0.0007692307692307694
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2643212717569744,
+      "candidate_score": 0.2697037175556438,
+      "iteration": 37,
+      "sigma": 0.0010000000000000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2643212717569744,
+      "candidate_score": 0.5340526904703842,
+      "iteration": 38,
+      "sigma": 0.0013000000000000004
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2643212717569744,
+      "candidate_score": 0.2656438717773805,
+      "iteration": 39,
+      "sigma": 0.0016900000000000005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2643212717569744,
+      "candidate_score": 0.27255550515320565,
+      "iteration": 40,
+      "sigma": 0.0021970000000000006
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2643212717569744,
+      "candidate_score": 0.26419232316418656,
+      "iteration": 41,
+      "sigma": 0.0028561000000000007
+    },
+    {
+      "accepted": true,
+      "best_score": 0.26300289071967,
+      "candidate_score": 0.2612791110657984,
+      "iteration": 42,
+      "sigma": 0.003712930000000001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.26300289071967,
+      "candidate_score": 0.26287730302558177,
+      "iteration": 43,
+      "sigma": 0.004826809000000001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.26300289071967,
+      "candidate_score": 0.2756974905263632,
+      "iteration": 44,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.26300289071967,
+      "candidate_score": 0.26235289885145097,
+      "iteration": 45,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.26300289071967,
+      "candidate_score": 0.26977622989668615,
+      "iteration": 46,
+      "sigma": 0.005
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2626855342881754,
+      "candidate_score": 0.261957763062997,
+      "iteration": 47,
+      "sigma": 0.005
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.25857495493255556,
+      "iteration": 48,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.30901265450649795,
+      "iteration": 49,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.26390685048471724,
+      "iteration": 50,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.26260109476020765,
+      "iteration": 51,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.2626816952394115,
+      "iteration": 52,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.37333916081633,
+      "iteration": 53,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.2612539222722666,
+      "iteration": 54,
+      "sigma": 0.003846153846153846
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.2646708188785447,
+      "iteration": 55,
+      "sigma": 0.0029585798816568047
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.2598867038316611,
+      "iteration": 56,
+      "sigma": 0.002275830678197542
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2591920885050462,
+      "candidate_score": 0.261624732799828,
+      "iteration": 57,
+      "sigma": 0.0017506389832288784
+    },
+    {
+      "accepted": true,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.2566699833971345,
+      "iteration": 58,
+      "sigma": 0.002275830678197542
+    },
+    {
+      "accepted": false,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.259033234598529,
+      "iteration": 59,
+      "sigma": 0.0017506389832288784
+    },
+    {
+      "accepted": false,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.2585356259615057,
+      "iteration": 60,
+      "sigma": 0.0013466453717145218
+    },
+    {
+      "accepted": false,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.2600357526913285,
+      "iteration": 61,
+      "sigma": 0.0010358810551650169
+    },
+    {
+      "accepted": false,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.264768961408279,
+      "iteration": 62,
+      "sigma": 0.0007968315808961668
+    },
+    {
+      "accepted": false,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.2568151425415029,
+      "iteration": 63,
+      "sigma": 0.0006129473699201282
+    },
+    {
+      "accepted": false,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.2601634178569333,
+      "iteration": 64,
+      "sigma": 0.0004714979768616371
+    },
+    {
+      "accepted": false,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.2573925002064142,
+      "iteration": 65,
+      "sigma": 0.0003626907514320285
+    },
+    {
+      "accepted": false,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.25897810220097506,
+      "iteration": 66,
+      "sigma": 0.000278992885716945
+    },
+    {
+      "accepted": false,
+      "best_score": 0.256187931550408,
+      "candidate_score": 0.25788325594427686,
+      "iteration": 67,
+      "sigma": 0.00021460991208995767
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25573115202520663,
+      "candidate_score": 0.2556261410264091,
+      "iteration": 68,
+      "sigma": 0.0001650845477615059
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25573115202520663,
+      "candidate_score": 0.2599715237867915,
+      "iteration": 69,
+      "sigma": 0.00012698811366269685
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25573115202520663,
+      "candidate_score": 0.25512663550260994,
+      "iteration": 70,
+      "sigma": 9.768316435592064e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25573115202520663,
+      "candidate_score": 0.25644715375060007,
+      "iteration": 71,
+      "sigma": 7.514089565840049e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25573115202520663,
+      "candidate_score": 0.25647010075756244,
+      "iteration": 72,
+      "sigma": 5.7800688968000376e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2554133617422647,
+      "iteration": 73,
+      "sigma": 7.514089565840049e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2571529848345866,
+      "iteration": 74,
+      "sigma": 9.768316435592064e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.256478550326493,
+      "iteration": 75,
+      "sigma": 0.00012698811366269685
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2557667917261521,
+      "iteration": 76,
+      "sigma": 0.0001650845477615059
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25652837427333,
+      "iteration": 77,
+      "sigma": 0.0002146099120899577
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.255347996758711,
+      "iteration": 78,
+      "sigma": 0.00027899288571694503
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2565831511229691,
+      "iteration": 79,
+      "sigma": 0.00036269075143202856
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2561761726832224,
+      "iteration": 80,
+      "sigma": 0.00047149797686163713
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25842128046270874,
+      "iteration": 81,
+      "sigma": 0.0006129473699201282
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2549093982101315,
+      "iteration": 82,
+      "sigma": 0.0007968315808961668
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2579856012844377,
+      "iteration": 83,
+      "sigma": 0.0010358810551650169
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25866834026140473,
+      "iteration": 84,
+      "sigma": 0.001346645371714522
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2639271498812984,
+      "iteration": 85,
+      "sigma": 0.0010358810551650169
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2592730443614224,
+      "iteration": 86,
+      "sigma": 0.0007968315808961668
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2604395006317645,
+      "iteration": 87,
+      "sigma": 0.0006129473699201282
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25791503727539544,
+      "iteration": 88,
+      "sigma": 0.0004714979768616371
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25550599086305337,
+      "iteration": 89,
+      "sigma": 0.0006129473699201282
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25727977987585793,
+      "iteration": 90,
+      "sigma": 0.0004714979768616371
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2583220866870963,
+      "iteration": 91,
+      "sigma": 0.0003626907514320285
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2564567658946746,
+      "iteration": 92,
+      "sigma": 0.000278992885716945
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.257145990524441,
+      "iteration": 93,
+      "sigma": 0.00021460991208995767
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25718464301899074,
+      "iteration": 94,
+      "sigma": 0.0001650845477615059
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2572553257923573,
+      "iteration": 95,
+      "sigma": 0.00012698811366269685
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2581095323535717,
+      "iteration": 96,
+      "sigma": 9.768316435592064e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25754986275504854,
+      "iteration": 97,
+      "sigma": 7.514089565840049e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25746022144642966,
+      "iteration": 98,
+      "sigma": 5.7800688968000376e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25591408385791714,
+      "iteration": 99,
+      "sigma": 4.446206843692337e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2557213201084071,
+      "iteration": 100,
+      "sigma": 5.7800688968000376e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25599169057483473,
+      "iteration": 101,
+      "sigma": 7.514089565840049e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25730128162540494,
+      "iteration": 102,
+      "sigma": 9.768316435592064e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2552901563958989,
+      "iteration": 103,
+      "sigma": 0.00012698811366269685
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2570446325207336,
+      "iteration": 104,
+      "sigma": 0.0001650845477615059
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2572150746256941,
+      "iteration": 105,
+      "sigma": 0.0002146099120899577
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25821294514979753,
+      "iteration": 106,
+      "sigma": 0.00027899288571694503
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2580119966374089,
+      "iteration": 107,
+      "sigma": 0.00036269075143202856
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2565031479578465,
+      "iteration": 108,
+      "sigma": 0.00047149797686163713
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2584959824828224,
+      "iteration": 109,
+      "sigma": 0.0006129473699201282
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25732319788593383,
+      "iteration": 110,
+      "sigma": 0.0007968315808961668
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25627397727738654,
+      "iteration": 111,
+      "sigma": 0.0010358810551650169
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25759533001627355,
+      "iteration": 112,
+      "sigma": 0.0007968315808961668
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2582633121197836,
+      "iteration": 113,
+      "sigma": 0.0006129473699201282
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25750860510290496,
+      "iteration": 114,
+      "sigma": 0.0004714979768616371
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25785488659619454,
+      "iteration": 115,
+      "sigma": 0.0003626907514320285
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25544081977051164,
+      "iteration": 116,
+      "sigma": 0.000278992885716945
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25916229573906296,
+      "iteration": 117,
+      "sigma": 0.00021460991208995767
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2578403717527787,
+      "iteration": 118,
+      "sigma": 0.0001650845477615059
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2562072813096974,
+      "iteration": 119,
+      "sigma": 0.00012698811366269685
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25550397255768376,
+      "iteration": 120,
+      "sigma": 9.768316435592064e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25666005519322227,
+      "iteration": 121,
+      "sigma": 7.514089565840049e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.257154313645636,
+      "iteration": 122,
+      "sigma": 5.7800688968000376e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25614575238174037,
+      "iteration": 123,
+      "sigma": 4.446206843692337e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25673719118349253,
+      "iteration": 124,
+      "sigma": 3.4201591105325664e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2566676004324108,
+      "iteration": 125,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.256328068425258,
+      "iteration": 126,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2565412271457414,
+      "iteration": 127,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2553511306177825,
+      "iteration": 128,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2567122256745481,
+      "iteration": 129,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25689031295478343,
+      "iteration": 130,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25608727971816225,
+      "iteration": 131,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2570039642198632,
+      "iteration": 132,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2563422218999929,
+      "iteration": 133,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2569978655419416,
+      "iteration": 134,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2568957134356929,
+      "iteration": 135,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2581274715873102,
+      "iteration": 136,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25845966539863086,
+      "iteration": 137,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2566770238750097,
+      "iteration": 138,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2565662168018106,
+      "iteration": 139,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2568069755617115,
+      "iteration": 140,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25587397048560284,
+      "iteration": 141,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2552040825442721,
+      "iteration": 142,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25652084415261117,
+      "iteration": 143,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.257102245107914,
+      "iteration": 144,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25668737843322254,
+      "iteration": 145,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25572183517118297,
+      "iteration": 146,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2568747955788341,
+      "iteration": 147,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25624524261802434,
+      "iteration": 148,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25632746337602536,
+      "iteration": 149,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25638816201955905,
+      "iteration": 150,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2564115828782734,
+      "iteration": 151,
+      "sigma": 0.00014480427
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25691284710644846,
+      "iteration": 152,
+      "sigma": 0.00018824555100000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2567959493491799,
+      "iteration": 153,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25591997417310874,
+      "iteration": 154,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25731649647156396,
+      "iteration": 155,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25743834940820104,
+      "iteration": 156,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25664617306449344,
+      "iteration": 157,
+      "sigma": 0.0006989425536744302
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25886489996272655,
+      "iteration": 158,
+      "sigma": 0.0009086253197767594
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2570366306333906,
+      "iteration": 159,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2592622436117381,
+      "iteration": 160,
+      "sigma": 0.0015355767904227232
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2606877655256539,
+      "iteration": 161,
+      "sigma": 0.0019962498275495405
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2590749732943045,
+      "iteration": 162,
+      "sigma": 0.0025951247758144026
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2572427380467869,
+      "iteration": 163,
+      "sigma": 0.0033736622085587236
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.26109160689326627,
+      "iteration": 164,
+      "sigma": 0.004385760871126341
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25867940481338236,
+      "iteration": 165,
+      "sigma": 0.005
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.255730919746889,
+      "iteration": 166,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2586065095073233,
+      "iteration": 167,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25761095230571096,
+      "iteration": 168,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.26097848549381725,
+      "iteration": 169,
+      "sigma": 0.003846153846153846
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25465067753878734,
+      "iteration": 170,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.26259899960520366,
+      "iteration": 171,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.25973040019679405,
+      "iteration": 172,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.2621130969996254,
+      "iteration": 173,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25502416186500343,
+      "candidate_score": 0.27113851027873653,
+      "iteration": 174,
+      "sigma": 0.005
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.25255288657628827,
+      "iteration": 175,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.2595759928381691,
+      "iteration": 176,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.25341467866674067,
+      "iteration": 177,
+      "sigma": 0.005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.28047717736206124,
+      "iteration": 178,
+      "sigma": 0.003846153846153846
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.2571248199635495,
+      "iteration": 179,
+      "sigma": 0.0029585798816568047
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.25401599265428054,
+      "iteration": 180,
+      "sigma": 0.002275830678197542
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.25892427241326205,
+      "iteration": 181,
+      "sigma": 0.0017506389832288784
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.26288348014156027,
+      "iteration": 182,
+      "sigma": 0.0013466453717145218
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.2576917310659256,
+      "iteration": 183,
+      "sigma": 0.0010358810551650169
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.2549949221157779,
+      "iteration": 184,
+      "sigma": 0.0007968315808961668
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.25508857513777905,
+      "iteration": 185,
+      "sigma": 0.0006129473699201282
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.2566720715723932,
+      "iteration": 186,
+      "sigma": 0.0004714979768616371
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.2555260240048584,
+      "iteration": 187,
+      "sigma": 0.0003626907514320285
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2530852435687039,
+      "candidate_score": 0.2558894247282296,
+      "iteration": 188,
+      "sigma": 0.000278992885716945
+    },
+    {
+      "accepted": true,
+      "best_score": 0.252748388538344,
+      "candidate_score": 0.2528531049429956,
+      "iteration": 189,
+      "sigma": 0.00021460991208995767
+    },
+    {
+      "accepted": false,
+      "best_score": 0.252748388538344,
+      "candidate_score": 0.2543338622380462,
+      "iteration": 190,
+      "sigma": 0.0001650845477615059
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.25109007582585846,
+      "iteration": 191,
+      "sigma": 0.00012698811366269685
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.2521401396486908,
+      "iteration": 192,
+      "sigma": 9.768316435592064e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.25183347514313126,
+      "iteration": 193,
+      "sigma": 7.514089565840049e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.2520014823880046,
+      "iteration": 194,
+      "sigma": 5.7800688968000376e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.25513440145490074,
+      "iteration": 195,
+      "sigma": 4.446206843692337e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.25325588665695653,
+      "iteration": 196,
+      "sigma": 3.4201591105325664e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.2533889497940739,
+      "iteration": 197,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.25117193622928524,
+      "iteration": 198,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.2513467635493725,
+      "iteration": 199,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.25500476628852387,
+      "iteration": 200,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.25185690409400396,
+      "iteration": 201,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.25242413068707614,
+      "iteration": 202,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.2526965216681775,
+      "iteration": 203,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.2510822902226614,
+      "iteration": 204,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25058252874037457,
+      "candidate_score": 0.2495423353742808,
+      "iteration": 205,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2504245043990927,
+      "iteration": 206,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25141656016930936,
+      "iteration": 207,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25037937788292763,
+      "iteration": 208,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2509537092668729,
+      "iteration": 209,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25300976559519767,
+      "iteration": 210,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.251814931527608,
+      "iteration": 211,
+      "sigma": 0.00014480427
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2523317650995321,
+      "iteration": 212,
+      "sigma": 0.00018824555100000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25270863347169426,
+      "iteration": 213,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25563094590583607,
+      "iteration": 214,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2533128715430697,
+      "iteration": 215,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2541607653825647,
+      "iteration": 216,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25819855477764375,
+      "iteration": 217,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25429298245451515,
+      "iteration": 218,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25304197526226435,
+      "iteration": 219,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25496990563761857,
+      "iteration": 220,
+      "sigma": 0.00018824555100000005
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2513261186838564,
+      "iteration": 221,
+      "sigma": 0.00014480427000000004
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25237597394734623,
+      "iteration": 222,
+      "sigma": 0.00011138790000000002
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2519771398096863,
+      "iteration": 223,
+      "sigma": 8.568300000000001e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25191268936937883,
+      "iteration": 224,
+      "sigma": 0.00011138790000000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25368936703436906,
+      "iteration": 225,
+      "sigma": 0.00014480427000000004
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2558973043018745,
+      "iteration": 226,
+      "sigma": 0.00018824555100000005
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25156144559279914,
+      "iteration": 227,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2527150834703611,
+      "iteration": 228,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25752595452488297,
+      "iteration": 229,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25254488114991946,
+      "iteration": 230,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2571703694243398,
+      "iteration": 231,
+      "sigma": 0.0006989425536744302
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2571790851652622,
+      "iteration": 232,
+      "sigma": 0.0009086253197767594
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25952427116119203,
+      "iteration": 233,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.27429865807191367,
+      "iteration": 234,
+      "sigma": 0.0015355767904227232
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.28982630664379233,
+      "iteration": 235,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2552315828390419,
+      "iteration": 236,
+      "sigma": 0.0009086253197767593
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2571050817819519,
+      "iteration": 237,
+      "sigma": 0.0006989425536744301
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2565699331307163,
+      "iteration": 238,
+      "sigma": 0.0005376481182111
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25777681462673674,
+      "iteration": 239,
+      "sigma": 0.000413575475547
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25434504098569355,
+      "iteration": 240,
+      "sigma": 0.00031813498119
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2565790422260761,
+      "iteration": 241,
+      "sigma": 0.0002447192163
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2543698891479936,
+      "iteration": 242,
+      "sigma": 0.000188245551
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2530502047855407,
+      "iteration": 243,
+      "sigma": 0.00014480426999999998
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25084276915424397,
+      "iteration": 244,
+      "sigma": 0.00011138789999999998
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2525356052443385,
+      "iteration": 245,
+      "sigma": 8.568299999999999e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2538826309972339,
+      "iteration": 246,
+      "sigma": 6.590999999999998e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25272743023621536,
+      "iteration": 247,
+      "sigma": 5.0699999999999986e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25267426774630114,
+      "iteration": 248,
+      "sigma": 3.8999999999999986e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2527773598415984,
+      "iteration": 249,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25211284799087375,
+      "iteration": 250,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.252032339759171,
+      "iteration": 251,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2534399453809278,
+      "iteration": 252,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25272463464385103,
+      "iteration": 253,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25180550060855844,
+      "iteration": 254,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25173586419162647,
+      "iteration": 255,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2518881675166388,
+      "iteration": 256,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25138394970757266,
+      "iteration": 257,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2525619062543329,
+      "iteration": 258,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25264753063933715,
+      "iteration": 259,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.253347280057561,
+      "iteration": 260,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25125558761776323,
+      "iteration": 261,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2522329425853159,
+      "iteration": 262,
+      "sigma": 0.00014480427
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2516577379674547,
+      "iteration": 263,
+      "sigma": 0.00018824555100000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.253166935675674,
+      "iteration": 264,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2542655024211854,
+      "iteration": 265,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2536498158290568,
+      "iteration": 266,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2623307974388202,
+      "iteration": 267,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2534792696384506,
+      "iteration": 268,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2541704528965056,
+      "iteration": 269,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2530626422570397,
+      "iteration": 270,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25556596742632487,
+      "iteration": 271,
+      "sigma": 0.00018824555100000005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25298713547591534,
+      "iteration": 272,
+      "sigma": 0.00014480427000000004
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2529778281071534,
+      "iteration": 273,
+      "sigma": 0.00011138790000000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2530858807058798,
+      "iteration": 274,
+      "sigma": 8.568300000000001e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2534138399745441,
+      "iteration": 275,
+      "sigma": 6.591000000000001e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25343296657212905,
+      "iteration": 276,
+      "sigma": 5.0700000000000006e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2521411457978603,
+      "iteration": 277,
+      "sigma": 3.9000000000000006e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2521140885953274,
+      "iteration": 278,
+      "sigma": 3.0000000000000004e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25223820604280467,
+      "iteration": 279,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25105780619196594,
+      "iteration": 280,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2515143055261837,
+      "iteration": 281,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2524411314581003,
+      "iteration": 282,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2529158674283988,
+      "iteration": 283,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2531049192313933,
+      "iteration": 284,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2535014366161906,
+      "iteration": 285,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25132280967922677,
+      "iteration": 286,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2521759544706179,
+      "iteration": 287,
+      "sigma": 0.00014480427
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2523125829382075,
+      "iteration": 288,
+      "sigma": 0.00018824555100000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25415456753948495,
+      "iteration": 289,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25574292369290363,
+      "iteration": 290,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25734385178527897,
+      "iteration": 291,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2529766603683432,
+      "iteration": 292,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2541326187706242,
+      "iteration": 293,
+      "sigma": 0.0006989425536744302
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2574712223580314,
+      "iteration": 294,
+      "sigma": 0.0009086253197767594
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2581471210707807,
+      "iteration": 295,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2558210668257541,
+      "iteration": 296,
+      "sigma": 0.0015355767904227232
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.268086729121084,
+      "iteration": 297,
+      "sigma": 0.0019962498275495405
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25689524640846584,
+      "iteration": 298,
+      "sigma": 0.0015355767904227235
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.28038492017529076,
+      "iteration": 299,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2554402432197498,
+      "iteration": 300,
+      "sigma": 0.0009086253197767593
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25631419878142575,
+      "iteration": 301,
+      "sigma": 0.0006989425536744301
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25681844156545897,
+      "iteration": 302,
+      "sigma": 0.0005376481182111
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25813856050372125,
+      "iteration": 303,
+      "sigma": 0.000413575475547
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25319888834945026,
+      "iteration": 304,
+      "sigma": 0.00031813498119
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25725796686278446,
+      "iteration": 305,
+      "sigma": 0.0002447192163
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2548897727547834,
+      "iteration": 306,
+      "sigma": 0.000188245551
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25209812918781405,
+      "iteration": 307,
+      "sigma": 0.00014480426999999998
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25412873556423515,
+      "iteration": 308,
+      "sigma": 0.00011138789999999998
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25398727224415374,
+      "iteration": 309,
+      "sigma": 8.568299999999999e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2540897621359262,
+      "iteration": 310,
+      "sigma": 6.590999999999998e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25261975679443116,
+      "iteration": 311,
+      "sigma": 5.0699999999999986e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25514240321806736,
+      "iteration": 312,
+      "sigma": 3.8999999999999986e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2526302744065308,
+      "iteration": 313,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25332300926351714,
+      "iteration": 314,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2536820690923681,
+      "iteration": 315,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2524142724099673,
+      "iteration": 316,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25238141653438406,
+      "iteration": 317,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25227141295456224,
+      "iteration": 318,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2541258032071508,
+      "iteration": 319,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2517943401665737,
+      "iteration": 320,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25330533403385846,
+      "iteration": 321,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2532449409055213,
+      "iteration": 322,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25312848752364514,
+      "iteration": 323,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25302339416100744,
+      "iteration": 324,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2543340952808244,
+      "iteration": 325,
+      "sigma": 0.00014480427
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25746567295864226,
+      "iteration": 326,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25260943851640655,
+      "iteration": 327,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2545840033485244,
+      "iteration": 328,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25536755673690803,
+      "iteration": 329,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2538951027310557,
+      "iteration": 330,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25377669111411605,
+      "iteration": 331,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2529635946162873,
+      "iteration": 332,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2532592807741215,
+      "iteration": 333,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25329872359418204,
+      "iteration": 334,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25491517553002474,
+      "iteration": 335,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2552352347049034,
+      "iteration": 336,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.253233076321582,
+      "iteration": 337,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25314291307392217,
+      "iteration": 338,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2547915586891274,
+      "iteration": 339,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25235343770020535,
+      "iteration": 340,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25246393197836975,
+      "iteration": 341,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25534267764952445,
+      "iteration": 342,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.252337155263457,
+      "iteration": 343,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2552747494385888,
+      "iteration": 344,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25425417792155514,
+      "iteration": 345,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2536388820192466,
+      "iteration": 346,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25126710315234957,
+      "iteration": 347,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2538154175918963,
+      "iteration": 348,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2523806685788764,
+      "iteration": 349,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25262595986326536,
+      "iteration": 350,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25535864723432394,
+      "iteration": 351,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2523958685445703,
+      "iteration": 352,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2525385759046508,
+      "iteration": 353,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2525002219300303,
+      "iteration": 354,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2539296041035818,
+      "iteration": 355,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2504691504769855,
+      "iteration": 356,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2510800535738882,
+      "iteration": 357,
+      "sigma": 0.00014480427
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25374369616102843,
+      "iteration": 358,
+      "sigma": 0.00018824555100000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25394841610040103,
+      "iteration": 359,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2528862717250983,
+      "iteration": 360,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25270214384525186,
+      "iteration": 361,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2529974495009002,
+      "iteration": 362,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2532637122604582,
+      "iteration": 363,
+      "sigma": 0.0006989425536744302
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2553457588009122,
+      "iteration": 364,
+      "sigma": 0.0009086253197767594
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25678155859932306,
+      "iteration": 365,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2608903299654938,
+      "iteration": 366,
+      "sigma": 0.0009086253197767593
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25854166245812343,
+      "iteration": 367,
+      "sigma": 0.0006989425536744301
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2664330246496118,
+      "iteration": 368,
+      "sigma": 0.0005376481182111
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.26187133269074064,
+      "iteration": 369,
+      "sigma": 0.000413575475547
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2545963512888799,
+      "iteration": 370,
+      "sigma": 0.00031813498119
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25305691103243994,
+      "iteration": 371,
+      "sigma": 0.0002447192163
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25456324609824355,
+      "iteration": 372,
+      "sigma": 0.000188245551
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25428694658912715,
+      "iteration": 373,
+      "sigma": 0.00014480426999999998
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25455224617487854,
+      "iteration": 374,
+      "sigma": 0.00011138789999999998
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25548784678491454,
+      "iteration": 375,
+      "sigma": 8.568299999999999e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25316923381243317,
+      "iteration": 376,
+      "sigma": 6.590999999999998e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2531162375584245,
+      "iteration": 377,
+      "sigma": 5.0699999999999986e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2515057517629531,
+      "iteration": 378,
+      "sigma": 3.8999999999999986e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25351338982064686,
+      "iteration": 379,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25273962988932097,
+      "iteration": 380,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2514996599199043,
+      "iteration": 381,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25306953083620304,
+      "iteration": 382,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25191526029569405,
+      "iteration": 383,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25305880064972575,
+      "iteration": 384,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2545685318764299,
+      "iteration": 385,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25432197873273654,
+      "iteration": 386,
+      "sigma": 0.00014480427
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2528855765911026,
+      "iteration": 387,
+      "sigma": 0.00018824555100000002
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2518607666353798,
+      "iteration": 388,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2520729962425927,
+      "iteration": 389,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.253669117965425,
+      "iteration": 390,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.2532060486005826,
+      "iteration": 391,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2502439820130045,
+      "candidate_score": 0.25190849276776944,
+      "iteration": 392,
+      "sigma": 0.0006989425536744302
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.25001095830876796,
+      "iteration": 393,
+      "sigma": 0.0009086253197767594
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2585798444485085,
+      "iteration": 394,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.25339408234382665,
+      "iteration": 395,
+      "sigma": 0.0015355767904227232
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.25174778615538446,
+      "iteration": 396,
+      "sigma": 0.0019962498275495405
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2549781460935871,
+      "iteration": 397,
+      "sigma": 0.0025951247758144026
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2533950664465212,
+      "iteration": 398,
+      "sigma": 0.0033736622085587236
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.252583105981143,
+      "iteration": 399,
+      "sigma": 0.004385760871126341
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.25919623125034075,
+      "iteration": 400,
+      "sigma": 0.0033736622085587236
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.26282950804775784,
+      "iteration": 401,
+      "sigma": 0.0025951247758144026
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2553158871105148,
+      "iteration": 402,
+      "sigma": 0.0019962498275495405
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2810259558415661,
+      "iteration": 403,
+      "sigma": 0.0015355767904227235
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2613624879779915,
+      "iteration": 404,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2518315226615717,
+      "iteration": 405,
+      "sigma": 0.0009086253197767593
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.25520296651973495,
+      "iteration": 406,
+      "sigma": 0.0006989425536744301
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.25295252069934376,
+      "iteration": 407,
+      "sigma": 0.0005376481182111
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2516212769990994,
+      "iteration": 408,
+      "sigma": 0.000413575475547
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2498665758046425,
+      "iteration": 409,
+      "sigma": 0.00031813498119
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2531050805778553,
+      "iteration": 410,
+      "sigma": 0.0002447192163
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2507145554913829,
+      "iteration": 411,
+      "sigma": 0.000188245551
+    },
+    {
+      "accepted": true,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2503846081077225,
+      "iteration": 412,
+      "sigma": 0.0002447192163
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.25173931022485097,
+      "iteration": 413,
+      "sigma": 0.00031813498119000004
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.25321438420150016,
+      "iteration": 414,
+      "sigma": 0.00041357547554700006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.25001652928379675,
+      "candidate_score": 0.2507856982604911,
+      "iteration": 415,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.24961931579746305,
+      "iteration": 416,
+      "sigma": 0.0006989425536744302
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25312229606012504,
+      "iteration": 417,
+      "sigma": 0.0009086253197767594
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25446606663366156,
+      "iteration": 418,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": true,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25000805789604785,
+      "iteration": 419,
+      "sigma": 0.0015355767904227232
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25060875465472543,
+      "iteration": 420,
+      "sigma": 0.0019962498275495405
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.2519943287751327,
+      "iteration": 421,
+      "sigma": 0.0025951247758144026
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.26182143196670543,
+      "iteration": 422,
+      "sigma": 0.0033736622085587236
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.2564943074973093,
+      "iteration": 423,
+      "sigma": 0.004385760871126341
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.2604033196810633,
+      "iteration": 424,
+      "sigma": 0.0033736622085587236
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25074806545033224,
+      "iteration": 425,
+      "sigma": 0.0025951247758144026
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.2535382211570525,
+      "iteration": 426,
+      "sigma": 0.0019962498275495405
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25592188004714744,
+      "iteration": 427,
+      "sigma": 0.0015355767904227235
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.2517845426479147,
+      "iteration": 428,
+      "sigma": 0.0011812129157097871
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25681264706783824,
+      "iteration": 429,
+      "sigma": 0.0009086253197767593
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25569353392865096,
+      "iteration": 430,
+      "sigma": 0.0006989425536744301
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25390277518890797,
+      "iteration": 431,
+      "sigma": 0.0005376481182111
+    },
+    {
+      "accepted": false,
+      "best_score": 0.2493180332265587,
+      "candidate_score": 0.25031136479746136,
+      "iteration": 432,
+      "sigma": 0.000413575475547
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.24917030397078233,
+      "iteration": 433,
+      "sigma": 0.00031813498119
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.24926358703523874,
+      "iteration": 434,
+      "sigma": 0.0002447192163
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.24993643718254233,
+      "iteration": 435,
+      "sigma": 0.000188245551
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.24891448506257602,
+      "iteration": 436,
+      "sigma": 0.00014480426999999998
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.2499574193937911,
+      "iteration": 437,
+      "sigma": 0.00011138789999999998
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.24880305937905278,
+      "iteration": 438,
+      "sigma": 0.00014480426999999998
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.2512196863691012,
+      "iteration": 439,
+      "sigma": 0.000188245551
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.24889865810465484,
+      "iteration": 440,
+      "sigma": 0.0002447192163
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.24922797900314134,
+      "iteration": 441,
+      "sigma": 0.00031813498119000004
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.2496680251529647,
+      "iteration": 442,
+      "sigma": 0.00041357547554700006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.24857589396027227,
+      "iteration": 443,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.2509176931395713,
+      "iteration": 444,
+      "sigma": 0.0006989425536744302
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.25186063113311924,
+      "iteration": 445,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24896976260675324,
+      "candidate_score": 0.25039596271494197,
+      "iteration": 446,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.2485074087460008,
+      "iteration": 447,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.24895189314459765,
+      "iteration": 448,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.2504091766455935,
+      "iteration": 449,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.24962975030971898,
+      "iteration": 450,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.24942767901553048,
+      "iteration": 451,
+      "sigma": 0.00018824555100000005
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.2506222202908248,
+      "iteration": 452,
+      "sigma": 0.00014480427000000004
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.25043008836089736,
+      "iteration": 453,
+      "sigma": 0.00011138790000000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.2513674028890414,
+      "iteration": 454,
+      "sigma": 8.568300000000001e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.2481902603008267,
+      "iteration": 455,
+      "sigma": 6.591000000000001e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.2520991173572838,
+      "iteration": 456,
+      "sigma": 5.0700000000000006e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.25051323576416407,
+      "iteration": 457,
+      "sigma": 3.9000000000000006e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24865999959874902,
+      "candidate_score": 0.2495725803439402,
+      "iteration": 458,
+      "sigma": 3.0000000000000004e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24766815200241074,
+      "iteration": 459,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.2503005426325318,
+      "iteration": 460,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.250099659881865,
+      "iteration": 461,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25142027569106884,
+      "iteration": 462,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.2513279560694678,
+      "iteration": 463,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25029826413633094,
+      "iteration": 464,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.2491527485350768,
+      "iteration": 465,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24907664984154207,
+      "iteration": 466,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25028046699654727,
+      "iteration": 467,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24934511749177346,
+      "iteration": 468,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24954267849938735,
+      "iteration": 469,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.2493165255834659,
+      "iteration": 470,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.248698699220808,
+      "iteration": 471,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24839366688910458,
+      "iteration": 472,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24912279936381512,
+      "iteration": 473,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24899628258103298,
+      "iteration": 474,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25089742638584644,
+      "iteration": 475,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.2493762428354886,
+      "iteration": 476,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24903357165037754,
+      "iteration": 477,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25168591275707713,
+      "iteration": 478,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24920706500609718,
+      "iteration": 479,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.2504655427972062,
+      "iteration": 480,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24916355188211634,
+      "iteration": 481,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25128162472198406,
+      "iteration": 482,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24975058490203486,
+      "iteration": 483,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24989846652477152,
+      "iteration": 484,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.2496013323052062,
+      "iteration": 485,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24956515742879776,
+      "iteration": 486,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.2489815437545379,
+      "iteration": 487,
+      "sigma": 3e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24913719941137566,
+      "iteration": 488,
+      "sigma": 3.9e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24910093082322016,
+      "iteration": 489,
+      "sigma": 5.07e-05
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.24872304076432356,
+      "iteration": 490,
+      "sigma": 6.591e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25087676055005026,
+      "iteration": 491,
+      "sigma": 8.5683e-05
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25124046824769014,
+      "iteration": 492,
+      "sigma": 0.0001113879
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25119488704432213,
+      "iteration": 493,
+      "sigma": 0.00014480427
+    },
+    {
+      "accepted": true,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.2487837761381848,
+      "iteration": 494,
+      "sigma": 0.00018824555100000002
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25076220823555356,
+      "iteration": 495,
+      "sigma": 0.00024471921630000006
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25012452204504776,
+      "iteration": 496,
+      "sigma": 0.0003181349811900001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25237127088734673,
+      "iteration": 497,
+      "sigma": 0.0004135754755470001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25348090148634383,
+      "iteration": 498,
+      "sigma": 0.0005376481182111001
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25327107300981877,
+      "iteration": 499,
+      "sigma": 0.0006989425536744302
+    },
+    {
+      "accepted": false,
+      "best_score": 0.24821220006172856,
+      "candidate_score": 0.25533463903702797,
+      "iteration": 500,
+      "sigma": 0.0005376481182111001
+    }
+  ],
+  "iterations": 500,
+  "method": "(1+1) evolution strategy with 1/5 success rule on the closed-loop score",
+  "rationale": "gradient steps on the 8-16 step trajectory proxy degrade 150-step stability while random perturbations ten times larger improve it, so the proxy is the problem rather than the step size",
+  "refined_from": {
+    "path": ".work\\hood_data\\student32x12.pt",
+    "score": 0.6223068586654132,
+    "variance_explained": 0.6136674508053598
+  },
+  "scene": "ch10032_tpose",
+  "score_weights": {
+    "drift": 2.0,
+    "over_cap": 2.0,
+    "stiff": 0.25
+  },
+  "search_seconds": 6544.751054499997,
+  "selected": {
+    "iteration": 459,
+    "score": 0.24821220006172856
+  },
+  "steps": 180,
+  "var_floor_ratio": 0.9,
+  "variance_floor": 0.5523007057248238,
+  "vhood": {
+    "checkpoint_sha256": "9f437b16391d1eaa0ecb3afc2c111c53449bffe817890c8ab1c4b1bdbabc840e",
+    "file_bytes": 870628,
+    "file_sha256": "07345c49ebd50c27e5236239832cc483d55dfdcf9cd204389a7d43c875ce261e",
+    "magic": "VHOOD001",
+    "payload_sha256": "976bd8668d28ec630f8f55d68521039cd32cd7cfce20d4033fc06735ecd4c9ec",
+    "tensor_count": 331,
+    "version": 1
+  },
+  "vhood_parameters_bit_identical": true
+}

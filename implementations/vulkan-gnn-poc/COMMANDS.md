@@ -102,6 +102,7 @@ uv sync --python 3.11
 .\run.ps1 -Grid 32                                              # 规则网格 + Toy GNN + XPBD
 .\run.ps1 -Scene CH10032 -Motion ch10032_sprint -Solver Fine15  # 真实角色 + 动画
 .\run.ps1 -StaticPose -Solver Fine15                            # CH10032 T-Pose
+.\run.ps1 -StaticPose -Solver PostCvpr                         # 官方层级 HOOD
 .\run.ps1 -StaticPose -Solver TinyHood
 .\run.ps1 -StaticPose -Solver Toy2L
 .\run.ps1 -Scene HoodGrid64                                     # Grid64 + Fine15，无 XPBD
@@ -112,7 +113,7 @@ uv sync --python 3.11
 | --- | --- | --- |
 | `-Scene` | `Grid` / `CH10032` / `HoodGrid64` | `Grid` |
 | `-Grid` | `16` / `32` / `64` | `32` |
-| `-Solver` | `Toy` / `Fine15` / `TinyHood` / `Toy2L` | `Toy` |
+| `-Solver` | `Toy` / `Fine15` / `PostCvpr` / `TinyHood` / `Toy2L` | `Toy` |
 | `-Motion` | 任意已烘焙 motion 名 | `ch10032_sprint` |
 | `-AssetRoot` / `-HoodModel` | 覆盖默认路径 | 由 Scene/Motion 推导 |
 | `-CollisionProjection` | switch | 关 |
@@ -137,17 +138,29 @@ uv sync --python 3.11
 .\verify.ps1                                                # Toy 链路全套
 .\verify_hood.ps1                                           # sprint + Fine15（默认）
 .\verify_hood.ps1 -Motion ch10032_tpose -Solver Fine15      # T-Pose 单步
+.\verify_hood.ps1 -Motion ch10032_tpose -Solver PostCvpr    # PostCVPR 十步
 .\verify_hood.ps1 -Motion ch10032_tpose -Solver TinyHood    # TinyHOOD 十步
 .\ci.ps1                                                    # 不需要 GPU
 ```
 
-`verify_hood.ps1` 参数：`-Motion`、`-Solver {Fine15|TinyHood}`、`-AssetRoot`、`-HoodModel`。
-它只在验证模式回读，严格比对 Python rollout，超出阈值即失败。输出：
+`verify_hood.ps1` 参数：`-Motion`、`-Solver {Fine15|PostCvpr|TinyHood}`、`-AssetRoot`、`-HoodModel`、
+`-Golden`、`-Output`。它只在验证模式回读，严格比对 Python rollout，超出阈值即失败。
+验证一个重训的学生时用 `-HoodModel` / `-Golden` / `-Output` 三个覆盖，避免覆盖已有结果文件：
+
+```powershell
+.\verify_hood.ps1 -Motion ch10032_tpose -Solver TinyHood `
+  -HoodModel .work\hood_data\student32x12_r1.vhood `
+  -Golden .work\real_scene\ch10032_tpose\student32x12_r1_rollout.vhgold `
+  -Output results\student32x12_r1_verify.json
+```
+
+输出：
 
 | 命令 | 结果文件 |
 | --- | --- |
 | `-Motion ch10032_sprint -Solver Fine15` | `results/hood_verify.json` |
 | `-Motion ch10032_tpose -Solver Fine15` | `results/hood_static_verify.json` |
+| `-Solver PostCvpr` | `results/postcvpr_verify.json` |
 | `-Solver TinyHood` | `results/tinyhood_verify.json` |
 
 `verify.ps1` 依次跑 Python 参考、C++ `VGNN/VGLD` 负例、Vulkan 黄金样例、1200 帧稳定性、
@@ -163,6 +176,7 @@ uv sync --python 3.11
 
 ```powershell
 .\benchmark_hood_static.ps1 -Scene CH10032    -Solver Fine15   -Warmup 10 -Samples 60
+.\benchmark_hood_static.ps1 -Scene CH10032    -Solver PostCvpr -Warmup 10 -Samples 60
 .\benchmark_hood_static.ps1 -Scene HoodGrid64 -Solver Fine15   -Warmup 10 -Samples 60
 .\benchmark_hood_static.ps1 -Scene CH10032    -Solver TinyHood -Warmup 10 -Samples 60
 .\benchmark_hood_static.ps1 -Scene HoodGrid64 -Solver TinyHood -Warmup 10 -Samples 60
@@ -173,7 +187,7 @@ uv sync --python 3.11
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `-Scene` | `CH10032` | `CH10032` / `HoodGrid64` |
-| `-Solver` | `Fine15` | `Fine15` / `TinyHood` / `Toy2L`（`Toy2L` 不支持 `HoodGrid64`） |
+| `-Solver` | `Fine15` | `Fine15` / `PostCvpr` / `TinyHood` / `Toy2L`（`Toy2L` 不支持 `HoodGrid64`） |
 | `-Warmup` | `5` | 丢弃的预热样本数 |
 | `-Samples` | `20` | 记录的样本数 |
 | `-LockClockMHz` | `2700` | 锁定 SM 时钟；`0` 表示不锁。脚本在 `finally` 中恢复默认 |
@@ -211,12 +225,13 @@ uv sync --python 3.11
 ```powershell
 .\capture_screenshot.ps1 -Grid 64 -WarmupMilliseconds 15000
 .\capture_screenshot.ps1 -Scene CH10032 -Motion ch10032_tpose -Solver Fine15 -SimulationSteps 10 -WarmupMilliseconds 8000
+.\capture_screenshot.ps1 -Scene CH10032 -Motion ch10032_tpose -Solver PostCvpr -SimulationSteps 30
 .\capture_screenshot.ps1 -Scene CH10032 -Motion ch10032_tpose -Solver Toy2L  -SimulationSteps 10 -WarmupMilliseconds 1500
 .\capture_screenshot.ps1 -Scene HoodGrid64 -SimulationSteps 40 -WarmupMilliseconds 30000
 .\ablation.ps1
 ```
 
-`capture_screenshot.ps1` 参数：`-Scene`、`-Grid`、`-Motion`、`-Solver {Fine15|TinyHood|Toy2L}`、
+`capture_screenshot.ps1` 参数：`-Scene`、`-Grid`、`-Motion`、`-Solver {Fine15|PostCvpr|TinyHood|Toy2L}`、
 `-SimulationSteps 0..10000`（0 = 不按步数暂停）、`-WarmupMilliseconds 0..30000`、`-AssetRoot`。
 给定 `-SimulationSteps` 可生成跨模型可比较的同步帧。
 
@@ -233,7 +248,34 @@ UI 的 `Acceleration` 下拉可交互切换同样四种模式。
 .\.venv\Scripts\python.exe model\train_export.py
 .\.venv\Scripts\python.exe model\verify_export.py
 
-# TinyHOOD 64x4 蒸馏
+# 学生模型蒸馏（32 latent x 12 block，CH10032 为 0.924 ms）
+# 约 2.6 小时 / 145 epoch（RTX 4060 Ti）。默认的 20+10 epoch 只够验证管线，会明显欠训练。
+#
+# 注意：这条命令**不再复现**已交付的 student32x12 权重。第二轮改掉了几何惩罚的参照、
+# 损失的样本加权和模型选择指标（见 results/STUDENT_STABILITY_ROUND2.md），其中选择指标
+# 是结构性改动，没有开关可以还原。交付权重作为文件保留在 .work/hood_data/ 下，
+# 产生它的配方在 git 历史里。
+.\.venv\Scripts\python.exe .\tools\train_student.py --latent 32 --blocks 12 `
+  --phase1-epochs 120 --phase2-epochs 25 --trajectory-steps 100 `
+  --early-step-repeats 8 --rollout-samples 240 --rollout-steps 8
+
+# 直接在闭环指标上搜索（当前推荐权重 student32x12_r1 就是这样产生的）
+# 梯度下降在这一步是有害的，见 results/STUDENT_STABILITY_ROUND2.md
+.\.venv\Scripts\python.exe .\tools\refine_student.py `
+  --resume .work\hood_data\student32x12.pt --tag _r1 `
+  --iterations 500 --steps 180 --eval-repeats 1 --confirm-repeats 4 `
+  --sigma 1.0e-3 --sigma-max 5.0e-3 --scenes "ch10032_tpose:ch10032:180"
+
+# 只测某个架构的 GPU 成本（随机权重；计时与权重值无关）
+.\.venv\Scripts\python.exe .\tools\export_random_student.py --latent 32 --blocks 15
+
+# 比较学生的结构保持时长 + teacher 基准的 score 分解
+.\.venv\Scripts\python.exe .\tools\compare_student_stability.py `
+  --models "shipped_32x12=.work/hood_data/student32x12.vhood" `
+           "refined_32x12=.work/hood_data/student32x12_r1.vhood" `
+  --steps 360 --thresholds 2.0 3.0 5.0
+
+# TinyHOOD 64x4 蒸馏（历史配方，复现已记录的 64x4 权重）
 .\.venv\Scripts\python.exe .\tools\train_tinyhood.py --epochs 20 --train-steps 48 --static-steps 120 --dagger-rounds 0
 
 # Python 参考 rollout（生成黄金数据）
@@ -241,8 +283,44 @@ UI 的 `Acceleration` 下拉可交互切换同样四种模式。
   --asset-root .\.work\real_scene\ch10032_tpose --motion ch10032_tpose --steps 10
 .\.venv\Scripts\python.exe .\tools\run_tinyhood_reference.py `
   --asset-root .\.work\real_scene\ch10032_tpose --motion ch10032_tpose --steps 10 `
-  --golden .\.work\real_scene\ch10032_tpose\tinyhood64x4_rollout.vhgold
+  --model .\.work\hood_data\student32x12_r1.vhood `
+  --golden .\.work\real_scene\ch10032_tpose\student32x12_r1_rollout.vhgold
 ```
+
+`train_student.py` 主要参数：`--latent {32,64}`、`--blocks 1..15`、`--device`、
+`--phase1-epochs`、`--phase2-epochs`、`--rollout-steps`（阶段 2 展开深度）、
+`--rollout-samples`、`--trajectory-steps`、`--noise-sigma`、`--edge-weight`
+（配 `--edge-lower` / `--edge-upper` 的护栏带）、`--degenerate-weight`、
+`--edge-match-weight`、`--dagger-rounds`、`--resume`、`--tag`、
+`--eval-steps`、`--stiff-weight`、`--drift-weight`、`--over-cap`、`--no-normalise-fit`。
+它取代 `train_tinyhood.py`：两阶段训练（单步拟合后接多步 rollout 反传）、teacher 重标注的
+噪声注入、四个场景样本、按闭环结构稳定性而不是 teacher-forced MSE 选模型。
+
+> **想提高长程稳定性的话，这个脚本不是正确的工具。** 实测：从已收敛的权重继续训练，
+> 无论 phase 1（单步）还是 phase 2（8–16 步展开）、无论学习率降到多低，都会让闭环变差；
+> 而比梯度步大 10 倍的随机权重扰动反而改善 37%。用 `refine_student.py`。
+> 详见 [`results/STUDENT_STABILITY_ROUND2.md`](results/STUDENT_STABILITY_ROUND2.md)。
+>
+> `--no-normalise-fit` 用来复现交付 32×12 的加权方式。默认（归一化）会把稳态单步方差解释率
+> 从 `0.357` 提到 `0.93`，但闭环稳定性随之差 7 倍 —— 这两者在本架构上是对立的。
+
+`refine_student.py` 直接在闭环指标上做进化搜索，不用梯度。主要参数：
+`--resume`（必填 `.pt`）、`--mode {hill,es}`、`--iterations`、`--steps`、
+`--scenes`（`key:asset_stem:steps` 三元组，多个则取均值）、`--eval-repeats`、
+`--confirm-repeats`、`--sigma` / `--sigma-min` / `--sigma-max`、
+`--var-floor-ratio`（拒绝「预测得更少」的退化解）、`--stiff-weight` / `--drift-weight` / `--over-cap`、
+`--tag`。它每次刷新 best 就立刻落盘，所以中途 Ctrl-C 不会丢结果。
+
+> 单场景搜索会**过拟合被打分的场景**：只打分 `ch10032_tpose` 时它的 360 步 score
+> 从 `2.743` 降到 `0.259`，同时 `hood_grid64` 从 `3.050` 变差到 `4.066`。
+> 多场景均值是正确做法，但本轮在噪声范围内没有再拿到改进。
+
+> **需要 CUDA 版 torch。** 当前 `.venv` 是 `torch 2.10.0+cu128`，一轮训练约 21 分钟；
+> CPU-only 构建下同样配置约 10 小时，实际不可迭代。
+>
+> **训练不可逐位复现。** `aggregate_sum` / `vertex_normals` 使用 `index_add_`，CUDA 上
+> 对 float 没有确定性实现，因此无法启用 `torch.use_deterministic_algorithms(True)`。
+> seed 已固定，差异在 float 累加顺序量级。
 
 `train_tinyhood.py` 主要参数：`--epochs`、`--learning-rate`、`--seed`、`--threads`、
 `--train-steps`、`--static-steps`、`--resume`，以及 DAgger 相关的 `--dagger-rounds`

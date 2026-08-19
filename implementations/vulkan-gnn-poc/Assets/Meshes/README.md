@@ -35,3 +35,27 @@ Regenerate with Blender 4.5 or another Python runtime containing Pixar USD:
 
 The original USD is not copied into this directory. The JSON sidecar records
 its filename and SHA-256 so the generated asset can be traced and reproduced.
+
+## Standalone simulation LOD1
+
+`CH10032_lower_sim_lod1` is a separate VCLTH v2 asset generated from the baked
+1,377-vertex runtime cloth. It does not replace `CH10032_lower.vcloth2` and is
+not read by the student-distillation scripts or their existing goldens.
+
+- 732 vertices and 1,280 triangles (46.8% / 50.2% reduction).
+- Both source boundary loops are protected; the 72-vertex waist pin loop is
+  unchanged.
+- UV, 12-slot LBS, masses, CSR, stretch and dihedral-bend constraints are
+  regenerated for the new topology.
+- `CH10032_lower_sim_lod1.json` records geometry error, hashes and topology;
+  the OBJ is an inspection copy of the exact VCLTH v2 geometry.
+
+Regenerate without touching the training environment:
+
+```powershell
+.\tools\build_cloth_lod.ps1 -TargetTriangles 1280
+```
+
+This launches Blender's isolated Python runtime. The default output is always
+the `_lod1` asset under `Assets/Meshes`; the script rejects an output path equal
+to the source runtime cloth.

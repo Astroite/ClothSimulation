@@ -1,0 +1,74 @@
+// Nearest body-proxy search for cloth-to-body world edges.
+//
+// This used to be an inner loop inside hood_features.comp / postcvpr_features.comp: one
+// thread per cloth vertex walking all `proxyCount` proxies. On CH10032 that is 1377 x 4096
+// distance tests, and because the feature dispatch indexes cloth vertices, proxies and mesh
+// edges off the same SV_DispatchThreadID, the cloth-vertex work occupied only the first
+// 1377 threads -- 11 workgroups on a 34-SM part, with each lane serially dependent for 4096
+// iterations. The work was never the problem; the occupancy was.
+//
+// Here one 128-lane workgroup owns one cloth vertex, so the same total work spreads over
+// 1377 workgroups and each lane walks only `proxyCount / 128` proxies with adjacent lanes
+// reading adjacent proxies.
+//
+// The result is bit-identical, not merely equivalent. The serial scan accepted a proxy only
+// on a strict `squared < minimumSquared`, so it ended on the smallest squared distance and,
+// among equal distances, the lowest proxy index. Each lane reproduces that over its own
+// stride, and the reduction below applies the same "smaller distance wins, else smaller
+// index wins" rule, which is associative -- so the group agrees with the serial scan.
+
+struct Push { uint clothCount, proxyCount; float collisionRadius; };
+[[vk::push_constant]] Push push;
+
+[[vk::binding(0)]] StructuredBuffer<float4> clothPosition;
+[[vk::binding(1)]] StructuredBuffer<float4> pinTarget;
+[[vk::binding(2)]] StructuredBuffer<uint> pinMask;
+[[vk::binding(3)]] StructuredBuffer<float4> proxyPosition;
+[[vk::binding(4)]] RWStructuredBuffer<uint> worldObstacle;
+[[vk::binding(5)]] RWStructuredBuffer<uint> activeProxy;
+
+groupshared float bestSquared[128];
+groupshared uint bestProxy[128];
+
+[numthreads(128, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint vertex = groupId.x;
+    // Uniform across the workgroup, so the barriers below stay well formed.
+    if (vertex >= push.clothCount) return;
+    const float3 current = (pinMask[vertex] != 0 ? pinTarget[vertex] : clothPosition[vertex]).xyz;
+
+    // A lane that finds nothing keeps the radius as its distance, so any lane that did find
+    // a proxy strictly beats it -- the same cutoff the serial scan started from.
+    float minimumSquared = push.collisionRadius * push.collisionRadius;
+    uint nearest = 0xffffffffu;
+    [loop] for (uint proxy = lane; proxy < push.proxyCount; proxy += 128) {
+        const float3 difference = current - proxyPosition[proxy].xyz;
+        const float squared = dot(difference, difference);
+        if (squared < minimumSquared) { minimumSquared = squared; nearest = proxy; }
+    }
+    bestSquared[lane] = minimumSquared;
+    bestProxy[lane] = nearest;
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll] for (uint stride = 64; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            const bool takeOther = bestSquared[lane + stride] < bestSquared[lane]
+                || (bestSquared[lane + stride] == bestSquared[lane] && bestProxy[lane + stride] < bestProxy[lane]);
+            if (takeOther) {
+                bestSquared[lane] = bestSquared[lane + stride];
+                bestProxy[lane] = bestProxy[lane + stride];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (lane == 0) {
+        const uint chosen = bestProxy[0];
+        worldObstacle[vertex] = chosen;
+        if (chosen != 0xffffffffu) {
+            uint ignored;
+            InterlockedOr(activeProxy[chosen], 1u, ignored);
+        }
+    }
+}

@@ -1,0 +1,9 @@
+.work/
+tests/build/
+build/
+out/
+*.csv
+*.mldrv
+*.readback.bin
+*.readback.txt
+

@@ -27,7 +27,7 @@ void writeOutput(uint element, uint lane, float value)
     else if (push.kind == 2) worldDirectLatent[element * TINY_LATENT + lane] = value;
     else worldInverseLatent[element * TINY_LATENT + lane] = value;
 }
-[numthreads(TINY_LATENT, 1, 1)]
+[numthreads(HOOD_TINY_LATENT, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const uint element = groupId.x;

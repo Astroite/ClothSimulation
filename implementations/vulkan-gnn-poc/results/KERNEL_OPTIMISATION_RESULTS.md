@@ -2,6 +2,12 @@
 
 测试机：NVIDIA GeForce RTX 4060 Ti，驱动 `596.36.0.0`，Vulkan SDK 1.4.309，FP32 HLSL/SPIR-V。
 
+> **后续进展。** 本文记录到阶段 2。之后又清掉了三处与模型无关的 O(N·M) 暴力循环
+> （`features_world` 0.476 → 0.029 ms，并消除 node update 每 block 的全量扫描），
+> 使 CH10032 Fine15 进一步降到 `20.41 ms`、TinyHOOD 64×4 降到 `1.040 ms`。
+> 那部分改动、架构成本扫描和 1 ms 学生模型见
+> [`STUDENT_32X12_RESULTS.md`](STUDENT_32X12_RESULTS.md)。
+
 本文记录三轮改动：把性能测量方法修正到可复现（阶段 0），修掉 MLP 权重的内存布局缺陷
 （阶段 1），以及把 processor layer0 的激励值改为协作载入 groupshared（阶段 2）。
 没有改动任何模型、架构、特征或积分方式，三轮之后数值结果仍然逐位不变。

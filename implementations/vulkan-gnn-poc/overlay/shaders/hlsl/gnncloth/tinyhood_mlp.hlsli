@@ -1,7 +1,15 @@
 #ifndef TINYHOOD_MLP_HLSLI
 #define TINYHOOD_MLP_HLSLI
 
-static const uint TINY_LATENT = 64;
+// Latent width of the student. `numthreads` and groupshared array sizes need a preprocessor
+// constant, not a `static const uint`, so the width is a macro that tools/compile_shaders.py
+// overrides with -D to emit one SPIR-V variant per architecture. One lane owns one latent
+// channel, so this is also the workgroup size.
+#ifndef HOOD_TINY_LATENT
+#define HOOD_TINY_LATENT 64
+#endif
+
+static const uint TINY_LATENT = HOOD_TINY_LATENT;
 
 struct MlpDesc {
     uint w0, b0, w1, b1;
@@ -21,8 +29,8 @@ MlpDesc loadMlp(StructuredBuffer<uint4> table, uint id)
     return value;
 }
 
-groupshared float tinyScratchA[TINY_LATENT];
-groupshared float tinyScratchB[TINY_LATENT];
+groupshared float tinyScratchA[HOOD_TINY_LATENT];
+groupshared float tinyScratchB[HOOD_TINY_LATENT];
 groupshared float tinyMean;
 groupshared float tinyInvStd;
 
@@ -43,10 +51,10 @@ void tinyLayerNorm(uint lane, uint count)
     GroupMemoryBarrierWithGroupSync();
     if (lane == 0) {
         float mean = 0.0;
-        [unroll] for (uint i = 0; i < TINY_LATENT; ++i) if (i < count) mean += tinyScratchA[i];
+        [unroll] for (uint i = 0; i < HOOD_TINY_LATENT; ++i) if (i < count) mean += tinyScratchA[i];
         mean /= float(count);
         float variance = 0.0;
-        [unroll] for (uint j = 0; j < TINY_LATENT; ++j) if (j < count) {
+        [unroll] for (uint j = 0; j < HOOD_TINY_LATENT; ++j) if (j < count) {
             const float difference = tinyScratchA[j] - mean;
             variance += difference * difference;
         }

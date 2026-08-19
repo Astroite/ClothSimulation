@@ -16,6 +16,20 @@ PROFILES = {
     ".frag": "ps_6_0",
 }
 
+# Extra latent widths to build the TinyHOOD student shaders at, beyond the 64 baked into
+# tinyhood_mlp.hlsli. One lane owns one latent channel, so the width is also the workgroup
+# size and has to be a compile-time constant -- hence a separate SPIR-V module per width
+# rather than a runtime parameter. Each entry emits `<prefix><stem>.comp.spv`.
+TINY_LATENT_VARIANTS = {
+    32: "tiny32_",
+}
+TINY_VARIANT_SOURCES = (
+    "tinyhood_encode.comp",
+    "tinyhood_edge_update.comp",
+    "tinyhood_node_update.comp",
+    "tinyhood_integrate.comp",
+)
+
 
 def find_tool(name: str) -> str:
     sdk = os.environ.get("VULKAN_SDK")
@@ -43,8 +57,7 @@ def main() -> int:
     if not shaders:
         raise RuntimeError(f"No HLSL stage files found in {source}")
 
-    for shader in shaders:
-        output = shader.with_suffix(shader.suffix + ".spv")
+    def build(shader: Path, output: Path, defines: tuple[str, ...] = ()) -> None:
         command = [
             dxc,
             "-spirv",
@@ -52,12 +65,23 @@ def main() -> int:
             "-T", PROFILES[shader.suffix],
             "-fspv-target-env=vulkan1.1",
             "-O3",
-            "-Fo", str(output),
-            str(shader),
         ]
+        for define in defines:
+            command += ["-D", define]
+        command += ["-Fo", str(output), str(shader)]
         subprocess.run(command, check=True)
         subprocess.run([validator, "--target-env", "vulkan1.1", str(output)], check=True)
         print(f"compiled {shader.name} -> {output.name}")
+
+    for shader in shaders:
+        build(shader, shader.with_suffix(shader.suffix + ".spv"))
+
+    for latent, prefix in sorted(TINY_LATENT_VARIANTS.items()):
+        for stem in TINY_VARIANT_SOURCES:
+            shader = source / stem
+            if not shader.is_file():
+                raise RuntimeError(f"TinyHOOD variant source is missing: {shader}")
+            build(shader, source / f"{prefix}{stem}.spv", (f"HOOD_TINY_LATENT={latent}",))
     return 0
 
 

@@ -1,0 +1,10 @@
+{"cloth_vertices": 1377, "scene": "ch10032_tpose", "steps": 180, "teacher_edge_p95_final": 1.7983}
+{"cloth_vertices": 4096, "scene": "hood_grid64", "steps": 120, "teacher_edge_p95_final": 1.0666}
+{"cloth_vertices": 1377, "scene": "ch10032_sprint", "steps": 61, "teacher_edge_p95_final": 1.5256}
+{"cloth_vertices": 1377, "scene": "hml_001962", "steps": 136, "teacher_edge_p95_final": 1.0498}
+{"baseline": {"per_scene": {"ch10032_sprint": 1.64745, "ch10032_tpose": 0.24783, "hml_001962": 0.73119, "hood_grid64": 2.21611}, "probe_states": 40, "score": 1.21065, "variance_explained": 0.8467, "variance_floor": 0.762}}
+{"accepted": false, "best": 1.16673, "best_iteration": 0, "candidate": 1.36281, "elapsed_minutes": 5.0, "floor_rejects": 0, "iteration": 10, "sigma": 0.001}
+{"accepted": false, "best": 1.18145, "best_iteration": 0, "candidate": 1.29163, "elapsed_minutes": 9.9, "floor_rejects": 0, "iteration": 20, "sigma": 9.43e-05}
+{"accepted": true, "best": 1.1534, "best_iteration": 27, "candidate": 1.16431, "elapsed_minutes": 16.8, "floor_rejects": 0, "iteration": 27, "sigma": 3e-05}
+{"accepted": true, "best": 1.18459, "best_iteration": 29, "candidate": 1.07374, "elapsed_minutes": 19.8, "floor_rejects": 0, "iteration": 29, "sigma": 3e-05}
+{"accepted": false, "best": 1.18459, "best_iteration": 29, "candidate": 1.19948, "elapsed_minutes": 20.3, "floor_rejects": 0, "iteration": 30, "sigma": 3e-05}

@@ -15,12 +15,17 @@ struct Push { uint block, nodeCount, clothCount, meshEdgeCount; };
 [[vk::binding(10)]] StructuredBuffer<uint> meshReceivers;
 [[vk::binding(11)]] StructuredBuffer<uint> worldObstacle;
 [[vk::binding(12)]] StructuredBuffer<uint> activeProxy;
+// Proxy -> cloth reverse CSR from hood_world_reverse.comp, grouped by proxy with ascending
+// cloth index inside each group.
+[[vk::binding(13)]] StructuredBuffer<uint> reverseCloth;
+[[vk::binding(14)]] StructuredBuffer<uint> reverseBegin;
+[[vk::binding(15)]] StructuredBuffer<uint> reverseCount;
 
-groupshared float aggregateMesh[TINY_LATENT];
-groupshared float aggregateWorld[TINY_LATENT];
-groupshared float oldNodeValue[TINY_LATENT];
+groupshared float aggregateMesh[HOOD_TINY_LATENT];
+groupshared float aggregateWorld[HOOD_TINY_LATENT];
+groupshared float oldNodeValue[HOOD_TINY_LATENT];
 
-[numthreads(TINY_LATENT, 1, 1)]
+[numthreads(HOOD_TINY_LATENT, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const uint node = groupId.x;
@@ -40,8 +45,12 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
             worldSum = worldInverseOut[node * TINY_LATENT + lane] - worldInverseIn[node * TINY_LATENT + lane];
     } else {
         const uint proxy = node - push.clothCount;
-        [loop] for (uint cloth = 0; cloth < push.clothCount; ++cloth) if (worldObstacle[cloth] == proxy)
+        const uint begin = reverseBegin[proxy];
+        const uint count = reverseCount[proxy];
+        [loop] for (uint slot = 0; slot < count; ++slot) {
+            const uint cloth = reverseCloth[begin + slot];
             worldSum += worldDirectOut[cloth * TINY_LATENT + lane] - worldDirectIn[cloth * TINY_LATENT + lane];
+        }
     }
     aggregateMesh[lane] = meshSum;
     aggregateWorld[lane] = worldSum;

@@ -141,10 +141,60 @@ Fine15 保持了完整布片而没有拉成条。详细结构指标和截图见
 [`results/HOOD_GRID64_RESULTS.md`](results/HOOD_GRID64_RESULTS.md)。该文件里的逐阶段时间
 已被 [`results/KERNEL_OPTIMISATION_RESULTS.md`](results/KERNEL_OPTIMISATION_RESULTS.md) 取代：它是在启用
 validation 且未锁定时钟的条件下测的，不可比。干净重测（锁 2700 MHz、无 validation）为
-`71.75 ms/步` 最小值。公开轻量权重与架构筛选见
+`71.75 ms/步` 最小值，清掉三处 O(N·M) 暴力循环后为 `66.98 ms/步`。公开轻量权重与架构筛选见
 [`results/LIGHTWEIGHT_GNN_CANDIDATES.md`](results/LIGHTWEIGHT_GNN_CANDIDATES.md)。
 
-## TinyHOOD 64×4 实验
+## 32×12 学生模型：1 ms 预算内的蒸馏
+
+当前推荐的学生模型是 `32 latent × 12 block`。它保持 HOOD 的 `20/12/9` 特征契约与身体
+world edge，参数量 `200,227`（比 64×4 的 286,275 更少），但消息传递轮数是 3 倍。
+CH10032 compute 为 `0.924 ms` 最小值，进入 1 ms 预算：
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\train_student.py --latent 32 --blocks 12
+.\.venv\Scripts\python.exe .\tools\run_tinyhood_reference.py `
+  --asset-root .\.work\real_scene\ch10032_tpose --motion ch10032_tpose --steps 10 `
+  --model .\.work\hood_data\student32x12.vhood `
+  --golden .\.work\real_scene\ch10032_tpose\student32x12_rollout.vhgold
+.\build.ps1
+.\verify_hood.ps1 -Motion ch10032_tpose -Solver TinyHood `
+  -HoodModel .work\hood_data\student32x12.vhood `
+  -Golden .work\real_scene\ch10032_tpose\student32x12_rollout.vhgold `
+  -Output results\student32x12_verify.json
+.\benchmark_hood_static.ps1 -Scene CH10032 -Solver TinyHood -Warmup 10 -Samples 60 `
+  -HoodModel .work\hood_data\student32x12.vhood -Output results\student32x12_ch10032_timing.csv
+```
+
+学生的 latent 宽度与 block 数**从 VHOOD 的 tensor 形状推断**，所以换架构只需重训并换权重
+文件；latent 是 workgroup 大小，因此每个宽度对应一个独立 SPIR-V 变体。
+
+10 步 Vulkan/Python 最大误差 `2.08e-6`。结构保持时长相对 64×4 有数量级改善：edge P95 超过
+`2.0` 的步数从第 1 步延后到第 **119** 步（64×4 是第 1 步，`5.0` 是第 4 步）。
+完整架构成本扫描、训练方法、欠训练诊断见
+[`results/STUDENT_32X12_RESULTS.md`](results/STUDENT_32X12_RESULTS.md)。
+
+### 第二轮：直接搜索闭环指标（当前推荐权重）
+
+当前推荐的权重是 `.work/hood_data/student32x12_r1.vhood`。架构与成本不变（配对测量差 0.7%），
+但在 CH10032 T-Pose 上 **360 步内 edge P95 从未超过 2.0**，与 teacher 轨迹的最大位置差从
+`2.597 m` 降到 `0.075 m`：
+
+```powershell
+.\run.ps1 -StaticPose -Solver TinyHood -HoodModel .work\hood_data\student32x12_r1.vhood
+```
+
+它不是训练出来的。第二轮的核心结论是**继续做梯度下降会主动破坏长程稳定性**，且与学习率无关：
+比梯度步大 10 倍的随机权重扰动反而让闭环指标改善 37%。起作用的是
+`tools/refine_student.py` —— 直接在闭环指标上做 `(1+1)` 进化搜索。
+
+同一轮还查明上一轮记录的「单步方差解释率 0.980」是探针构成造成的假象（同一权重在稳态区只有
+`0.357`），并且**把稳态单步精度修到 0.928 之后闭环稳定性差了 7 倍** ——
+单步保真度与闭环稳定性在这个架构上是对立的。这直接影响「先稳定再接 XPBD」这个排序。
+已知代价：r1 比 teacher 更硬，且在合成的 grid64 压力场景上比交付版更差。
+完整测量、指标设计与逐场景得失见
+[`results/STUDENT_STABILITY_ROUND2.md`](results/STUDENT_STABILITY_ROUND2.md)。
+
+## TinyHOOD 64×4 实验（已被 32×12 取代）
 
 已经实现并训练一个保持 HOOD `20/12/9` 特征和身体 world edge、但使用 64 latent 与
 4 个 GraphNet block 的学生模型。它包含 286,275 个参数，训练后导出为严格校验的
@@ -163,13 +213,39 @@ validation 且未锁定时钟的条件下测的，不可比。干净重测（锁
 ```
 
 Vulkan 与 Python 的 10 步最大误差为 `9.54e-7`。干净测量（锁 2700 MHz、无 validation）下
-CH10032 compute 时间为 `1.65 ms` 最小值，Grid64 为 `4.14 ms` 最小值，
+CH10032 compute 时间为 `1.65 ms` 最小值，Grid64 为 `4.14 ms` 最小值（清掉三处 O(N·M)
+暴力循环后分别为 `1.040` 与 `3.43 ms`），
 两者都在 60 Hz 预算内；但当前只使用一段 61 帧 Fine15 rollout
 训练，纯 TinyHOOD 闭环会快速拉伸，第 5 步 edge ratio P95 已为 `6.49`，不能作为
 独立模拟器使用。也就是说学生模型的瓶颈已经完全是训练与闭环稳定性，不是速度。
 完整训练、性能、失败消融和后续混合 XPBD 建议见
 [`results/TINYHOOD_64X4_RESULTS.md`](results/TINYHOOD_64X4_RESULTS.md)，
 计时方法与布局优化见 [`results/KERNEL_OPTIMISATION_RESULTS.md`](results/KERNEL_OPTIMISATION_RESULTS.md)。
+
+## 官方 HOOD PostCVPR 层级模型
+
+已支持官方 `postcvpr.pth`：24/12/12/9 维 node/mesh/coarse/world 输入、128 latent、
+15 个按 fine/c0/c1 调度的层级 GraphNet block。checkpoint 不提交，首次使用先提取、校验并导出：
+
+```powershell
+.\tools\fetch_hood_postcvpr.ps1
+.\.venv\Scripts\python.exe .\tools\bake_postcvpr_hierarchy.py `
+  --asset-root .\.work\real_scene\ch10032_tpose --asset-stem ch10032 `
+  --output .\.work\real_scene\ch10032_tpose\ch10032.postcvpr.vhier
+.\.venv\Scripts\python.exe .\tools\run_postcvpr_reference.py `
+  --asset-root .\.work\real_scene\ch10032_tpose --steps 10 `
+  --golden .\.work\real_scene\ch10032_tpose\postcvpr_rollout.vhgold
+.\build.ps1
+.\verify_hood.ps1 -Motion ch10032_tpose -Solver PostCvpr
+.\run.ps1 -StaticPose -Solver PostCvpr
+.\benchmark_hood_static.ps1 -Scene CH10032 -Solver PostCvpr -Warmup 10 -Samples 60
+```
+
+RTX 4060 Ti 上 10 步 Vulkan/PyTorch 最大误差为 `8.87e-7 m`；锁 2700 MHz 的 compute
+最小时间为 `44.30 ms/步`（清掉三处 O(N·M) 暴力循环后为 `39.86 ms/步`，约 25.1 steps/s），
+比同样优化后的 Fine15（`20.41 ms`）慢 1.95 倍，当前不能维持
+30 Hz 模拟。完整架构、数值、时间与 raw output 结构指标见
+[`results/POSTCVPR_RESULTS.md`](results/POSTCVPR_RESULTS.md)。
 
 启动真实角色：
 
@@ -283,7 +359,10 @@ CRC32。`model.json` 额外保存训练参数和 SHA-256。
 - `overlay/`：新增 Vulkan 样例和 HLSL/SPIR-V。
 - `tools/`：shader 与本机构建包装器。
 - `tests/`：不依赖 Vulkan 的 C++ 格式加载器测试。
-- `results/`：RTX 4060 Ti 验证、benchmark 和截图。
+- `results/`：RTX 4060 Ti 验证、benchmark 和截图；当前推荐权重与稳定性结论见
+  [`results/STUDENT_STABILITY_ROUND2.md`](results/STUDENT_STABILITY_ROUND2.md)，
+  架构选择与 1 ms 预算的推导见
+  [`results/STUDENT_32X12_RESULTS.md`](results/STUDENT_32X12_RESULTS.md)。
 - `COMMANDS.md`：全部启动命令、参数与默认值的完整参考。
 - `upstream.lock.json`：上游源码锁定。
 

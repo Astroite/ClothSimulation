@@ -1,16 +1,16 @@
 {
   "scene": "ch10032",
-  "solver": "tinyhood64x4",
+  "solver": "tinyhood32x12",
   "xpbd": false,
   "collision_projection": false,
   "completed_steps": 74,
-  "structure_preserved": false,
+  "structure_preserved": true,
   "invalid_vertices": 0,
-  "active_world_edges": 72,
-  "maximum_displacement_m": 5.72802016,
+  "active_world_edges": 671,
+  "maximum_displacement_m": 0.4404289016,
   "maximum_pinned_error_m": 0,
-  "edge_length_ratio": {"mean": 30.1261176, "p95": 33.44074081, "max": 856.1156167, "collapsed_fraction_lt_0_5": 0.00557385356, "stretched_fraction_gt_1_5": 0.8596402331},
-  "triangle_area_ratio": {"mean": 155.4429884, "median": 10.13842477, "degenerate_fraction_lt_0_1": 0, "flipped_fraction": 0.4311284047},
-  "bounds_min_m": [-0.1646412164, -1.183718085, -0.09335616231],
-  "bounds_max_m": [0.3531733453, 0.06317510456, 5.747502327]
+  "edge_length_ratio": {"mean": 1.07054983, "p95": 1.419628064, "max": 5.450355845, "collapsed_fraction_lt_0_5": 0.00608056752, "stretched_fraction_gt_1_5": 0.03141626552},
+  "triangle_area_ratio": {"mean": 1.017653534, "median": 1.007727413, "degenerate_fraction_lt_0_1": 0.0003891050584, "flipped_fraction": 0.007392996109},
+  "bounds_min_m": [-0.1690374017, -1.238515735, -0.1148385853],
+  "bounds_max_m": [0.2813402712, -0.02113723755, 0.2675117552]
 }

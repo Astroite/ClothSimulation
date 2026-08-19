@@ -1,0 +1,24 @@
+StructuredBuffer<float4> localPositions : register(t0);
+RWStructuredBuffer<float4> worldPositions : register(u1);
+
+struct TransformParams {
+    float4 rootPositionAndCount;
+    float4 rootUp;
+    float4 rootRight;
+};
+cbuffer transformParams : register(b2) { TransformParams params; };
+
+[numthreads(128, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint vertex = dispatchThreadId.x;
+    const uint vertexCount = asuint(params.rootPositionAndCount.w);
+    if (vertex >= vertexCount) return;
+    const float3 localCm = localPositions[vertex].xyz;
+    const float3 up = normalize(params.rootUp.xyz);
+    const float3 right = normalize(params.rootRight.xyz);
+    const float3 forward = normalize(cross(right, up));
+    const float3 componentCm = params.rootPositionAndCount.xyz
+        + forward * localCm.x + right * localCm.y + up * localCm.z;
+    worldPositions[vertex] = float4(float3(componentCm.x, componentCm.z, -componentCm.y) * 0.01, 1.0);
+}

@@ -48,9 +48,9 @@ void writeEdge(uint element, uint lane, float value)
 // TINY_LATENT x TINY_LATENT*3 loads to read TINY_LATENT*3 distinct floats. Stage the vector
 // cooperatively instead -- three coalesced loads per lane -- and take the inner loop from
 // groupshared, the way tinyhood_node_update.comp already does with its aggregates.
-groupshared float tinyEdgeInput[TINY_LATENT * 3];
+groupshared float tinyEdgeInput[HOOD_TINY_LATENT * 3];
 
-[numthreads(TINY_LATENT, 1, 1)]
+[numthreads(HOOD_TINY_LATENT, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const uint element = groupId.x;

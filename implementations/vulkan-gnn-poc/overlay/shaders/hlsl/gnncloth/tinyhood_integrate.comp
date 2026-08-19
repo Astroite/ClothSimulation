@@ -1,6 +1,6 @@
 #include "tinyhood_mlp.hlsli"
 
-struct Params { uint clothCount, firstStep, collisionProjection, reserved; };
+struct Params { uint clothCount, firstStep, collisionProjection, decoderMlp; };
 cbuffer ubo : register(b13) { Params params; };
 [[vk::binding(0)]] StructuredBuffer<float> weights;
 [[vk::binding(1)]] StructuredBuffer<uint4> mlpTable;
@@ -16,12 +16,12 @@ cbuffer ubo : register(b13) { Params params; };
 [[vk::binding(11)]] StructuredBuffer<float4> proxyTarget;
 [[vk::binding(12)]] StructuredBuffer<float4> proxyNormal;
 
-[numthreads(TINY_LATENT, 1, 1)]
+[numthreads(HOOD_TINY_LATENT, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const uint vertex = groupId.x;
     if (vertex >= params.clothCount) return;
-    const MlpDesc mlp = loadMlp(mlpTable, 15);
+    const MlpDesc mlp = loadMlp(mlpTable, params.decoderMlp);
     tinyScratchA[lane] = nodeLatent[vertex * TINY_LATENT + lane];
     GroupMemoryBarrierWithGroupSync();
     tinyScratchB[lane] = max(tinyHiddenLinear(weights, mlp.w0, mlp.b0, lane, TINY_LATENT, TINY_LATENT, true), 0.0);

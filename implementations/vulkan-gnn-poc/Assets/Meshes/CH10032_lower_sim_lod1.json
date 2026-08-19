@@ -1,0 +1,76 @@
+{
+  "asset": "CH10032_lower_sim_lod1",
+  "binding": {
+    "max_weight_sum_error": 2.220446049250313e-16,
+    "referenced_bones": 19,
+    "slots": 12
+  },
+  "constraints": {
+    "bend": 1828,
+    "bend_colors": 20,
+    "pins": 72,
+    "stretch": 2012,
+    "stretch_colors": 11
+  },
+  "decimator": {
+    "implementation": "Blender 4.5.9 LTS Decimate/Collapse",
+    "protected_vertices": 184,
+    "rule": "all source boundary vertices and waist pins are excluded from collapse",
+    "target_triangles": 1280
+  },
+  "geometry": {
+    "area_ratio": 0.9998689510109527,
+    "lod_to_source_projection_m": {
+      "max": 0.0009301119134761393,
+      "mean": 7.624597517493047e-05,
+      "p95": 0.00037573918234556913
+    },
+    "maximum_pin_position_drift_m": 0.0,
+    "minimum_triangle_area_m2": 5.992702953979895e-06,
+    "orientation_mismatches": 0,
+    "output_area_m2": 0.8409974277767357,
+    "source_area_m2": 0.8411076540844834,
+    "source_to_lod_distance_m": {
+      "max": 0.001223344705067575,
+      "mean": 0.00015122982196192388,
+      "p95": 0.0005140810390003026
+    }
+  },
+  "mass": {
+    "density_kg_m2": 0.2002200037240982,
+    "source_total_kg": 0.16840657763316247,
+    "total_kg": 0.1683845081214151
+  },
+  "output": {
+    "bytes": 181520,
+    "path": "E:\\Projects\\cloth-simulation\\implementations\\vulkan-gnn-poc\\Assets\\Meshes\\CH10032_lower_sim_lod1.vcloth2",
+    "sha256": "137304bad81ae53f933f0b15dc01108d8b42251793b1d07a7793e74abba3d132",
+    "triangle_reduction": 0.5019455252918288,
+    "triangles": 1280,
+    "vertex_reduction": 0.46840958605664484,
+    "vertices": 732
+  },
+  "purpose": "standalone simulation LOD; does not replace distillation topology",
+  "schema_version": 1,
+  "source": {
+    "path": "E:\\Projects\\cloth-simulation\\implementations\\vulkan-gnn-poc\\.work\\real_scene\\ch10032_tpose\\ch10032_lower.vcloth2",
+    "sha256": "727dc0807dea8f8596607caad3d5ac3c65507c7f3fe7a374786f10af48900c88",
+    "triangles": 2570,
+    "vertices": 1377
+  },
+  "topology": {
+    "boundary_edges": 184,
+    "boundary_loops": [
+      112,
+      72
+    ],
+    "degree": {
+      "max": 11,
+      "mean": 5.497267759562842,
+      "min": 3
+    },
+    "directed_csr_edges": 4024,
+    "non_manifold_edges": 0,
+    "undirected_edges": 2012
+  }
+}
