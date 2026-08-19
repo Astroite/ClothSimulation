@@ -7,7 +7,13 @@ param(
     # A retrained student has its own golden rollout and its own result file. Override both so
     # verifying it never overwrites the numbers backing an existing result document.
     [string]$Golden = '',
-    [string]$Output = ''
+    [string]$Output = '',
+    # Verify the Jacobi XPBD path against a golden produced with
+    # `run_tinyhood_reference.py --xpbd-asset`. The iteration count and the .vxpbd file have to be
+    # the ones that golden was generated with, or the comparison is meaningless.
+    [switch]$Xpbd,
+    [int]$XpbdIterations = 128,
+    [string]$XpbdAsset = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,6 +38,11 @@ $ValidationOutput = $OutputSupplied ? (($Output -replace '\.json$', '') + '_vali
     : (Join-Path $PocRoot ($Solver -eq 'PostCvpr' ? 'results/postcvpr_verify_validation_output.txt' : ($Solver -eq 'TinyHood' ? 'results/tinyhood_verify_validation_output.txt' : ($StaticPose ? 'results/hood_static_verify_validation_output.txt' : 'results/hood_validation_output.txt'))))
 $RequiredAssets = @($Executable, $HoodModel, $Golden)
 if ($Solver -eq 'PostCvpr') { $RequiredAssets += Join-Path $AssetRoot 'ch10032.postcvpr.vhier' }
+if ($Xpbd) {
+    if (-not $XpbdAsset) { $XpbdAsset = Join-Path $AssetRoot "$Motion.vxpbd" }
+    $XpbdAsset = [System.IO.Path]::GetFullPath($XpbdAsset)
+    $RequiredAssets += $XpbdAsset
+}
 foreach ($Required in $RequiredAssets) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) { throw "$Solver verification asset is missing: $Required" }
 }
@@ -44,6 +55,10 @@ $Arguments = @(
     '--hood-verify', '--hood-golden', ('"{0}"' -f $Golden), '--hood-verify-output', ('"{0}"' -f $Output),
     '-v', '-vl', '-s', 'hlsl'
 )
+if ($Xpbd) {
+    $Arguments += @('--hood-xpbd', '--hood-xpbd-iterations', $XpbdIterations,
+        '--hood-xpbd-asset', ('"{0}"' -f $XpbdAsset))
+}
 $PreviousLayerEnables = $env:VK_LAYER_ENABLES
 try {
     $env:VK_LAYER_ENABLES = 'VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT'

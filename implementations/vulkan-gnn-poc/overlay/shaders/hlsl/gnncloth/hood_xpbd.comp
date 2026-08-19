@@ -1,0 +1,133 @@
+// Unstructured Jacobi XPBD for the distilled (HOOD/TinyHOOD) cloth path.
+//
+// This is the port of real_scene/xpbd.py::_apply_fused, which gate G0 measured and which
+// tests/test_xpbd.py::FusedPortTests pins down against the two-pass Jacobi reference. Read that
+// function alongside this file; the arithmetic is deliberately line-for-line the same.
+//
+// Why one thread per VERTEX rather than one per constraint. The natural Jacobi sweep needs two
+// dispatches per iteration -- one over constraints to produce every delta lambda, then one over
+// vertices to gather them -- because a vertex cannot see a neighbouring constraint's result until
+// the constraint pass has finished writing. XPBD on this hardware is dispatch-bound, not
+// work-bound: results/RESULTS.md measures 0.0448 ms of the grid path's 0.0455 ms per iteration as
+// dispatch plus barrier overhead, about 2.8 us apiece. Two dispatches x 128 iterations is 0.72 ms,
+// roughly eleven GNN message-passing blocks at 0.0646 ms each, which is more than the entire
+// hybrid is worth. So each vertex here recomputes the multiplier update of every constraint it
+// touches. The arithmetic is duplicated exactly twice and totals about 450k flops per iteration on
+// CH10032, far below what a single dispatch costs.
+//
+// The price is that lambda is stored per (vertex, slot) instead of per constraint, so both
+// endpoints of a constraint keep their own copy. Those copies must not drift, and three things
+// guarantee they do not:
+//
+//   * both threads form pairs[c].x minus pairs[c].y in that stored order, never "mine minus
+//     theirs", so the difference and its length are the same floats on both;
+//   * weightSum is read from the baked asset rather than recomputed, because w_a + w_b on one
+//     thread against w_b + w_a on the other is not guaranteed to give the same float (see
+//     real_scene/xpbd.py::SolverTables and tools/bake_xpbd_constraints.py);
+//   * the endpoint-dependent sign is applied to the correction after the multiplier update, never
+//     inside it.
+//
+// Jacobi also means every vertex must read the SAME positions, so the runtime ping-pongs between
+// clothPosition and a scratch buffer rather than updating in place. Reading and writing one buffer
+// would silently turn this into a nondeterministic partial Gauss-Seidel.
+//
+// Constraint targets are baked calibrated lengths, NOT rest lengths. Skinning the authored rest
+// mesh into frame 0 already puts 7.7-8.2% of CH10032's edges past 1.5x rest (p95 1.890 on tpose,
+// 2.025 on sprint), so aiming at cloth_rest would contract those edges by up to 12x. See
+// plans/gnn/gnn-xpbd-v2.md section 1.4.
+
+struct Push {
+    uint clothCount;
+    uint constraintCount;
+    uint slotWidth;
+    uint flags;              // bit 0 one-sided, bit 1 collision
+    float timestep;
+    float relaxation;
+    float contactOffset;
+    float stretchCompliance;
+    float bendCompliance;
+};
+[[vk::push_constant]] Push push;
+
+static const uint XPBD_ONE_SIDED = 1u;
+static const uint XPBD_COLLISION = 2u;
+static const uint XPBD_KIND_BEND = 1u;
+
+[[vk::binding(0)]] StructuredBuffer<uint2> xpbdPairs;
+[[vk::binding(1)]] StructuredBuffer<float> xpbdTargetLength;
+[[vk::binding(2)]] StructuredBuffer<float> xpbdWeightSum;
+[[vk::binding(3)]] StructuredBuffer<uint> xpbdKind;
+[[vk::binding(4)]] StructuredBuffer<uint> xpbdSlots;
+[[vk::binding(5)]] StructuredBuffer<float> xpbdSigns;
+[[vk::binding(6)]] StructuredBuffer<float> xpbdIncident;
+[[vk::binding(7)]] StructuredBuffer<float> xpbdInverseMass;
+[[vk::binding(8)]] RWStructuredBuffer<float> xpbdLambda;
+[[vk::binding(9)]] StructuredBuffer<float4> positionIn;
+[[vk::binding(10)]] RWStructuredBuffer<float4> positionOut;
+[[vk::binding(11)]] StructuredBuffer<uint> worldObstacle;
+[[vk::binding(12)]] StructuredBuffer<float4> proxyTarget;
+[[vk::binding(13)]] StructuredBuffer<float4> proxyNormal;
+
+[numthreads(128, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    const uint vertex = id.x;
+    if (vertex >= push.clothCount) return;
+
+    const float3 position = positionIn[vertex].xyz;
+    const float inverseMass = xpbdInverseMass[vertex];
+    if (inverseMass <= 0.0) {
+        // Pinned. Zero inverse mass already makes the correction zero, but returning early also
+        // skips the lambda writes, matching `torch.where(pinned, 0, correction)` in the reference
+        // and keeping the pin an exact infinite-mass anchor.
+        positionOut[vertex] = float4(position, 1.0);
+        return;
+    }
+
+    const bool oneSided = (push.flags & XPBD_ONE_SIDED) != 0u;
+    const float inverseSquaredStep = 1.0 / max(push.timestep * push.timestep, 1.0e-12);
+
+    float3 correction = float3(0.0, 0.0, 0.0);
+    for (uint slot = 0; slot < push.slotWidth; ++slot) {
+        const uint entry = vertex * push.slotWidth + slot;
+        const uint constraint = xpbdSlots[entry];
+        // Unused lanes hold the sentinel index `constraintCount`.
+        if (constraint >= push.constraintCount) continue;
+
+        const uint2 pair = xpbdPairs[constraint];
+        const float3 delta = positionIn[pair.x].xyz - positionIn[pair.y].xyz;
+        const float distance = length(delta);
+        if (!(distance > 1.0e-9)) continue;
+
+        const float compliance = xpbdKind[constraint] == XPBD_KIND_BEND
+            ? push.bendCompliance : push.stretchCompliance;
+        const float alpha = compliance * inverseSquaredStep;
+        const float weightSum = xpbdWeightSum[constraint];
+        if (!(weightSum > 0.0)) continue;   // both endpoints pinned
+
+        float residual = distance - xpbdTargetLength[constraint];
+        if (oneSided) residual = max(residual, 0.0);
+
+        const float lambda = xpbdLambda[entry];
+        const float step = (-residual - alpha * lambda) / max(weightSum + alpha, 1.0e-20);
+        xpbdLambda[entry] = lambda + step;
+        correction += xpbdSigns[entry] * (delta / distance) * step;
+    }
+
+    float3 updated = position
+        + push.relaxation * inverseMass * correction / max(xpbdIncident[vertex], 1.0);
+
+    // One-sided plane projection against the nearest body proxy, the same contact the network saw.
+    // Each cloth vertex has at most one, so this needs no accumulation and folds into this pass
+    // instead of costing a second dispatch per iteration.
+    if ((push.flags & XPBD_COLLISION) != 0u) {
+        const uint obstacle = worldObstacle[vertex];
+        if (obstacle != 0xffffffffu) {
+            const float3 normal = normalize(proxyNormal[obstacle].xyz);
+            const float signedDistance = dot(updated - proxyTarget[obstacle].xyz, normal) - push.contactOffset;
+            if (signedDistance < 0.0) updated -= signedDistance * normal;
+        }
+    }
+
+    positionOut[vertex] = float4(all(isfinite(updated)) ? updated : position, 1.0);
+}

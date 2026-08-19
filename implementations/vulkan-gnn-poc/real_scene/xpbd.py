@@ -290,7 +290,7 @@ class SolverConfig:
 
     iterations: int = 4
     mode: str = "standard"                 # "standard" | "warmstart" | "nowarm"
-    sweep: str = "coloured"                # "coloured" (Gauss-Seidel) | "jacobi"
+    sweep: str = "coloured"                # "coloured" (Gauss-Seidel) | "jacobi" | "fused"
     stretch_compliance: float = 0.0        # metres^2 / newton; 0 = rigid
     bend_compliance: float = 1.0e-5
     one_sided: bool = False                # resist stretch only, never compression
@@ -305,6 +305,75 @@ class SolverConfig:
             torch.full_like(kind, 0.0, dtype=torch.float32) + self.bend_compliance,
             torch.full_like(kind, 0.0, dtype=torch.float32) + self.stretch_compliance,
         )
+
+
+def load_vxpbd(path, *, device=None) -> ConstraintSet:
+    """Rebuild a `ConstraintSet` from a baked `.vxpbd`, the way hood_xpbd.comp reads it.
+
+    Used by `tools/run_tinyhood_reference.py` so the Python golden and the Vulkan run drive the
+    same constraint data down to the last bit. Recomputing the calibration on both sides instead
+    would inject a difference of its own: the teacher rollout the targets are measured on is not
+    reproducible (`index_add_` has no deterministic CUDA float kernel), and the measured spread in
+    the stretch target p95 across rollouts is around 1e-5 m. A comparison meant to detect a wrong
+    kernel must not carry that.
+
+    Two fields the asset does not store, because the kernel does not use them:
+
+    * `suspect` -- a bake-time diagnostic only, so it comes back all false;
+    * `colour` -- the runtime sweeps Jacobi, so no colouring is baked. It is filled with one colour
+      per constraint, which makes `sweep="coloured"` degrade to fully sequential Gauss-Seidel:
+      slow, but correct. A single shared colour would have been silently wrong.
+    """
+    from .formats import load_sectioned
+
+    asset = load_sectioned(path, expected_magic=b"VXPBD001", expected_version=1)
+
+    def read(name: str, dtype: torch.dtype) -> torch.Tensor:
+        view = asset.require(name)
+        return torch.frombuffer(bytearray(view.data), dtype=dtype).to(device=device)
+
+    count, vertices, width, _stretch = read("info", torch.int32).tolist()
+    return ConstraintSet(
+        pairs=read("pairs", torch.int32).reshape(count, 2).to(torch.long),
+        target_length=read("target_len", torch.float32),
+        kind=read("kind", torch.int32).to(torch.long),
+        suspect=torch.zeros(count, dtype=torch.bool, device=device),
+        slots=read("slots", torch.int32).reshape(vertices, width).to(torch.long),
+        signs=read("signs", torch.float32).reshape(vertices, width),
+        incident=read("incident", torch.float32).reshape(vertices, 1),
+        inverse_mass=read("inverse_mass", torch.float32).reshape(vertices, 1),
+        colour=torch.arange(count, dtype=torch.long, device=device),
+    )
+
+
+@dataclass(frozen=True)
+class SolverTables:
+    """Per-constraint scalars that depend on the configuration but not on the state.
+
+    These are exactly what the Vulkan `.vxpbd` asset has to carry, which is why they are a named
+    type rather than four locals inside `project`. `weight_sum` in particular *must* be baked and
+    read, not recomputed in the kernel: the fused sweep has both endpoints of a constraint evaluate
+    the same multiplier update, and `w_a + w_b` on one thread against `w_b + w_a` on the other is
+    not guaranteed to give the same float. A stored value removes the question.
+    """
+
+    weight_sum: torch.Tensor   # [C] float -- w_a + w_b, summed once here
+    alpha: torch.Tensor        # [C] float -- compliance / dt^2
+    denominator: torch.Tensor  # [C] float -- weight_sum + alpha, clamped away from zero
+    alive: torch.Tensor        # [C] bool  -- false when both endpoints are pinned
+
+
+def bake_tables(constraints: ConstraintSet, config: SolverConfig, timestep: float) -> SolverTables:
+    """Everything a sweep needs beyond the state, computed once."""
+    first, second = constraints.pairs[:, 0], constraints.pairs[:, 1]
+    weight_sum = constraints.inverse_mass[first].reshape(-1) + constraints.inverse_mass[second].reshape(-1)
+    alpha = config.compliance_per_constraint(constraints.kind) / max(timestep * timestep, 1.0e-12)
+    return SolverTables(
+        weight_sum=weight_sum,
+        alpha=alpha,
+        denominator=(weight_sum + alpha).clamp_min(1.0e-20),
+        alive=weight_sum > 0.0,
+    )
 
 
 @dataclass(frozen=True)
@@ -360,14 +429,21 @@ def project(
     over 137 steps. `integrate()` already returns pins on target, so in the normal pipeline this is
     a no-op; it is here so the function cannot be misused.
 
-    Two sweep schedules:
+    Three sweep schedules:
 
-    * `coloured` -- Gauss-Seidel over vertex-disjoint colour groups, the schedule a GPU kernel
-      would use. Within a colour both endpoints are written in place; the indices are distinct by
-      construction so the writes are deterministic.
+    * `coloured` -- Gauss-Seidel over vertex-disjoint colour groups. Within a colour both endpoints
+      are written in place; the indices are distinct by construction so the writes are
+      deterministic. Converges fastest per iteration, but needs one GPU dispatch per colour and
+      the measured colour count on CH10032 is 18, so it loses badly at equal cost.
     * `jacobi` -- every constraint reads the same `x` and per-vertex corrections are averaged over
       the constraints touching that vertex. Needs no colouring, but converges much more slowly:
-      128 sweeps cut the CH10032 stretch residual only 3.2x, versus a few sweeps coloured.
+      128 sweeps cut the CH10032 stretch residual only 3.2x, versus a few sweeps coloured. This is
+      the schedule gate G0 measured, and at equal cost it wins.
+    * `fused` -- the same mathematics as `jacobi`, restructured into the shape the Vulkan kernel
+      needs: one thread per vertex, each recomputing the multiplier update of every constraint it
+      touches instead of reading a per-constraint result another pass produced. See
+      `_apply_fused`. It exists so the port target can be validated in Python before any HLSL is
+      written, and `--sweep fused` must reproduce `--sweep jacobi`'s scores.
     """
     if config.iterations <= 0:
         return position
@@ -376,15 +452,8 @@ def project(
         return position
 
     pinned = pin_mask.reshape(-1, 1)
-    first, second = constraints.pairs[:, 0], constraints.pairs[:, 1]
-    weight_first = constraints.inverse_mass[first].reshape(-1)
-    weight_second = constraints.inverse_mass[second].reshape(-1)
-    weight_sum = weight_first + weight_second
-    alive = weight_sum > 0.0
-
-    compliance = config.compliance_per_constraint(constraints.kind)
-    alpha = compliance / max(timestep * timestep, 1.0e-12)
-    denominator = (weight_sum + alpha).clamp_min(1.0e-20)
+    tables = bake_tables(constraints, config, timestep)
+    denominator, alpha, alive = tables.denominator, tables.alpha, tables.alive
 
     current, multiplier = _initialise(
         constraints, config, position=position, inertial=inertial, pinned=pinned,
@@ -392,6 +461,13 @@ def project(
     )
     averaging = constraints.incident.clamp_min(1.0)
     groups = constraints.colour_groups() if config.sweep == "coloured" else None
+    if config.sweep == "fused":
+        if config.mode == "warmstart":
+            # lambda_0 is per constraint and would have to be scattered to the per-slot layout.
+            # Gate G0 measured warmstart as worth nothing, so rather than ship an untested
+            # scatter the combination is refused.
+            raise ValueError("sweep='fused' does not implement mode='warmstart'")
+        multiplier = torch.zeros_like(constraints.slots, dtype=current.dtype)
 
     for _ in range(config.iterations):
         if groups is not None:
@@ -399,6 +475,10 @@ def project(
                 current, multiplier = _apply_group(
                     current, multiplier, constraints, config, group, denominator, alpha, alive
                 )
+        elif config.sweep == "fused":
+            current, multiplier = _apply_fused(
+                current, multiplier, constraints, config, denominator, alpha, alive, averaging, pinned
+            )
         else:
             current, multiplier = _apply_jacobi(
                 current, multiplier, constraints, config, denominator, alpha, alive, averaging, pinned
@@ -550,6 +630,75 @@ def _apply_jacobi(
     multiplier = multiplier + step
     correction = config.relaxation * _scatter_constraint_forces(constraints, gradient, step) / averaging
     return current + torch.where(pinned, torch.zeros_like(correction), correction), multiplier
+
+
+def _apply_fused(
+    current: torch.Tensor,
+    multiplier: torch.Tensor,
+    constraints: ConstraintSet,
+    config: SolverConfig,
+    denominator: torch.Tensor,
+    alpha: torch.Tensor,
+    alive: torch.Tensor,
+    averaging: torch.Tensor,
+    pinned: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """`_apply_jacobi` restructured as one thread per vertex, which is the Vulkan port target.
+
+    `_apply_jacobi` needs two GPU dispatches per iteration: one over constraints to produce every
+    `Delta lambda`, then one over vertices to gather them, because a vertex cannot see a neighbour
+    constraint's result until the constraint pass has finished writing. At 2.8 us per dispatch and
+    128 iterations that is 0.72 ms, about eleven GNN blocks, which is more than the whole hybrid is
+    worth. Here each vertex recomputes the update of every constraint it touches, so the iteration
+    is a single dispatch: 0.36 ms, and the redundant arithmetic (1377 vertices x ~11 constraints)
+    is far below what a dispatch costs anyway.
+
+    The price is that `lambda` becomes per (vertex, slot) rather than per constraint, so the two
+    endpoints of a constraint each keep their own copy. Those copies do not drift:
+
+    * both threads form `x[pairs[c, 0]] - x[pairs[c, 1]]` in that stored order, not "mine minus
+      theirs", so the difference and its norm are the same floats on both;
+    * `target_length`, `alpha` and `denominator` are read from the baked tables, so in particular
+      `weight_sum` is not re-added in opposite orders (see `SolverTables`);
+    * the endpoint-dependent sign is `signs`, applied after the multiplier update, not inside it.
+
+    Given the same inputs and the same instructions the two updates are therefore bit-identical,
+    and the copies stay equal for every iteration. `test_fused_sweep_matches_jacobi` pins this
+    down against `_apply_jacobi` itself.
+    """
+    count = constraints.count
+    slots = constraints.slots
+    pairs = torch.cat((constraints.pairs, torch.zeros_like(constraints.pairs[:1])), dim=0)[slots]
+    first, second = pairs[..., 0], pairs[..., 1]
+    assert int(slots.max()) <= count, "slot table must pad with the sentinel index `count`"
+
+    delta = current[first] - current[second]
+    distance = torch.linalg.vector_norm(delta, dim=-1)
+    safe = distance > 1.0e-9
+    gradient = torch.where(
+        safe.unsqueeze(-1), delta / distance.clamp_min(1.0e-9).unsqueeze(-1), torch.zeros_like(delta)
+    )
+
+    def gather(values: torch.Tensor) -> torch.Tensor:
+        return torch.cat((values, torch.zeros_like(values[:1])), dim=0)[slots]
+
+    residual = distance - gather(constraints.target_length)
+    if config.one_sided:
+        residual = residual.clamp_min(0.0)
+    numerator = -residual - gather(alpha) * multiplier
+    step = torch.where(
+        safe & gather(alive.to(current.dtype)).bool(),
+        numerator / gather(denominator).clamp_min(1.0e-20),
+        torch.zeros_like(numerator),
+    )
+    # Padded lanes point at the sentinel constraint, whose endpoints are both vertex 0, so their
+    # distance is 0, `safe` is false and `step` is 0. `signs` is 0 there as well.
+    correction = (constraints.signs.unsqueeze(-1) * gradient * step.unsqueeze(-1)).sum(dim=1)
+    correction = config.relaxation * constraints.inverse_mass * correction / averaging
+    return (
+        current + torch.where(pinned, torch.zeros_like(correction), correction),
+        multiplier + step,
+    )
 
 
 def _resolve_contacts(

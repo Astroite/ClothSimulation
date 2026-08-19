@@ -9,6 +9,12 @@ param(
     [string]$AssetRoot = '',
     [string]$HoodModel = '',
     [switch]$CollisionProjection,
+    # Jacobi XPBD after the network. Needs a .vxpbd next to the scene assets, from
+    # tools/bake_xpbd_constraints.py. Also toggleable live in the overlay.
+    [switch]$Xpbd,
+    [ValidateRange(0, 1024)]
+    [int]$XpbdIterations = 128,
+    [string]$XpbdAsset = '',
     [switch]$StaticPose
 )
 
@@ -51,6 +57,15 @@ if ($Scene -in @('CH10032', 'HoodGrid64') -or $Solver -in @('Fine15', 'PostCvpr'
     $RuntimeSolver = $Solver -eq 'Toy2L' ? 'toy2l' : ($Solver -eq 'PostCvpr' ? 'postcvpr' : ($Solver -eq 'TinyHood' ? 'tinyhood' : 'fine15'))
     $Arguments += @('--scene', ($IsHoodGrid ? 'hoodgrid' : 'ch10032'), '--motion', $Motion, '--solver', $RuntimeSolver, '--asset-root', (Quote-ProcessArgument $AssetRoot), '--hood-model', (Quote-ProcessArgument $HoodModel))
     if ($CollisionProjection) { $Arguments += '--hood-collision-projection' }
+    if ($Xpbd) {
+        if (-not $XpbdAsset) { $XpbdAsset = Join-Path $AssetRoot "$Motion.vxpbd" }
+        $XpbdAsset = [System.IO.Path]::GetFullPath($XpbdAsset)
+        if (-not (Test-Path -LiteralPath $XpbdAsset -PathType Leaf)) {
+            throw "XPBD asset is missing: $XpbdAsset`nRun .\.venv\Scripts\python.exe -B tools\bake_xpbd_constraints.py --scene $Motion first."
+        }
+        $Arguments += @('--hood-xpbd', '--hood-xpbd-iterations', $XpbdIterations,
+            '--hood-xpbd-asset', (Quote-ProcessArgument $XpbdAsset))
+    }
 } else {
     $Arguments += @('--gnn-grid', $Grid)
 }

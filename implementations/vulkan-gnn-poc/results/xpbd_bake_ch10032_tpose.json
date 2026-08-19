@@ -1,0 +1,19 @@
+{
+  "bend": 3735,
+  "calibration": "teacher",
+  "calibration_scene": "ch10032_tpose",
+  "constraints": 7682,
+  "dead_constraints": 72,
+  "file_bytes": 368948,
+  "live_slots": 15364,
+  "output": "E:\\Projects\\cloth-simulation\\implementations\\vulkan-gnn-poc\\.work\\real_scene\\ch10032_tpose\\ch10032_tpose.vxpbd",
+  "payload_sha256": "474b9349e290e55bd91ceec77976e7f7f3bb02cfb13f46aa811088bd883a9a80",
+  "pinned_vertices": 72,
+  "scene": "ch10032_tpose",
+  "slot_width": 18,
+  "stretch": 3947,
+  "suspect_constraints": 117,
+  "target_length_p50": 0.031108,
+  "target_length_p95": 0.055671,
+  "vertices": 1377
+}

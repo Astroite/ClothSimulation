@@ -1,0 +1,17 @@
+{
+  "scene": "ch10032",
+  "solver": "tinyhood32x12",
+  "xpbd": true,
+  "xpbd_iterations": 128,
+  "collision_projection": false,
+  "completed_steps": 312,
+  "structure_preserved": true,
+  "invalid_vertices": 0,
+  "active_world_edges": 679,
+  "maximum_displacement_m": 0.461825926,
+  "maximum_pinned_error_m": 0,
+  "edge_length_ratio": {"mean": 0.9837342151, "p95": 1.15806113, "max": 3.23868424, "collapsed_fraction_lt_0_5": 0.00481378262, "stretched_fraction_gt_1_5": 0.00734735242},
+  "triangle_area_ratio": {"mean": 0.9376415244, "median": 0.9519803055, "degenerate_fraction_lt_0_1": 0.0003891050584, "flipped_fraction": 0.05953307393},
+  "bounds_min_m": [-0.226447925, -0.9914851785, -0.3492803574],
+  "bounds_max_m": [0.2673227787, -0.03529648483, 0.4300169349]
+}

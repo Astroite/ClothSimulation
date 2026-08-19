@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Generate a deterministic TinyHOOD rollout/golden file from baked runtime assets."""
+"""Generate a deterministic TinyHOOD rollout/golden file from baked runtime assets.
+
+With `--xpbd-asset` the rollout also applies the Jacobi XPBD projection after each step, which
+makes the golden the reference for the Vulkan `--hood-xpbd` path. The constraint data is READ FROM
+THE BAKED ASSET rather than rebuilt, so the only thing the comparison can detect is a difference in
+the kernel; see `real_scene.xpbd.load_vxpbd` for why recomputing it would poison the test.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +24,12 @@ from real_scene.fine15 import Fine15, Fine15Weights  # noqa: E402
 from real_scene.formats import Section, pack_u32, write_sectioned  # noqa: E402
 from real_scene.runtime_scene import RuntimeScene  # noqa: E402
 from real_scene.tinyhood import load_tinyhood  # noqa: E402
+from real_scene.xpbd import (  # noqa: E402
+    SolverConfig,
+    contacts_from_graph,
+    load_vxpbd,
+    project,
+)
 
 
 def main() -> int:
@@ -27,6 +39,12 @@ def main() -> int:
     parser.add_argument("--asset-stem", default="ch10032")
     parser.add_argument("--model", type=Path, default=POC_ROOT / ".work/hood_data/tinyhood64x4.vhood")
     parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--xpbd-asset", type=Path, default=None, help="a .vxpbd from tools/bake_xpbd_constraints.py")
+    parser.add_argument("--xpbd-iterations", type=int, default=128)
+    parser.add_argument("--xpbd-two-sided", action="store_true")
+    parser.add_argument("--xpbd-no-contacts", action="store_true")
+    parser.add_argument("--xpbd-stretch-compliance", type=float, default=0.0)
+    parser.add_argument("--xpbd-bend-compliance", type=float, default=0.0)
     parser.add_argument("--golden", required=True, type=Path)
     args = parser.parse_args()
     if args.steps <= 0:
@@ -37,6 +55,12 @@ def main() -> int:
     model = load_tinyhood(args.model.resolve())
     model.eval()
     scene = RuntimeScene.load(args.asset_root.resolve(), args.motion, asset_stem=args.asset_stem)
+    constraints = load_vxpbd(args.xpbd_asset.resolve()) if args.xpbd_asset else None
+    solver = SolverConfig(
+        iterations=args.xpbd_iterations, mode="standard", sweep="fused",
+        stretch_compliance=args.xpbd_stretch_compliance, bend_compliance=args.xpbd_bend_compliance,
+        one_sided=not args.xpbd_two_sided, collision=not args.xpbd_no_contacts,
+    )
     output_mean, output_std = weights.normalizer("output")
     position = scene.cloth_target(0)
     previous = position.clone()
@@ -75,6 +99,23 @@ def main() -> int:
                 first_world[graph.world_cloth] = graph.active_obstacle[graph.world_obstacle]
             previous = graph.effective_position
             position = predicted
+            if constraints is not None:
+                obstacle_target, _ = scene.proxy(target_frame)
+                contacts = (
+                    contacts_from_graph(graph, obstacle_target, obstacle_normals)
+                    if solver.collision and graph.world_cloth.numel() > 0 else None
+                )
+                position = project(
+                    constraints, solver,
+                    position=position,
+                    # `standard` never reads the inertial reference, so passing the position keeps
+                    # this honest rather than reconstructing a value the solver ignores.
+                    inertial=position,
+                    pin_mask=graph.pin_mask,
+                    pin_target=graph.pin_target,
+                    timestep=1.0 / 3.0 if step == 0 else 1.0 / 30.0,
+                    contacts=contacts,
+                )
             if step == 0 and args.steps > 1:
                 previous = position.clone()
             rollout.append(position.clone())
@@ -98,6 +139,9 @@ def main() -> int:
                 "vertices": len(position),
                 "mesh_edges": len(scene.cloth_senders),
                 "first_world_edges": int((first_world != 0xFFFFFFFF).sum().item()),
+                "xpbd_asset": str(args.xpbd_asset.resolve()) if args.xpbd_asset else None,
+                "xpbd_iterations": args.xpbd_iterations if constraints is not None else 0,
+                "xpbd_constraints": constraints.count if constraints is not None else 0,
                 "golden": str(args.golden.resolve()),
             },
             indent=2,

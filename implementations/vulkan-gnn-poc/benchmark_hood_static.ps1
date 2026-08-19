@@ -16,6 +16,12 @@ param(
     # the ~60 dispatches of a step, which inflates and destabilises every stage mean.
     # Correctness is verify_hood.ps1's job; pass -Validate only to time the validated path.
     [switch]$Validate,
+    # Time the Jacobi XPBD stage as well. plans/gnn/gnn-xpbd-v2.md section 2.3 could only estimate
+    # its cost by multiplying a 2.8 us dispatch price by the iteration count; this measures it.
+    [switch]$Xpbd,
+    [ValidateRange(0, 1024)]
+    [int]$XpbdIterations = 128,
+    [string]$XpbdAsset = '',
     # Locked SM clock for reproducibility. The idle clock on this part is 735 MHz against
     # a 3105 MHz maximum, and a latency-bound step does not look like load to the clock
     # governor, so an unlocked device reports run-to-run means up to 2.2x apart on
@@ -48,9 +54,14 @@ if (-not $HoodModel) { $HoodModel = Join-Path $PocRoot ($IsPost ? '.work/hood_da
 $AssetRoot = [System.IO.Path]::GetFullPath($AssetRoot)
 $HoodModel = [System.IO.Path]::GetFullPath($HoodModel)
 $ResultStem = if ($IsHoodGrid) { $IsPost ? 'postcvpr_grid64' : ($IsTiny ? 'tinyhood_grid64' : 'hood_grid64_fine15') } elseif ($IsPost) { 'postcvpr_ch10032_tpose' } elseif ($IsTiny) { 'tinyhood_ch10032_tpose' } elseif ($Solver -eq 'Toy2L') { 'hood_static_toy2l' } else { 'hood_static' }
+$OutputSupplied = [bool]$Output
 if (-not $Output) { $Output = Join-Path $PocRoot "results/${ResultStem}_timing.csv" }
 $Output = [System.IO.Path]::GetFullPath($Output)
-$StabilityOutput = [System.IO.Path]::GetFullPath((Join-Path $PocRoot "results/${ResultStem}_stability.json"))
+# The default stem is fixed per solver+scene, so two motions of the same garment would overwrite
+# each other's stability record. Follow -Output when the caller redirected it, as verify_hood.ps1
+# does for its validation log.
+$StabilityOutput = $OutputSupplied ? (($Output -replace '\.csv$', '') + '_stability.json')
+    : [System.IO.Path]::GetFullPath((Join-Path $PocRoot "results/${ResultStem}_stability.json"))
 $ValidationSource = Join-Path $UpstreamRoot 'validation_output.txt'
 $ValidationOutput = Join-Path $PocRoot "results/${ResultStem}_validation_output.txt"
 $AssetStem = $IsHoodGrid ? 'hood_grid64' : 'ch10032'
@@ -81,6 +92,13 @@ $Arguments = @(
     '-s', 'hlsl'
 )
 if ($Validate) { $Arguments += @('-v', '-vl') }
+if ($Xpbd) {
+    if (-not $XpbdAsset) { $XpbdAsset = Join-Path $AssetRoot "$Motion.vxpbd" }
+    $XpbdAsset = [System.IO.Path]::GetFullPath($XpbdAsset)
+    if (-not (Test-Path -LiteralPath $XpbdAsset -PathType Leaf)) { throw "XPBD asset is missing: $XpbdAsset" }
+    $Arguments += @('--hood-xpbd', '--hood-xpbd-iterations', $XpbdIterations,
+        '--hood-xpbd-asset', (Quote-ProcessArgument $XpbdAsset))
+}
 
 function Get-GpuState {
     $fields = 'clocks.sm,clocks.mem,temperature.gpu,power.draw,utilization.gpu,clocks_event_reasons.active'

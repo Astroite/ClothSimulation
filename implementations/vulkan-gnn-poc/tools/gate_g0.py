@@ -72,6 +72,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=0, help="0 = the scene's frame count, min 120")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--calibrations", nargs="+", default=["bind"], choices=("rest", "bind", "teacher"))
+    parser.add_argument(
+        "--calibration-source",
+        default=None,
+        help="Scene whose teacher rollout supplies the `teacher` target lengths for every scene. "
+             "Default: each scene calibrates against its own rollout. Set it to ask whether one "
+             "baked calibration can serve a garment across motions, which decides whether the "
+             "Vulkan .vxpbd asset is per-garment or per-motion.",
+    )
     parser.add_argument("--iterations", nargs="+", type=int, default=[2, 4, 8, 16])
     parser.add_argument("--modes", nargs="+", default=["standard", "warmstart", "nowarm"],
                         choices=("standard", "warmstart", "nowarm"))
@@ -182,10 +190,39 @@ def label_for(branch: str, config: SolverConfig, calibration: str) -> str:
     return stem
 
 
-def run_scene(scene_name: str, args: argparse.Namespace, teacher: Fine15, student, mean, std) -> dict:
-    device = torch.device(args.device)
+def load_scene(scene_name: str, args: argparse.Namespace) -> RuntimeScene:
     stem = ASSET_STEMS.get(scene_name, "ch10032")
-    scene = RuntimeScene.load(args.scene_root / scene_name, scene_name, device=device, asset_stem=stem)
+    return RuntimeScene.load(
+        args.scene_root / scene_name, scene_name, device=torch.device(args.device), asset_stem=stem
+    )
+
+
+def calibration_donor(args: argparse.Namespace, teacher: Fine15, mean, std) -> tuple[torch.Tensor, torch.Tensor]:
+    """Target lengths measured on `--calibration-source`, with the pair table they came from.
+
+    The pairs travel with the lengths so a scene borrowing them can assert the two really share a
+    garment. `ch10032_tpose`, `ch10032_sprint` and `hml_001962` all load `ch10032_lower.vcloth2`,
+    so they do; `hood_grid64` is a different mesh and will trip the assertion.
+    """
+    scene = load_scene(args.calibration_source, args)
+    steps = args.steps or max(scene.frame_count, 120)
+    reference = trace(teacher.predict_graph, teacher, scene, steps, mean, std)
+    base = build_constraints(scene, scene.cloth_target(0))
+    lengths = calibrate_from_trajectory(base.pairs, reference["positions"], skip=min(5, steps - 1))
+    return base.pairs, lengths.clamp_min(1.0e-9)
+
+
+def run_scene(
+    scene_name: str,
+    args: argparse.Namespace,
+    teacher: Fine15,
+    student,
+    mean,
+    std,
+    donor: tuple[torch.Tensor, torch.Tensor] | None = None,
+) -> dict:
+    device = torch.device(args.device)
+    scene = load_scene(scene_name, args)
     steps = args.steps or max(scene.frame_count, 120)
     gravity = torch.tensor(args.gravity, dtype=torch.float32, device=device).reshape(1, 3)
 
@@ -201,10 +238,23 @@ def run_scene(scene_name: str, args: argparse.Namespace, teacher: Fine15, studen
     for calibration in args.calibrations:
         base = build_constraints(scene, references.get(calibration, scene.cloth_target(0)))
         if calibration == "teacher":
-            lengths = calibrate_from_trajectory(base.pairs, reference["positions"], skip=min(5, steps - 1))
-            base = dataclasses.replace(base, target_length=lengths.clamp_min(1.0e-9))
+            if donor is None:
+                # Its own rollout, which is already in hand -- reusing it rather than taking a
+                # second one keeps `--calibration-source <this scene>` bit-identical to the
+                # default despite index_add_ making rollouts non-reproducible.
+                lengths = calibrate_from_trajectory(base.pairs, reference["positions"], skip=min(5, steps - 1))
+                lengths = lengths.clamp_min(1.0e-9)
+            else:
+                donor_pairs, lengths = donor
+                if donor_pairs.shape != base.pairs.shape or not bool(torch.equal(donor_pairs, base.pairs)):
+                    raise SystemExit(
+                        f"--calibration-source {args.calibration_source} has a different constraint "
+                        f"topology than {scene_name}; lengths cannot be transplanted between them"
+                    )
+            base = dataclasses.replace(base, target_length=lengths)
         stretch_mask = base.kind == STRETCH
         entry.setdefault("calibration", {})[calibration] = {
+            "source": (args.calibration_source if calibration == "teacher" and donor is not None else scene_name),
             "suspect_constraints": int(base.suspect.sum()),
             "target_length_p95": round(float(torch.quantile(base.target_length[stretch_mask], 0.95)), 6),
             # The per-iteration GPU dispatch count, which plans/gnn/gnn-xpbd-v2.md section 2.3 could
@@ -265,14 +315,24 @@ def main() -> int:
         "score_weights": {"stiff": args.stiff_weight, "drift": args.drift_weight, "over_cap": args.over_cap},
         "collision": not args.no_collision,
         "relaxation": args.relaxation,
+        "calibration_source": args.calibration_source,
         "scenes": {},
     }
+    donor = None
     for scene_name in args.scenes:
         if not (args.scene_root / scene_name).is_dir():
             print(f"{scene_name}: not baked, skipped")
             continue
+        # A scene asked to borrow its own calibration takes the default path instead, so the
+        # identity case stays bit-identical to leaving the flag off.
+        borrowing = args.calibration_source is not None and args.calibration_source != scene_name
+        if borrowing and donor is None and "teacher" in args.calibrations:
+            print(f"calibrating from {args.calibration_source}:")
+            donor = calibration_donor(args, teacher, mean, std)
         print(f"{scene_name}:")
-        report["scenes"][scene_name] = run_scene(scene_name, args, teacher, student, mean, std)
+        report["scenes"][scene_name] = run_scene(
+            scene_name, args, teacher, student, mean, std, donor if borrowing else None
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

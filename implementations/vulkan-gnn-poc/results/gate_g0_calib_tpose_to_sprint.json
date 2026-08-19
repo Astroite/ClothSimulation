@@ -1,0 +1,87 @@
+{
+  "calibration_source": "ch10032_tpose",
+  "collision": true,
+  "gravity": [
+    0.0,
+    -9.81,
+    0.0
+  ],
+  "relaxation": 1.0,
+  "scenes": {
+    "ch10032_sprint": {
+      "calibration": {
+        "teacher": {
+          "colours": 18,
+          "constraints": 7682,
+          "source": "ch10032_tpose",
+          "suspect_constraints": 262,
+          "target_length_p95": 0.055672
+        }
+      },
+      "configs": {
+        "C_hybrid_k128_standard_teacher_sc0_bc1e-05_onesided": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 1.5249881744384766,
+            "120": 1.6520214080810547,
+            "30": 1.7696962356567383,
+            "5": 1.3763370513916016,
+            "60": 2.6146979331970215
+          },
+          "first_step_above_1.2": 1,
+          "first_step_above_1.5": 10,
+          "first_step_above_2.0": 39,
+          "first_step_above_5.0": ">120",
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.13521059605603417,
+            "drift_rms_max": 0.23366783559322357,
+            "flip": 0.0004863811656832695,
+            "over": 0.2612275133530299,
+            "score": 0.5333669304226836,
+            "score_uncapped": 0.5333669304226836,
+            "under": 0.002981850504875183
+          },
+          "score_mean": 0.5343198396110287,
+          "score_repeats": [
+            0.5333669304226836,
+            0.5352727487993738
+          ],
+          "score_spread": 0.0019058183766902381
+        }
+      },
+      "frames": 62,
+      "steps": 120,
+      "teacher": {
+        "completed_steps": 120,
+        "edge_p95_at": {
+          "10": 1.4213083982467651,
+          "120": 1.5621520280838013,
+          "30": 1.526645541191101,
+          "5": 1.2954984903335571,
+          "60": 1.508886694908142
+        },
+        "first_step_above_1.2": 1,
+        "first_step_above_1.5": 1,
+        "first_step_above_2.0": ">120",
+        "first_step_above_5.0": ">120",
+        "score": {
+          "compared_steps": 120,
+          "drift_rms": 0.0,
+          "drift_rms_max": 0.0,
+          "flip": 0.0,
+          "over": 0.0,
+          "score": 0.0,
+          "score_uncapped": 0.0,
+          "under": 0.0
+        }
+      }
+    }
+  },
+  "score_weights": {
+    "drift": 2.0,
+    "over_cap": 2.0,
+    "stiff": 0.25
+  },
+  "student": "student32x12_r1.vhood"
+}

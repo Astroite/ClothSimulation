@@ -1,0 +1,19 @@
+{
+  "bend": 11781,
+  "calibration": "teacher",
+  "calibration_scene": "hood_grid64",
+  "constraints": 27783,
+  "dead_constraints": 63,
+  "file_bytes": 1064016,
+  "live_slots": 55566,
+  "output": "E:\\Projects\\cloth-simulation\\implementations\\vulkan-gnn-poc\\.work\\real_scene\\hood_grid64\\hood_grid64.vxpbd",
+  "payload_sha256": "fedea55362f8e56eaf70582370965d4ea7ba2a4ba842f47fd32cf123ba486638",
+  "pinned_vertices": 64,
+  "scene": "hood_grid64",
+  "slot_width": 14,
+  "stretch": 16002,
+  "suspect_constraints": 0,
+  "target_length_p50": 0.020469,
+  "target_length_p95": 0.027525,
+  "vertices": 4096
+}

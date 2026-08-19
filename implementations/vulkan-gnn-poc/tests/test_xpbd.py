@@ -20,8 +20,10 @@ from real_scene.xpbd import (  # noqa: E402
     STRETCH,
     ConstraintSet,
     SolverConfig,
+    bake_tables,
     bend_pairs,
     build_constraints,
+    load_vxpbd,
     primal_residual,
     project,
     stretch_residual,
@@ -289,6 +291,156 @@ class ProjectionTests(unittest.TestCase):
 
 
 @unittest.skipUnless((SCENE_ROOT / "hml_001962").is_dir(), "baked scenes not present")
+class FusedPortTests(unittest.TestCase):
+    """The Vulkan kernel is one thread per vertex. These pin down that it computes the same thing.
+
+    `_apply_jacobi` needs two dispatches per iteration on a GPU (constraints, then vertices);
+    `_apply_fused` needs one, at the cost of every vertex recomputing its neighbours' multiplier
+    updates and storing lambda per (vertex, slot) instead of per constraint. That restructuring is
+    the whole reason the hybrid fits in 0.36 ms instead of 0.72 ms, so it has to be proved here
+    rather than discovered after the HLSL is written.
+    """
+
+    def _real_fixture(self):
+        from real_scene.runtime_scene import RuntimeScene
+
+        scene = RuntimeScene.load(SCENE_ROOT / "hml_001962", "hml_001962", device="cpu", asset_stem="ch10032")
+        start = scene.cloth_target(0)
+        constraints = build_constraints(scene, start)
+        disturbed = start + 0.02 * torch.randn(start.shape, generator=torch.Generator().manual_seed(11))
+        return scene, constraints, start, disturbed
+
+    def test_fused_sweep_matches_jacobi(self) -> None:
+        """Bit-identical on the real mesh, for both compliance regimes and both residual signs."""
+        scene, constraints, start, disturbed = self._real_fixture()
+        for one_sided in (False, True):
+            for compliance in (0.0, 1.0e-2):
+                shared = dict(
+                    iterations=16, mode="standard", one_sided=one_sided,
+                    stretch_compliance=compliance, bend_compliance=compliance, collision=False,
+                )
+                state = dict(
+                    position=disturbed, inertial=disturbed, pin_mask=scene.cloth_pins,
+                    pin_target=start, timestep=1.0 / 30.0,
+                )
+                jacobi = project(constraints, SolverConfig(sweep="jacobi", **shared), **state)
+                fused = project(constraints, SolverConfig(sweep="fused", **shared), **state)
+                label = f"one_sided={one_sided} compliance={compliance}"
+                self.assertTrue(torch.equal(jacobi, fused), f"fused diverged from jacobi ({label})")
+                # Guard against the comparison passing because neither did anything.
+                self.assertGreater(float((fused - disturbed).abs().max()), 1.0e-4, label)
+
+    def test_fused_lambda_copies_stay_equal_across_endpoints(self) -> None:
+        """The two per-slot copies of one constraint's lambda must not drift apart.
+
+        This is the property that makes the redundant layout safe. It holds because both endpoints
+        form `x[pairs[c, 0]] - x[pairs[c, 1]]` in the stored order and read `weight_sum` from the
+        baked table instead of adding `w_a + w_b` in whichever order is local to them.
+        """
+        from real_scene.xpbd import _apply_fused
+
+        scene, constraints, start, disturbed = self._real_fixture()
+        config = SolverConfig(iterations=1, sweep="fused", one_sided=True, collision=False)
+        tables = bake_tables(constraints, config, 1.0 / 30.0)
+        current = disturbed.clone()
+        multiplier = torch.zeros_like(constraints.slots, dtype=current.dtype)
+        pinned = scene.cloth_pins.reshape(-1, 1)
+        averaging = constraints.incident.clamp_min(1.0)
+
+        real = constraints.slots < constraints.count
+        for _ in range(8):
+            current, multiplier = _apply_fused(
+                current, multiplier, constraints, config, tables.denominator,
+                tables.alpha, tables.alive, averaging, pinned,
+            )
+            # Group the live slots by the constraint they name and check every constraint's copies
+            # agree exactly. Each constraint owns exactly two live slots.
+            index = constraints.slots[real]
+            value = multiplier[real]
+            order = torch.argsort(index, stable=True)
+            paired = value[order].reshape(-1, 2)
+            self.assertEqual(paired.shape[0], constraints.count)
+            self.assertTrue(torch.equal(paired[:, 0], paired[:, 1]), "lambda copies drifted apart")
+
+    def test_baked_tables_are_what_the_asset_must_carry(self) -> None:
+        scene, constraints, _, _ = self._real_fixture()
+        config = SolverConfig(stretch_compliance=1.0e-2, bend_compliance=1.0e-2)
+        tables = bake_tables(constraints, config, 1.0 / 30.0)
+        self.assertEqual(tables.weight_sum.shape, (constraints.count,))
+        torch.testing.assert_close(tables.denominator, (tables.weight_sum + tables.alpha).clamp_min(1.0e-20))
+        # alpha = compliance / dt^2 = 1e-2 * 900 = 9.0, which is the magnitude gate G0 found the
+        # 0..1e-6 sweep had missed by seven orders.
+        torch.testing.assert_close(tables.alpha.max(), torch.tensor(9.0))
+        # Both endpoints pinned is the only way a constraint can be dead, and the waistband has
+        # internal edges, so this must not be empty or the `alive` flag is untested in practice.
+        self.assertGreater(int((~tables.alive).sum()), 0, "expected some fully pinned constraints")
+
+    def test_zero_iterations_returns_the_input_unchanged(self) -> None:
+        """The Vulkan side needs the same short circuit, so k=0 is a no-op both places."""
+        scene, constraints, start, disturbed = self._real_fixture()
+        for sweep in ("jacobi", "fused", "coloured"):
+            result = project(
+                constraints, SolverConfig(iterations=0, sweep=sweep),
+                position=disturbed, inertial=disturbed, pin_mask=scene.cloth_pins,
+                pin_target=start, timestep=1.0 / 30.0,
+            )
+            self.assertTrue(result is disturbed or torch.equal(result, disturbed), sweep)
+
+    def test_baked_asset_round_trips_into_an_equivalent_solve(self) -> None:
+        """Read the `.vxpbd` back the way the kernel will and re-run the sweep from it.
+
+        This is the layout guard. A wrong stride, a signs column read as int, or slots flattened in
+        the other order would all still load, still produce plausible cloth, and be very hard to
+        find later from a Vulkan-versus-Python mismatch of unknown origin. Reconstructing the
+        constraint set from the bytes and demanding a bit-identical solve localises it here.
+        """
+        import subprocess
+        import tempfile
+
+        scene, constraints, start, disturbed = self._real_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            asset = Path(directory) / "hml_001962.vxpbd"
+            subprocess.run(
+                [sys.executable, "-B", str(POC_ROOT / "tools/bake_xpbd_constraints.py"),
+                 "--scene", "hml_001962", "--calibration", "bind", "--device", "cpu",
+                 "--output", str(asset)],
+                check=True, capture_output=True, cwd=POC_ROOT,
+            )
+            rebuilt = load_vxpbd(asset)
+
+        self.assertEqual(rebuilt.count, constraints.count)
+        self.assertEqual(rebuilt.vertex_count, constraints.vertex_count)
+        for field in ("pairs", "target_length", "kind", "slots", "signs", "inverse_mass"):
+            self.assertTrue(
+                torch.equal(getattr(rebuilt, field), getattr(constraints, field)),
+                f"{field} did not survive the round trip",
+            )
+        # incident is clamped on the way out, so compare against the clamped form.
+        self.assertTrue(torch.equal(rebuilt.incident, constraints.incident.clamp_min(1.0)))
+
+        config = SolverConfig(iterations=8, sweep="fused", one_sided=True, collision=False)
+        state = dict(
+            position=disturbed, inertial=disturbed, pin_mask=scene.cloth_pins,
+            pin_target=start, timestep=1.0 / 30.0,
+        )
+        self.assertTrue(torch.equal(
+            project(rebuilt, config, **state), project(constraints, config, **state)
+        ), "a solve driven by the baked asset diverged from one driven by build_constraints")
+
+    def test_baked_min_edge_is_per_vertex_not_global(self) -> None:
+        """gnn-xpbd-v2.md section 7.1: a global minimum would let one short edge clamp everything."""
+        from tools.bake_xpbd_constraints import per_vertex_min_edge
+
+        _, constraints, _, _ = self._real_fixture()
+        minimum = per_vertex_min_edge(constraints.pairs, constraints.target_length, constraints.vertex_count)
+        self.assertEqual(minimum.shape, (constraints.vertex_count,))
+        self.assertGreater(float(minimum.max() / minimum.min()), 5.0, "edge scale is not uniform")
+        for index in (0, constraints.vertex_count // 2, constraints.vertex_count - 1):
+            touching = (constraints.pairs == index).any(dim=1)
+            expected = float(constraints.target_length[touching].min())
+            self.assertAlmostEqual(float(minimum[index]), expected, places=6)
+
+
 class RealSceneTests(unittest.TestCase):
     """Numbers here are the measurements plans/gnn/gnn-xpbd-v2.md relies on."""
 

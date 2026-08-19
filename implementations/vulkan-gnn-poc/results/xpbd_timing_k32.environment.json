@@ -1,0 +1,26 @@
+{
+  "scene": "CH10032",
+  "solver": "TinyHood",
+  "motion": "ch10032_tpose",
+  "warmup": 10,
+  "samples": 60,
+  "validation_layers": false,
+  "synchronization_validation": false,
+  "locked_sm_clock_mhz": 2700,
+  "gpu_before": {
+    "sm_clock": "2730 MHz",
+    "memory_clock": "9001 MHz",
+    "temperature_c": "39",
+    "power_draw": "27.05 W",
+    "utilization": "0 %",
+    "throttle_reasons": "0x0000000000000001"
+  },
+  "gpu_after": {
+    "sm_clock": "2700 MHz",
+    "memory_clock": "9001 MHz",
+    "temperature_c": "43",
+    "power_draw": "35.49 W",
+    "utilization": "73 %",
+    "throttle_reasons": "0x0000000000000001"
+  }
+}

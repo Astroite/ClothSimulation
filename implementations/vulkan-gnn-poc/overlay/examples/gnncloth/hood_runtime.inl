@@ -23,6 +23,14 @@
 	// a student with any depth other than the one the literal was written for decode with a
 	// processor MLP instead. Pass it in.
 	struct HoodIntegrateParams { uint32_t clothCount{}, firstStep{}, collisionProjection{}, decoderMlp{}; };
+	// Push constants for hood_xpbd.comp. Mirrors `struct Push` there; keep the two in step.
+	struct HoodXpbdPush {
+		uint32_t clothCount{}, constraintCount{}, slotWidth{}, flags{};
+		float timestep{}, relaxation{}, contactOffset{}, stretchCompliance{}, bendCompliance{};
+	};
+	static_assert(sizeof(HoodXpbdPush) == 36);
+	static constexpr uint32_t hoodXpbdOneSidedFlag = 1u;
+	static constexpr uint32_t hoodXpbdCollisionFlag = 2u;
 	struct HoodToyParams {
 		uint32_t clothCount{};
 		float timestep{ 1.0f / 30.0f }, maxSpeed{ 8.0f }, maxAcceleration{ 30.0f };
@@ -43,6 +51,29 @@
 	bool hoodFirstStep{ true };
 	bool hoodSimulateFrame{ false };
 	bool hoodCollisionProjection{ false };
+	// Unstructured Jacobi XPBD on top of the network's prediction (plans/gnn/gnn-xpbd-v2.md S2').
+	// Off unless a .vxpbd asset is present and --hood-xpbd asked for it. The defaults are the
+	// configuration gate G0 measured as best: 128 Jacobi iterations, one-sided (resist stretch but
+	// never compression, worth 0.11 of score), rigid constraints. Compliance is a runtime knob
+	// rather than a baked constant because gate G0 established the usable magnitude is around 1e-2,
+	// seven orders above the 0..1e-6 range that sweep had covered, and that range is untested.
+	bool hoodXpbdRequested{ false };
+	bool hoodXpbdAvailable{ false };
+	bool hoodXpbdEnabled{ false };
+	bool hoodXpbdOneSided{ true };
+	// Contacts are the nearest-proxy half-plane projection, folded into the sweep. On by default
+	// because that is the configuration gate G0 measured; note this is the ONLY collision handling
+	// when XPBD is on, since hood_integrate.comp's own projection is disabled in that case.
+	bool hoodXpbdCollision{ true };
+	int32_t hoodXpbdIterations{ 128 };
+	float hoodXpbdStretchCompliance{ 0.0f };
+	float hoodXpbdBendCompliance{ 0.0f };
+	float hoodXpbdRelaxation{ 1.0f };
+	float hoodXpbdContactOffset{ 0.005f };
+	uint32_t hoodXpbdConstraintCount{};
+	uint32_t hoodXpbdSlotWidth{};
+	uint32_t hoodXpbdStretchCount{};
+	std::filesystem::path hoodXpbdPath;
 	bool hoodVerifyMode{ false };
 	bool hoodVerifyWritten{ false };
 	bool hoodStaticBenchmarkMode{ false };
@@ -88,7 +119,11 @@
 	// its per-lane minimum with it and the feature pass normalises against the same cutoff, so
 	// the two must never disagree -- keep it in one place.
 	static constexpr float hoodCollisionRadius = 0.03f;
-	static constexpr uint32_t hoodTimestampCount = 8 + hoodProcessorBlocks * 2;
+	static constexpr uint32_t hoodTimestampCount = 9 + hoodProcessorBlocks * 2;
+	// The integrate stamp keeps the index it had before the XPBD stage existed and XPBD's is
+	// appended last, so every column in the existing timing CSVs still means what it meant.
+	static constexpr uint32_t hoodIntegrateTimestamp = 8 + hoodProcessorBlocks * 2 - 1;
+	static constexpr uint32_t hoodXpbdTimestamp = hoodTimestampCount - 1;
 	uint32_t hoodEmbeddingOffset{};
 	uint32_t hoodDecoderMlpId{};
 	uint32_t hoodLevelEmbeddingOffset{ vhood::noTensor };
@@ -117,6 +152,15 @@
 		vks::Buffer vertexLevel;
 		std::array<vks::Buffer, 2> coarseSenders, coarseReceivers, coarseOffsets, coarseFeatures;
 		vks::Buffer weights, mlpTable, normalizers, toyWeights, toyHidden;
+		// XPBD constraint set from the .vxpbd asset, plus the two buffers the sweep needs at
+		// runtime. `xpbdLambda` is per (vertex, slot), not per constraint: the fused sweep has both
+		// endpoints of a constraint evaluate the same multiplier update, so each keeps its own copy.
+		// `xpbdScratch` is the Jacobi ping-pong target -- every vertex has to read the same
+		// positions, so updating clothPosition in place would silently become a nondeterministic
+		// partial Gauss-Seidel.
+		vks::Buffer xpbdPairs, xpbdTargetLength, xpbdWeightSum, xpbdKind;
+		vks::Buffer xpbdSlots, xpbdSigns, xpbdIncident, xpbdInverseMass, xpbdMinEdge;
+		vks::Buffer xpbdLambda, xpbdScratch;
 		std::array<vks::Buffer, 2> nodeLatent, meshLatent, worldDirectLatent, worldInverseLatent;
 		std::array<std::array<vks::Buffer, 2>, 2> coarseLatent;
 	} hoodBuffers;
@@ -128,6 +172,11 @@
 		VkDescriptorSetLayout worldNearestLayout{}, worldReverseLayout{};
 		VkPipelineLayout worldNearestPipeline{}, worldReversePipeline{};
 		VkDescriptorSet worldNearestSet{}, worldReverseSet{};
+		VkDescriptorSetLayout xpbdLayout{};
+		VkPipelineLayout xpbdPipeline{};
+		// Two sets: [0] reads clothPosition and writes the scratch buffer, [1] the other way round.
+		std::array<VkDescriptorSet, 2> xpbdSets{};
+		VkPipeline xpbd{};
 		std::array<VkDescriptorSet, maxConcurrentFrames> skinSets{}, featureSets{}, integrateSets{}, graphicsSets{};
 		std::array<VkDescriptorSet, maxConcurrentFrames> toySets{};
 		VkDescriptorSet encodeSet{};
@@ -144,7 +193,7 @@
 		double skin{}, features{};
 		std::array<double, 4> encoders{};
 		std::array<double, hoodProcessorBlocks> edgeBlocks{}, nodeBlocks{};
-		double integrate{}, total{};
+		double integrate{}, xpbd{}, total{};
 		double encodeTotal() const { return encoders[0] + encoders[1] + encoders[2] + encoders[3]; }
 		double processorTotal() const {
 			double value = 0.0;
@@ -289,6 +338,25 @@
 		hoodTriangleCount = cloth.require("triangles", 12).count;
 		hoodClothIndexCount = hoodTriangleCount * 3;
 		hoodMeshEdgeCount = cloth.require("csr_neighbors", 4).count;
+		// The XPBD constraint set is a separate asset rather than new .vcloth2 sections. Its target
+		// lengths are calibrated against a teacher rollout, so they may have to be per motion,
+		// while .vcloth2 is shared by every motion of a garment -- and adding sections there would
+		// change its payload hash, which the existing goldens are pinned to. Missing is not an
+		// error: without it the runtime is exactly what it was before.
+		vhood::SectionedAsset xpbd;
+		if (hoodXpbdPath.empty()) hoodXpbdPath = hoodAssetRoot / (hoodMotion + ".vxpbd");
+		hoodXpbdAvailable = std::filesystem::exists(hoodXpbdPath);
+		if (hoodXpbdAvailable) {
+			xpbd = vhood::loadSectioned(hoodXpbdPath, "VXPBD001", 1);
+			const auto xpbdInfo = xpbd.require("info", 4, 4).as<uint32_t>();
+			hoodXpbdConstraintCount = xpbdInfo[0];
+			hoodXpbdSlotWidth = xpbdInfo[2];
+			hoodXpbdStretchCount = xpbdInfo[3];
+			if (xpbdInfo[1] != hoodClothCount || !hoodXpbdConstraintCount || !hoodXpbdSlotWidth
+				|| hoodXpbdStretchCount > hoodXpbdConstraintCount)
+				throw std::runtime_error("VXPBD dimensions do not match the cloth asset");
+		}
+		hoodXpbdEnabled = hoodXpbdRequested && hoodXpbdAvailable;
 		if (hoodSolver == HoodPostCvpr) {
 			const auto hierarchyInfo = hierarchy.require("info", 4, 6).as<uint32_t>();
 			if (hierarchyInfo[0] != hoodClothCount || hierarchyInfo[5] != 3) throw std::runtime_error("PostCVPR hierarchy dimensions are invalid");
@@ -394,6 +462,22 @@
 		}
 		hoodUploadVector(hoodBuffers.mlpTable, storage, table);
 		hoodUploadVector(hoodBuffers.normalizers, storage, model.normalizers);
+		if (hoodXpbdAvailable) {
+			uploadView(hoodBuffers.xpbdPairs, storage, xpbd.require("pairs", 8, hoodXpbdConstraintCount));
+			uploadView(hoodBuffers.xpbdTargetLength, storage, xpbd.require("target_len", 4, hoodXpbdConstraintCount));
+			uploadView(hoodBuffers.xpbdWeightSum, storage, xpbd.require("weight_sum", 4, hoodXpbdConstraintCount));
+			uploadView(hoodBuffers.xpbdKind, storage, xpbd.require("kind", 4, hoodXpbdConstraintCount));
+			const uint32_t slotCount = hoodClothCount * hoodXpbdSlotWidth;
+			uploadView(hoodBuffers.xpbdSlots, storage, xpbd.require("slots", 4, slotCount));
+			uploadView(hoodBuffers.xpbdSigns, storage, xpbd.require("signs", 4, slotCount));
+			uploadView(hoodBuffers.xpbdIncident, storage, xpbd.require("incident", 4, hoodClothCount));
+			uploadView(hoodBuffers.xpbdInverseMass, storage, xpbd.require("inverse_mass", 4, hoodClothCount));
+			// Baked for the per-vertex trust region in gnn-xpbd-v2.md section 7.1, which the first
+			// kernel does not implement. Uploaded anyway so enabling it later needs no re-bake.
+			uploadView(hoodBuffers.xpbdMinEdge, storage, xpbd.require("min_edge", 4, hoodClothCount));
+			hoodEmpty(hoodBuffers.xpbdLambda, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, slotCount * sizeof(float));
+			hoodEmpty(hoodBuffers.xpbdScratch, storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
+		}
 
 		hoodEmpty(hoodBuffers.characterPosition, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, hoodCharacterCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.characterNormal, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, hoodCharacterCount * sizeof(glm::vec4));
@@ -401,8 +485,11 @@
 		hoodEmpty(hoodBuffers.proxyNormal, storage, hoodProxyCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.proxyTarget, storage, hoodProxyCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.pinTarget, storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
-		hoodEmpty(hoodBuffers.clothPosition, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
-		hoodEmpty(hoodBuffers.clothPrevious, storage, hoodClothCount * sizeof(glm::vec4));
+		// The XPBD sweep ping-pongs into xpbdScratch, so clothPosition may need a copy back, and on
+		// the settle step the corrected position also has to replace clothPrevious. Both are
+		// transfers, hence the extra usage bits.
+		hoodEmpty(hoodBuffers.clothPosition, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, hoodClothCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.clothPrevious, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, hoodClothCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.effectivePosition, storage, hoodClothCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.acceleration, storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.toyHidden, storage, static_cast<VkDeviceSize>(hoodClothCount) * 4 * sizeof(glm::vec4));
@@ -460,6 +547,10 @@
 		// solver uses HoodFeatureParams or HoodPostFeatureParams.
 		hood.worldNearestLayout = hoodMakeLayout(storageTypes(6));
 		hood.worldReverseLayout = hoodMakeLayout(storageTypes(4));
+		// All fourteen XPBD bindings are storage buffers; its scalars are push constants so the
+		// per-iteration state (nothing) and the per-step state (timestep, compliance) do not need a
+		// per-frame uniform buffer.
+		if (hoodXpbdAvailable) hood.xpbdLayout = hoodMakeLayout(storageTypes(14));
 		hood.graphicsLayout = hoodMakeLayout({ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER });
 		hood.skinPipeline = hoodMakePipelineLayout(hood.skinLayout); hood.featuresPipeline = hoodMakePipelineLayout(hood.featuresLayout);
 		hood.encodePipeline = hoodMakePipelineLayout(hood.encodeLayout, 16); hood.edgePipeline = hoodMakePipelineLayout(hood.edgeLayout, hoodSolver == HoodPostCvpr ? 20u : 16u);
@@ -467,6 +558,7 @@
 		hood.toyPipeline = hoodMakePipelineLayout(hood.toyLayout);
 		hood.worldNearestPipeline = hoodMakePipelineLayout(hood.worldNearestLayout, 12);
 		hood.worldReversePipeline = hoodMakePipelineLayout(hood.worldReverseLayout, 4);
+		if (hoodXpbdAvailable) hood.xpbdPipeline = hoodMakePipelineLayout(hood.xpbdLayout, sizeof(HoodXpbdPush));
 		hood.graphicsPipeline = hoodMakePipelineLayout(hood.graphicsLayout);
 
 		for (uint32_t frame = 0; frame < maxConcurrentFrames; ++frame) {
@@ -552,6 +644,20 @@
 		hoodWriteSet(hood.worldReverseSet, {
 			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldReverseCloth},
 			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldReverseBegin},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldReverseCount} });
+		if (hoodXpbdAvailable) for (uint32_t ping = 0; ping < 2; ++ping) {
+			// ping 0 reads clothPosition and writes the scratch buffer; ping 1 is the reverse.
+			auto* read = ping == 0 ? &hoodBuffers.clothPosition : &hoodBuffers.xpbdScratch;
+			auto* write = ping == 0 ? &hoodBuffers.xpbdScratch : &hoodBuffers.clothPosition;
+			hood.xpbdSets[ping] = hoodAllocateSet(hood.xpbdLayout);
+			hoodWriteSet(hood.xpbdSets[ping], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdPairs},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdTargetLength},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdWeightSum},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdKind},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdSlots},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdSigns},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdIncident},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdInverseMass},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdLambda},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,read},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,write},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal} });
+		}
 		if (hoodSolver == HoodPostCvpr) hoodWriteSet(hood.encodeSet, {
 			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.weights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.mlpTable},
 			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeFeatures},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshFeatures},
@@ -626,6 +732,7 @@
 		computePipeline("hood_skin.comp.spv", hood.skinPipeline, hood.skin);
 		computePipeline("hood_world_nearest.comp.spv", hood.worldNearestPipeline, hood.worldNearest);
 		computePipeline("hood_world_reverse.comp.spv", hood.worldReversePipeline, hood.worldReverse);
+		if (hoodXpbdAvailable) computePipeline("hood_xpbd.comp.spv", hood.xpbdPipeline, hood.xpbd);
 		computePipeline(hoodSolver == HoodPostCvpr ? "postcvpr_features.comp.spv" : "hood_features.comp.spv", hood.featuresPipeline, hood.features);
 		// A student's latent width is its workgroup size, so each width is a separate SPIR-V
 		// module built by tools/compile_shaders.py. 64 keeps the unprefixed names it has always
@@ -761,7 +868,12 @@
 				hoodFirstStep ? 1u : 0u, 0, 0, hoodFirstStep ? 1.0f / 3.0f : 1.0f / 30.0f, hoodCollisionRadius, material0, material1, material2 };
 			std::memcpy(hood.featureUniforms[currentBuffer].mapped, &features, sizeof(features));
 		}
-		HoodIntegrateParams integrate{ hoodClothCount, hoodFirstStep ? 1u : 0u, hoodCollisionProjection ? 1u : 0u, hoodDecoderMlpId };
+		// When XPBD is on it owns contacts, and it resolves them inside every iteration rather than
+		// once at the end. Leaving integrate's own projection on as well would apply the half-plane
+		// twice per step and would not match the configuration gate G0 measured in Python, where
+		// `integrate()` does no projection at all.
+		HoodIntegrateParams integrate{ hoodClothCount, hoodFirstStep ? 1u : 0u,
+			(hoodCollisionProjection && !hoodXpbdEnabled) ? 1u : 0u, hoodDecoderMlpId };
 		std::memcpy(hood.integrateUniforms[currentBuffer].mapped, &integrate, sizeof(integrate));
 		HoodToyParams toy{ hoodClothCount, 1.0f / static_cast<float>(hoodFps), 8.0f, 30.0f, glm::vec4(0.0f, -9.8f, 0.0f, 0.0f) };
 		std::memcpy(hood.toyUniforms[currentBuffer].mapped, &toy, sizeof(toy));
@@ -778,6 +890,74 @@
 		VkMemoryBarrier barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
 			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
 		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+	}
+
+	// Jacobi XPBD after the network's integrate pass. See hood_xpbd.comp for why one dispatch per
+	// iteration is the whole point, and plans/gnn/gnn-xpbd-v2.md section 3.3 for what it buys.
+	void hoodRecordXpbd(VkCommandBuffer command)
+	{
+		if (!hoodXpbdEnabled || hoodXpbdIterations <= 0) return;
+		const uint32_t iterations = static_cast<uint32_t>(hoodXpbdIterations);
+
+		// lambda accumulates within a step and must start at zero in every step, exactly as
+		// real_scene/xpbd.py::project builds a fresh multiplier vector per call. This barrier also
+		// has to cover hood_integrate.comp's write to clothPosition, which the first iteration
+		// reads -- the fill is a transfer but the position the sweep starts from is a shader write.
+		vkCmdFillBuffer(command, hoodBuffers.xpbdLambda.buffer, 0, VK_WHOLE_SIZE, 0);
+		VkMemoryBarrier clearBarrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+			.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clearBarrier, 0, nullptr, 0, nullptr);
+
+		HoodXpbdPush push{};
+		push.clothCount = hoodClothCount;
+		push.constraintCount = hoodXpbdConstraintCount;
+		push.slotWidth = hoodXpbdSlotWidth;
+		push.flags = (hoodXpbdOneSided ? hoodXpbdOneSidedFlag : 0u)
+			| (hoodXpbdCollision ? hoodXpbdCollisionFlag : 0u);
+		// The reference pipeline's first step is a 1/3 s settle rather than a physical substep,
+		// and alpha = compliance / dt^2 has to use the same value make_graph did.
+		push.timestep = hoodFirstStep ? 1.0f / 3.0f : 1.0f / 30.0f;
+		push.relaxation = hoodXpbdRelaxation;
+		push.contactOffset = hoodXpbdContactOffset;
+		push.stretchCompliance = hoodXpbdStretchCompliance;
+		push.bendCompliance = hoodXpbdBendCompliance;
+
+		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.xpbd);
+		vkCmdPushConstants(command, hood.xpbdPipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+		for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
+			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.xpbdPipeline, 0, 1,
+				&hood.xpbdSets[iteration & 1u], 0, nullptr);
+			vkCmdDispatch(command, (hoodClothCount + 127) / 128, 1, 1);
+			hoodComputeBarrier(command);
+		}
+
+		// An odd iteration count leaves the result in the scratch buffer. k is 128 by default so
+		// this never fires, but silently rounding the count would be worse than one transfer.
+		if (iterations & 1u) {
+			VkBufferCopy copy{ .size = hoodClothCount * sizeof(glm::vec4) };
+			vkCmdCopyBuffer(command, hoodBuffers.xpbdScratch.buffer, hoodBuffers.clothPosition.buffer, 1, &copy);
+			hoodTransferThenComputeBarrier(command);
+		}
+
+		// hood_integrate.comp sets clothPrevious to the *uncorrected* prediction on the settle step
+		// (every later step gets `effective`, which XPBD does not touch). tools/gate_g0.py does the
+		// same through `previous = corrected if step == 0`, so the correction has to replace it here
+		// or step 1 builds its velocity from a position the solver already rejected.
+		if (hoodFirstStep) {
+			VkBufferCopy copy{ .size = hoodClothCount * sizeof(glm::vec4) };
+			vkCmdCopyBuffer(command, hoodBuffers.clothPosition.buffer, hoodBuffers.clothPrevious.buffer, 1, &copy);
+			hoodTransferThenComputeBarrier(command);
+		}
+	}
+
+	void hoodTransferThenComputeBarrier(VkCommandBuffer command)
+	{
+		VkMemoryBarrier barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT };
+		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 	}
 
 	void hoodRecord(VkCommandBuffer command)
@@ -912,7 +1092,9 @@
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.integrate);
 			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.integratePipeline, 0, 1, &hood.integrateSets[currentBuffer], 0, nullptr);
 			vkCmdDispatch(command, hoodClothCount, 1, 1);
-			vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], hoodTimestampCount - 1);
+			vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], hoodIntegrateTimestamp);
+			hoodRecordXpbd(command);
+			vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], hoodXpbdTimestamp);
 			}
 		} else {
 			for (uint32_t timestamp = 2; timestamp < hoodTimestampCount; ++timestamp)
@@ -942,8 +1124,9 @@
 			hoodTiming.edgeBlocks[block] = (values[7 + block * 2] - values[6 + block * 2]) * scale;
 			hoodTiming.nodeBlocks[block] = (values[8 + block * 2] - values[7 + block * 2]) * scale;
 		}
-		hoodTiming.integrate = (values[hoodTimestampCount - 1] - values[hoodTimestampCount - 2]) * scale;
-		hoodTiming.total = (values[hoodTimestampCount - 1] - values[0]) * scale;
+		hoodTiming.integrate = (values[hoodIntegrateTimestamp] - values[hoodIntegrateTimestamp - 1]) * scale;
+		hoodTiming.xpbd = (values[hoodXpbdTimestamp] - values[hoodIntegrateTimestamp]) * scale;
+		hoodTiming.total = (values[hoodXpbdTimestamp] - values[0]) * scale;
 		if (hoodStaticBenchmarkMode && hood.querySimulated[currentBuffer] && hoodStaticBenchmarkSamples.size() < hoodStaticBenchmarkTarget) {
 			if (hoodStaticBenchmarkDiscarded < hoodStaticBenchmarkWarmup) ++hoodStaticBenchmarkDiscarded;
 			else hoodStaticBenchmarkSamples.push_back(hoodTiming);
@@ -1007,6 +1190,11 @@
 				: (hoodSolver == HoodPostCvpr ? "hierarchical_processor_15_total" : "processor_15_total"),
 				[](const HoodTiming& value) { return value.processorTotal(); });
 			writeStage("decoder_integrate", [](const HoodTiming& value) { return value.integrate; });
+			// The number plans/gnn/gnn-xpbd-v2.md section 2.3 could only estimate by multiplying a
+			// 2.8 us dispatch price by the iteration count. Emitted whenever the stage exists so a
+			// run with XPBD off records a zero column rather than changing the schema.
+			if (hoodXpbdEnabled) writeStage("xpbd_" + std::to_string(hoodXpbdIterations) + "_jacobi",
+				[](const HoodTiming& value) { return value.xpbd; });
 		}
 		writeStage("total", [](const HoodTiming& value) { return value.total; });
 		std::cout << "Wrote " << hoodStaticBenchmarkOutput << " with " << hoodStaticBenchmarkSamples.size()
@@ -1111,7 +1299,9 @@
 		output << std::setprecision(10)
 			<< "{\n  \"scene\": \"" << (hoodGridScene ? "hood_grid64" : "ch10032") << "\","
 			<< "\n  \"solver\": \"" << (hoodSolver == HoodToy2L ? "toy2l" : (hoodSolver == HoodTinyStudent ? "tinyhood" + hoodStudentLabel() : (hoodSolver == HoodPostCvpr ? "postcvpr" : "fine15"))) << "\","
-			<< "\n  \"xpbd\": false,\n  \"collision_projection\": " << (hoodCollisionProjection ? "true" : "false") << ','
+			<< "\n  \"xpbd\": " << (hoodXpbdEnabled ? "true" : "false")
+			<< ",\n  \"xpbd_iterations\": " << (hoodXpbdEnabled ? hoodXpbdIterations : 0)
+			<< ",\n  \"collision_projection\": " << ((hoodCollisionProjection && !hoodXpbdEnabled) ? "true" : "false") << ','
 			<< "\n  \"completed_steps\": " << hoodCompletedSteps << ",\n  \"structure_preserved\": " << (structurePreserved ? "true" : "false") << ','
 			<< "\n  \"invalid_vertices\": " << invalidVertices << ",\n  \"active_world_edges\": " << activeWorldEdges << ','
 			<< "\n  \"maximum_displacement_m\": " << maximumDisplacement << ",\n  \"maximum_pinned_error_m\": " << maximumPinnedError << ','
@@ -1253,6 +1443,20 @@
 		if (!overlay->header(header.c_str())) return;
 		overlay->checkBox("Paused", &hoodPaused);
 		if (hoodSolver != HoodToy2L) overlay->checkBox("Body collision projection", &hoodCollisionProjection);
+		if (hoodXpbdAvailable && hoodSolver != HoodToy2L) {
+			overlay->checkBox("XPBD (Jacobi)", &hoodXpbdEnabled);
+			if (hoodXpbdEnabled) {
+				overlay->sliderInt("XPBD iterations", &hoodXpbdIterations, 0, 256);
+				overlay->checkBox("XPBD one-sided", &hoodXpbdOneSided);
+				overlay->checkBox("XPBD contacts", &hoodXpbdCollision);
+				// Gate G0 measured 0..1e-6 as completely inert: alpha = compliance / dt^2 is then
+				// seven orders below the inverse-mass sum. The usable range starts near 1e-2.
+				overlay->sliderFloat("XPBD stretch compliance", &hoodXpbdStretchCompliance, 0.0f, 0.1f);
+				overlay->sliderFloat("XPBD bend compliance", &hoodXpbdBendCompliance, 0.0f, 0.1f);
+				overlay->text("%u constraints (%u stretch), %u slots/vertex",
+					hoodXpbdConstraintCount, hoodXpbdStretchCount, hoodXpbdSlotWidth);
+			}
+		}
 		if (overlay->button("Reset")) hoodRequestReset = true;
 		overlay->text(hoodFrameCount == 1 ? "Pose: static %s" : "Native animation: %s", hoodMotion.c_str());
 		if (hoodFrameCount > 1) overlay->text("Time: %.2f / %.2f s (%u/%u)", hoodFrame / float(hoodFps), (hoodFrameCount - 1) / float(hoodFps), hoodFrame, hoodFrameCount - 1);
@@ -1261,7 +1465,8 @@
 		if (hoodSolver == HoodPostCvpr) overlay->text("Hierarchy: c0 %u, c1 %u directed edges", hoodCoarseEdgeCounts[0], hoodCoarseEdgeCounts[1]);
 		overlay->text("%s: %u vertices", hoodGridScene ? "Sphere proxy" : "Collision proxy", hoodProxyCount);
 		overlay->text("Simulation steps: %u", hoodCompletedSteps);
-		if (hoodGridScene) overlay->text("Constraints: top edge pins only; XPBD off");
+		if (hoodGridScene) overlay->text("Constraints: top edge pins only");
+		if (!hoodXpbdAvailable) overlay->text("XPBD: no .vxpbd asset baked");
 		if (hoodSolver == HoodToy2L) {
 			overlay->text("Toy model: 10 -> 16 -> 3, no XPBD/collision");
 			overlay->text("GPU skin %.3f, layer 0 %.3f ms", hoodTiming.skin, hoodTiming.features);
@@ -1271,6 +1476,9 @@
 			overlay->text("GPU encoders %.3f, %u blocks %.3f ms", hoodTiming.encodeTotal(), hoodActiveProcessorBlocks, hoodTiming.processorTotal());
 			overlay->text("Block 0 edge/node %.3f / %.3f ms", hoodTiming.edgeBlocks[0], hoodTiming.nodeBlocks[0]);
 			overlay->text("GPU integrate %.3f, total %.3f ms", hoodTiming.integrate, hoodTiming.total);
+			if (hoodXpbdEnabled && hoodXpbdIterations > 0)
+				overlay->text("GPU XPBD %.3f ms (%d dispatches, %.4f ms each)", hoodTiming.xpbd,
+					hoodXpbdIterations, hoodTiming.xpbd / static_cast<double>(hoodXpbdIterations));
 		}
 		overlay->text("R: reset, P: pause");
 	}
@@ -1298,6 +1506,11 @@
 			if (hoodBuffers.coarseFeatures[level].buffer != VK_NULL_HANDLE) hoodBuffers.coarseFeatures[level].destroy();
 		}
 		HOOD_DESTROY_BUFFER(weights); HOOD_DESTROY_BUFFER(mlpTable); HOOD_DESTROY_BUFFER(normalizers); HOOD_DESTROY_BUFFER(toyWeights); HOOD_DESTROY_BUFFER(toyHidden);
+		// Only created when a .vxpbd asset was present, so these have to be guarded.
+		for (auto* buffer : { &hoodBuffers.xpbdPairs, &hoodBuffers.xpbdTargetLength, &hoodBuffers.xpbdWeightSum,
+				&hoodBuffers.xpbdKind, &hoodBuffers.xpbdSlots, &hoodBuffers.xpbdSigns, &hoodBuffers.xpbdIncident,
+				&hoodBuffers.xpbdInverseMass, &hoodBuffers.xpbdMinEdge, &hoodBuffers.xpbdLambda, &hoodBuffers.xpbdScratch })
+			if (buffer->buffer != VK_NULL_HANDLE) buffer->destroy();
 		for (uint32_t i=0;i<2;++i) {
 			hoodBuffers.nodeLatent[i].destroy(); hoodBuffers.meshLatent[i].destroy(); hoodBuffers.worldDirectLatent[i].destroy(); hoodBuffers.worldInverseLatent[i].destroy();
 			for (uint32_t level = 0; level < 2; ++level)
@@ -1308,5 +1521,8 @@
 		for (auto pipeline : {hood.skin,hood.features,hood.encode,hood.edge,hood.node,hood.integrate,hood.toyLayer0,hood.toyLayer1,hood.worldNearest,hood.worldReverse,hood.sky,hood.character,hood.cloth}) vkDestroyPipeline(device,pipeline,nullptr);
 		for (auto layout : {hood.skinPipeline,hood.featuresPipeline,hood.encodePipeline,hood.edgePipeline,hood.nodePipeline,hood.integratePipeline,hood.toyPipeline,hood.worldNearestPipeline,hood.worldReversePipeline,hood.graphicsPipeline}) vkDestroyPipelineLayout(device,layout,nullptr);
 		for (auto layout : {hood.skinLayout,hood.featuresLayout,hood.encodeLayout,hood.edgeLayout,hood.nodeLayout,hood.integrateLayout,hood.toyLayout,hood.worldNearestLayout,hood.worldReverseLayout,hood.graphicsLayout}) vkDestroyDescriptorSetLayout(device,layout,nullptr);
+		if (hood.xpbd != VK_NULL_HANDLE) vkDestroyPipeline(device, hood.xpbd, nullptr);
+		if (hood.xpbdPipeline != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, hood.xpbdPipeline, nullptr);
+		if (hood.xpbdLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, hood.xpbdLayout, nullptr);
 		vkDestroyDescriptorPool(device,hood.pool,nullptr);
 	}

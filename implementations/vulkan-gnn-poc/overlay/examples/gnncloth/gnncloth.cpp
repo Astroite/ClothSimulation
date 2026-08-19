@@ -238,6 +238,16 @@ public:
 		hoodVerifyMode = hasArgument("--hood-verify");
 		if (hoodVerifyMode && hoodSolver == HoodToy2L) throw std::runtime_error("--hood-verify requires a HOOD-format golden rollout");
 		hoodCollisionProjection = hasArgument("--hood-collision-projection");
+		// Unstructured Jacobi XPBD after the network. Needs a .vxpbd asset from
+		// tools/bake_xpbd_constraints.py; without one the flag is inert and the UI says so.
+		hoodXpbdRequested = hasArgument("--hood-xpbd");
+		hoodXpbdPath = argumentValue("--hood-xpbd-asset", "");
+		hoodXpbdIterations = static_cast<int32_t>(std::strtol(argumentValue("--hood-xpbd-iterations", "128").c_str(), nullptr, 10));
+		hoodXpbdOneSided = !hasArgument("--hood-xpbd-two-sided");
+		hoodXpbdCollision = !hasArgument("--hood-xpbd-no-contacts");
+		hoodXpbdStretchCompliance = std::strtof(argumentValue("--hood-xpbd-stretch-compliance", "0").c_str(), nullptr);
+		hoodXpbdBendCompliance = std::strtof(argumentValue("--hood-xpbd-bend-compliance", "0").c_str(), nullptr);
+		if (hoodXpbdIterations < 0) throw std::runtime_error("--hood-xpbd-iterations must not be negative");
 		hoodGoldenPath = argumentValue("--hood-golden", "");
 		hoodVerifyOutput = argumentValue("--hood-verify-output", "hood_verify.json");
 		hoodStaticBenchmarkOutput = argumentValue("--hood-benchmark-output", hoodSolver == HoodToy2L ? "hood_static_toy2l_timing.csv"

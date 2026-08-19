@@ -1,0 +1,19 @@
+{
+  "bend": 3735,
+  "calibration": "teacher",
+  "calibration_scene": "hml_001962",
+  "constraints": 7682,
+  "dead_constraints": 72,
+  "file_bytes": 368948,
+  "live_slots": 15364,
+  "output": "E:\\Projects\\cloth-simulation\\implementations\\vulkan-gnn-poc\\.work\\real_scene\\hml_001962\\hml_001962.vxpbd",
+  "payload_sha256": "ac8abff4c5c187d39a7ad17f6499781ad8e322e9863ca45151865087106e9542",
+  "pinned_vertices": 72,
+  "scene": "hml_001962",
+  "slot_width": 18,
+  "stretch": 3947,
+  "suspect_constraints": 29,
+  "target_length_p50": 0.030109,
+  "target_length_p95": 0.047198,
+  "vertices": 1377
+}

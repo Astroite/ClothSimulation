@@ -1,0 +1,19 @@
+{
+  "bend": 3735,
+  "calibration": "teacher",
+  "calibration_scene": "ch10032_sprint",
+  "constraints": 7682,
+  "dead_constraints": 72,
+  "file_bytes": 368948,
+  "live_slots": 15364,
+  "output": "E:\\Projects\\cloth-simulation\\implementations\\vulkan-gnn-poc\\.work\\real_scene\\ch10032_sprint\\ch10032_sprint.vxpbd",
+  "payload_sha256": "263a1ba1ce03732998f6b0177076e96412008ad62caa60d6de93fcb52fd57b0a",
+  "pinned_vertices": 72,
+  "scene": "ch10032_sprint",
+  "slot_width": 18,
+  "stretch": 3947,
+  "suspect_constraints": 262,
+  "target_length_p50": 0.030688,
+  "target_length_p95": 0.050685,
+  "vertices": 1377
+}

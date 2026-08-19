@@ -5,6 +5,14 @@
 > **G0 通过 —— 混合架构在四个场景上都胜过 GNN-only 与 XPBD-only。** 本文已按实测修订：
 > §2.3 的估计已被证实但结论反转、§4 的 S1/S2a 被删除、§5.1 的方案 C 方向被推翻。
 > 修订明细见 §0.1。
+>
+> **第二轮（2026-08-19，同日）：S7a 与 S2' 已完成**，结论见
+> [`GATE_G0_RESULTS.md` §8–11](../../implementations/vulkan-gnn-poc/results/GATE_G0_RESULTS.md)
+> 与 [`XPBD_VULKAN_RESULTS.md`](../../implementations/vulkan-gnn-poc/results/XPBD_VULKAN_RESULTS.md)。
+> **三条被推翻：**（a）§2.3 的 0.36 ms 实测是 **1.21 ms**，因为 kernel 是 occupancy 受限而非
+> dispatch 受限；（b）§5.2「需要新增速度 pass」在这条路径上不成立；（c）§S7 的等预算交易作废。
+> **一条新结论：**闭环搜索出来的 r1 是最差的 XPBD 搭档 —— 选型目标必须换成带 XPBD 的分数。
+> 修订明细见 §0.2。
 
 本文替代 [`gnn-xpbd.md`](gnn-xpbd.md) 作为执行依据。v1 的物理推理基本正确，被替换的原因是它的
 工程前提和收支常数是按"一个已经有 GNN + XPBD 的通用工程"写的，与 `implementations/vulkan-gnn-poc`
@@ -44,7 +52,24 @@
 | §3.2 G0 判据"B ≤ A 则砍 GNN" | — | 2/4 场景触发，但结论不成立 | ❌ **判据本身有缺陷**，见 §3.3 |
 | — | — | **`cloth_rest` 不能作约束目标**（蒙皮 p95 1.89–2.03） | ➕ **新增必做项**，见 §1.4 |
 | — | — | one-sided 约束 + `teacher` 标定各值 0.1 分 | ➕ **新增默认配置**，见 §1.4 |
-| — | — | compliance 可用量级 ~1e-2，不是 1e-5～1e-6 | ➕ **修正量纲** |
+| — | — | compliance 可用量级 ~1e-2，不是 1e-5～1e-6 | ➕ **修正量纲**（第二轮再次更正为 ~15，见 §0.2） |
+
+---
+
+### 0.2 S7a / S2' 实测对本文的修订（第二轮）
+
+| 本文原条目 | 预测 | 实测 | 处置 |
+| --- | --- | --- | --- |
+| §2.3 Jacobi k=128 ≈ 0.36 ms（按 2.8 µs/dispatch 换算） | dispatch 受限 | **9.44 µs/迭代 → 1.208 ms**，且 `hood_grid64` 工作量 2.3× 却快 1.4× | ❌ **推翻**：是 **occupancy 受限**（11 workgroup / 34 SM）。见 §2.3 |
+| §S7 砍 5–6 个 block 买 k=128 | 汇率 5.6 block | k=128 = **18.7 个 block** | ❌ **交易作废**，见 §4 S7 |
+| §5.2 XPBD 后需要新增 finalize/速度 pass | 是新 pass | `clothPrevious = effective` 已等于 Python 的 `next_previous`；只有 settle 步要一次 buffer copy | ❌ **不成立**，见 §5.2 |
+| §5.1 `standard` 不读 inertial → 需要惯性缓冲？ | 未提 | `standard` 全程不引用 `inertial`，x̃ 不必上 GPU | ➕ **S2' 因此更小** |
+| §6.2 指标噪声 18%，由 `--repeats` 估计 | 进程内重复可估噪声 | **进程内重复严重低估**：`grid64` A 支进程内 0.000 / 跨进程 **0.600** | ❌ **估计器无效**，见 §8.2 |
+| §1.4 `teacher` 标定可能要按动作烘 | 未知 | **可迁移**，且用最动态动作标定更好（tpose 用 sprint 的标定反而好 0.025） | ➕ **资产按服装烘一份** |
+| §6 训练选型目标 | 裸闭环分 | 搜索过的 r1 是**最差**的 XPBD 搭档，tpose 上次序整个反转 | ➕ **改为带 XPBD 的分数**，见 §6.1 |
+| §1.4 compliance ~1e-2 | 1e-2 起效 | **1e-1 仍完全无效**；α̃ 追平 weight_sum 需 compliance ≈ **15** | ❌ **再错 3 个数量级**，正确区间 [1, 100] |
+| — | — | 距离约束管不住三角形塌成零面积（`sprint` 退化率恶化 5.4×） | ➕ **新增缺口：面积/二面角约束** |
+| — | — | one-sided 与接触投影的不动点正好落在自己的分支边界上，CPU/GPU 偶尔取不同侧 | ➕ **对拍误差 1.68e-3 的机制，非缺陷** |
 
 ---
 
@@ -63,6 +88,7 @@
 
 蒸馏模型路径无 XPBD 有明确证据：`hood_runtime.inl:1114` 的 debug dump 常量写死
 `"xpbd": false`，UI 文本是 "XPBD off"（`hood_runtime.inl:1264-1266`）。
+（**S2' 已改**：那个字面量现在报告真实状态，UI 也改成可切换。）
 
 **所以"复用现有 XPBD"是不成立的。** 现有 XPBD 的每一处都绑定在 grid 上：
 
@@ -85,8 +111,9 @@
 - **GPU 侧 CSR 构建与确定性归约的成例**：`hood_world_reverse.comp` 每步在 GPU 上转置
   cloth→proxy 映射，且刻意做成 bit-identical；`hood_world_nearest.comp` 是 128 lane 组内归约。
   自碰撞的空间哈希、以及 fallback 需要的 active list，都可以照这两个的模式写；
-- **通用分段资产格式**：`.vhood` / `.vclth` 是带目录的分段容器（`real_scene_format.h`），加一个
-  `xpbd_constraints` / `xpbd_colors` 段不动格式、不破坏 hash 校验。
+- **通用分段资产格式**：`.vhood` / `.vclth` 是带目录的分段容器（`real_scene_format.h`）。
+  实际落地时选了**独立的 `.vxpbd` 文件**而不是加段 —— 加段会改 `.vcloth2` 的 payload SHA-256，
+  而现有全部 golden 都钉在那个值上；`loadSectioned` 本身通用，所以新文件零格式改动。
 
 ### 1.3 缺的东西（必须新建）
 
@@ -95,7 +122,7 @@
 | bake 期边着色 | 小 | 贪心边着色，~50 行 Python，进 baker |
 | 二面角/2-hop 弯曲约束对 | 小 | 由三角形 CSR 生成 |
 | lambda 缓冲 + 每步清零 | 极小 | 照 `gnncloth.cpp:949` 的 `vkCmdFillBuffer` |
-| **finalize / 速度 pass** | 中 | 路径上不存在等价物，见 §5.2 |
+| ~~**finalize / 速度 pass**~~ | ~~中~~ | ❌ **实测不需要**：`clothPrevious = effective` 已经对齐 Python，只有 settle 步要一次 buffer copy。见 §5.2 |
 | 非结构化 XPBD kernel | 中 | 结构可照 `gnn_constraints.comp`，索引与质量改为查表 |
 | **Body SDF 及其梯度** | **大** | 不存在。当前只有点代理 + 最近点 |
 | **Swept / CCD** | **大** | 不存在 |
@@ -124,7 +151,7 @@
 | 约束目标 | **`teacher`** = teacher rollout 稳态边长中位数 | 优于 `bind` 0.10 分。bake 期可得，非运行期信息 |
 | 拉伸方向 | **one-sided**（只抗拉伸，不抗压缩） | 优于双向 0.11 分。布料该起皱而不是被撑开 |
 | sweep | **jacobi**（无色） | 见 §2.3 |
-| compliance | 需在 **~1e-2** 附近扫 | `α̃ = c/Δt²`，0～1e-6 比逆质量和小 7 个数量级，完全无效 |
+| compliance | **0（刚性）**；可用区间在 **[1, 100]**，中心约 15 | 实测 0～1e-1 全部完全无效。`α̃ = c/Δt² = c×900` 要追平 `weight_sum` 中位数 13816 需 c ≈ 15。**§0.2 更正了这里原来写的 ~1e-2** |
 
 这也意味着 **bake 管线要多一个段**：per-edge 标定目标长度。它替代了原 S2a 里的着色段。
 
@@ -202,8 +229,18 @@ Jacobi 每迭代收敛更差（k=32 时 0.775 对 coloured 的 0.465），但 **
 要 coloured k=32 的 0.465 需要 2.54 ms，是 GNN 自身成本的 2.7 倍 ≈ 25 个 GNN block，不是
 合理选择。**所以 S1（修 dispatch 结构）与 S2a（bake 期着色）都从计划中删除。**
 
-> ms 仍是用 dispatch 单价换算的**估计**。Python 计时无意义（teacher 与学生同为 16 ms/step）。
-> 真实数字仍需在 Vulkan 上测 —— 这是现在剩下的主要未知量。
+> ~~ms 仍是用 dispatch 单价换算的**估计**。Python 计时无意义（teacher 与学生同为 16 ms/step）。
+> 真实数字仍需在 Vulkan 上测 —— 这是现在剩下的主要未知量。~~
+>
+> ✅ **已实测（`xpbd_timing_k*.csv`）：每迭代 9.44 µs，k=128 = 1.208 ms —— 是上表估计的 3.4 倍。**
+> **上表整列 "XPBD 估计 ms" 因此全部偏低 3.4 倍**，但列与列之间的比例仍然成立，所以
+> "Jacobi 在等成本下胜过 coloured" 这个结论不变（coloured 的 dispatch 也要按同样的倍数放大，
+> 而且它的 kernel 更小、occupancy 更差）。
+>
+> **误差的来源不是换算算错了，是模型选错了**：那个换算假设 XPBD 是 dispatch 受限的。
+> 9.44 µs 远高于 2.8 µs 的单价，而 `hood_grid64` 用 2.31 倍的 slot 工作量跑出 1.40 倍的速度，
+> 所以它既不是 dispatch 受限也不是带宽受限，**是 occupancy 受限** ——
+> CH10032 的 1377 个顶点只有 11 个 workgroup，卡上有 34 个 SM。详见 §4 的 **S8**。
 
 ### 2.4 约束目标必须标定（新增，实测后加入）
 
@@ -291,51 +328,93 @@ C 比 B 好 3.6 倍和 10.7 倍。
 ❌ S2a bake 期边着色                                删除 —— Jacobi 不需要着色
 ✅ S3  方案 A 与 C 对照                             已在 Python 完成，A 胜，见 §5.1
 ⏸ S4  Δλ head（方案 B）                            降级为存疑，见 §5.1
+✅ S7a 现成模型 × XPBD（零训练成本）                 完成，r1 是最差搭档，见 §6.1
+✅ S2' Vulkan 落地：非结构化 Jacobi XPBD             完成并对拍通过，但成本是估计的 3.4 倍
 
-── 剩下要做的 ──
-S7  等预算对比：6 block 学生 + Jacobi k≈128         ← 现在最值得做的单个实验
-S2' Vulkan 落地：非结构化 Jacobi XPBD + 标定段 + 速度 pass
+── 剩下要做的（按收益排序）──
+S8  kernel occupancy 改造：一 workgroup 一顶点        ← 现在收益最大的单个改动
+S9  面积或二面角约束                                 距离约束管不住三角形塌陷
+S7b 等预算训练（等 S8 定下真实汇率）                  选型目标改为带 XPBD 的分数
 S5  碰撞：swept / 交错 / 自碰撞（独立预算）
 S6  终态：学习型 V-Cycle
 ```
 
-### S7 等预算对比（新的第一优先）
+### S8 kernel occupancy 改造（新的第一优先）
 
-G0 的最佳配置比 A 贵约 39%（估计 1.28 对 0.92 ms）。§2.2 的等预算方案是砍 GNN 深度来买迭代：
-1 个 block = 0.0646 ms，砍 5–6 个 block 正好腾出 Jacobi k=128 的 0.36 ms。
+实测每迭代 9.44 µs，比 §2.3 按 dispatch 单价估的 2.8 µs 高 3.4 倍。诊断在
+`XPBD_VULKAN_RESULTS.md` §3：**不是 dispatch 受限也不是带宽受限，是 occupancy 受限。**
+判据很干净 —— `hood_grid64` 的 slot 工作量是 CH10032 的 **2.31 倍**，每迭代却**快 1.40 倍**：
 
-`train_student.py --blocks` 支持 1–15，所以这是一次训练 + 一次 `gate_g0.py` 复跑。
+| 场景 | 顶点 | 总 slot | workgroup | 每迭代 | 每 slot |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `ch10032` | 1,377 | 24,786 | **11** | 9.437 µs | 0.381 ns |
+| `hood_grid64` | 4,096 | 57,344 | **32** | 6.720 µs | **0.117 ns** |
 
-赔率已经量化：**0.36 ms 的 XPBD 在四场景把 score 从 0.74 / 0.24 / 2.53 / 1.88 买到
-0.40 / 0.22 / 0.61 / 0.16。** 问题变成"最后 6 个 block 值不值这些"。考虑到 12 block 的学生在
-`ch10032_sprint` 上本身只有 2.53，这笔交易看起来划算，但必须实测。
+CH10032 的 11 个 workgroup 在一块 34 SM 的卡上让 23 个 SM 全程空闲。
 
-**通过条件**：6 block + XPBD 在 ≥3 个场景上优于 12 block 无 XPBD，且总估计成本 ≤ 0.924 ms。
+**改法本仓库已有先例**：`hood_world_nearest.comp` 的注释就是这句 ——
+"The work was never the problem; the occupancy was" —— 它把"一线程一顶点串行扫 4096 proxy"
+改成"一个 128-lane workgroup 一个顶点"，并用组内确定性归约保持逐位一致。
+照同样的形状改 `hood_xpbd.comp`：一 workgroup 一顶点，lane 分摊 18 个 slot，组内确定性归约，
+workgroup 从 11 涨到 1377。
 
-### S2' Vulkan 落地（在 S7 通过之后）
+**预期**：`24786 × 0.117 ns ≈ 2.9 µs/迭代 → k=128 ≈ 0.37 ms`，正好落回 §2.3 原来的估计。
+这是外推而非实测，且每 lane 只摊 1–2 个 slot 时归约开销占比会上升，所以 0.37 ms 是乐观下界。
 
-比原 S2 显著缩小 —— 不需要着色，不需要 tile 优化：
+**通过条件**：k=128 实测 ≤ 0.5 ms，且 `verify_hood.ps1 -Xpbd` 仍然通过。
 
-**资产（baker）**
-- 由 `clothTriangles` 生成无向 stretch 边集（去重，CH10032 = 3947）与二面角对（3735，
-  注意 28 对重复的对顶点要去重）；
-- **per-edge 标定目标长度**（§1.4），由 teacher rollout 稳态中位数烘出；
-- per-vertex 局部最小边长（trust region 用，§7.1）；
-- per-vertex padded 约束表（`slots` / `signs`，宽度 = 最大关联约束数），这是 Jacobi 确定性
-  累加的结构，直接照 `real_scene/xpbd.py` 的 `_gather_tables`；
-- 写进 `.vhood` / `.vclth` 的新段，不动既有段布局。
+### S9 面积或二面角约束（新增）
 
-**runtime**
-- 一个 Jacobi kernel：per-vertex 一个线程，走 padded 表 gather，`incident` 平均。
-  1 dispatch/迭代；
-- **新增 finalize/速度 pass**：从修正后位置反推速度并写回 `clothPrevious`（§5.2）。
-  Python 侧因为 `advance()` 的结构免费得到这一点，Vulkan 侧不是；
-- one-sided 残差 + `teacher` 标定长度 + 最近代理半平面接触。
+`ch10032_sprint` 上 XPBD 把最大边长比从 55.4 压到 7.2、翻面从 25.2% 压到 13.0%，
+但**退化三角形（面积比 < 0.1）反而从 0.0035 恶化到 0.0191**，且 162 步内没有阻止结构崩坏。
+原因是结构性的：**三条边都保持长度，三角形仍可被压成零面积**，而本轮的 bend 约束是 2-hop
+距离形式，同样管不住。这是当前约束集的真实缺口，不是调参问题。
 
-**S2'c 交付即测（现在最重要的未知量）**
-- **实测每次 Jacobi 迭代的真实 ms**。§2.3 的 0.36 ms 是用 2.8 µs/dispatch 换算的估计；
-  一次 Jacobi 迭代是一个 7682 约束 + 1377 顶点的 kernel，可能不再是纯启动开销。
-- 若实测远高于估计，回头重估 S7 的赔率。
+### S7b 等预算训练（等 S8）
+
+原 S7 的赔率作废：k=128 实测 1.21 ms ≈ **18.7 个 GNN block**，比整个 12 block 的 processor 还多。
+降 k 也不是出路 —— G0 实测 jacobi k=32 在 `hml_001962` 上得 0.775，而 A 支是 0.72，**没有优势**；
+有意义的收益点是 k=128 的 0.532。所以 **S8 是让这笔交易重新划算的前提**。
+
+S8 之后汇率变成 0.37 ms ≈ 5.7 个 block，原来的"砍 5–6 个"重新成立，届时再训。
+
+**训练协议必须改一处（§6.1 实测支持）：选型目标是带 XPBD 的分数，不是裸闭环分。**
+
+### ✅ S2' Vulkan 落地（已完成 2026-08-19）
+
+实测报告：[`XPBD_VULKAN_RESULTS.md`](../../implementations/vulkan-gnn-poc/results/XPBD_VULKAN_RESULTS.md)。
+比原计划又小了两处（下面标 ❌ 的两条实测发现不需要），交付的是
+[`hood_xpbd.comp`](../../implementations/vulkan-gnn-poc/overlay/shaders/hlsl/gnncloth/hood_xpbd.comp)
++ [`tools/bake_xpbd_constraints.py`](../../implementations/vulkan-gnn-poc/tools/bake_xpbd_constraints.py)。
+
+**资产（baker）—— 全部完成，但落在独立的 `.vxpbd` 而非 `.vhood`/`.vclth` 的新段**
+- 理由：标定长度依赖 teacher rollout，而 `.vcloth2` 按服装共享；且给它加段会改 payload
+  SHA-256，现有全部 golden 都钉在那个值上。新文件不读就不影响任何东西。
+- 烘出：`pairs` / `target_len` / `weight_sum` / `kind` / `slots` / `signs` / `incident` /
+  `inverse_mass` / `min_edge`。CH10032 = 7682 约束（3947 + 3735）/ 1377 顶点 / slot 宽 18 / 360 KB。
+- **`weight_sum` 必须烘、不能在 kernel 里现加** —— 融合 sweep 的两个端点都要算同一个 Δλ，
+  `w_a + w_b` 与 `w_b + w_a` 不保证逐位相同，那两份 λ 就会分开。
+- padded `[V, K]` 表直接用，**没有转 CSR**：K=18 有 38% padding，但既然是 occupancy 受限，
+  那些 lane 不花钱，而扁平 stride 让 kernel 与 Python 参考可逐行对照。
+- compliance **不烘**（放 UBO，运行期可调）—— `α̃ = compliance/Δt²` 本来就要在运行期成形，
+  settle 步 Δt = 1/3、其余 1/30。
+
+**runtime —— 完成，两处比计划少**
+- 一个 Jacobi kernel，1 dispatch/迭代。**接触折进同一个 dispatch**（逐顶点、至多一个、
+  写入互不相同，不需要累加），所以真的是 1 而不是 2；
+- ❌ **不需要新增 finalize/速度 pass**（§5.2 那条不成立）：`clothPrevious = effective`
+  已经等于 Python 的 `next_previous`，只有 settle 步需要一次 `vkCmdCopyBuffer`；
+- ❌ **不需要惯性缓冲**：`standard` 模式全程不引用 `inertial`；
+- Jacobi 必须 ping-pong（`clothPosition` ↔ `xpbdScratch`，两个 descriptor set）——
+  就地更新会变成不确定的部分 Gauss-Seidel；
+- 开 XPBD 时强制关掉 `hood_integrate.comp` 自己那次半平面投影，否则一步投影两次，
+  也与 G0 测的配置不符。
+
+**S2'c 交付即测 —— 完成，结果是坏消息**
+- 每迭代 **9.44 µs**（k=8…256 平到小数点后两位），k=128 = **1.208 ms**，是 §2.3 估计的 **3.4 倍**；
+- 诊断为 **occupancy 受限**（`hood_grid64` 工作量 2.3× 却快 1.4×），修法见 **S8**；
+- 正确性：10 步对拍 max 1.68e-3 / mean 8.8e-7，Khronos 同步校验干净；k=0 与纯 GNN
+  golden 的误差是 `8.478760719e-06`，与既有记录完全相同。
 
 ### S5 碰撞（独立预算，不并入 S7 / S2' 的成本核算）
 
@@ -443,20 +522,31 @@ bug 来源**：第一版实现每迭代都减一次 `g`，把累积的约束修�
 这恰好是 v1/v2 §四那个 `confidence` 门控要解决的问题，**实测支持保留该设计** —— 它现在有了
 一个具体的、可测的用途，而不只是一个安全阀。
 
-### 5.2 速度必须从修正后位置反推 —— 这条在本路径上是新 pass
+### 5.2 ❌ 实测推翻：不需要新的速度 pass
 
-蒸馏路径没有显式速度状态：速度隐含在 `clothPrevious` 里，`hood_integrate.comp:47` 直接写
+~~蒸馏路径没有显式速度状态：速度隐含在 `clothPrevious` 里，`hood_integrate.comp:47` 直接写
 `clothPrevious = effective`。若 XPBD 修正后不重算 `clothPrevious`，修正量会以**伪速度**的形式
-漏进下一帧惯性预测 —— 这正是 v1 第七节"只反馈最终物理状态"要防的，但在这条路径上它需要
-一个**新的 pass**，不是配置项。
+漏进下一帧惯性预测 …… 在这条路径上它需要一个**新的 pass**，不是配置项。~~
 
-模式照 `gnn_finalize.comp:34`：
+**前提是对的（没有显式速度状态），推论错了。** 把两侧对齐看：
 
-```hlsl
-correctedVelocity = (correctedPosition - previousPosition) / max(deltaT, 1e-4);
-```
+| | Python（`tools/train_student.py:340`） | Vulkan（`hood_integrate.comp:47`） |
+| --- | --- | --- |
+| step 0 | `next_previous = predicted` | `clothPrevious = predicted` |
+| step > 0 | `next_previous = graph.effective_position` | `clothPrevious = effective` |
 
-同时 GNN 下一帧的历史输入必须来自 XPBD 之后的状态，不得保留 `x_gnn`。
+两边**已经一致**，而 `effective` 是 XPBD 之前的量、XPBD 不该动它。修正量并不会变成伪速度：
+下一步的 `effective_position` 是从**修正后的** `clothPosition` 蒙皮/pin 校正出来的，
+所以 `2·effective_next − effective_prev` 已经带上了修正 —— 传播是自动的。
+
+**只有 settle 步需要处理**：那一步 `clothPrevious` 被写成未修正的 `predicted`，而
+`tools/compare_student_stability.py:72-76` 的 `previous = corrected if step == 0` 要求修正后的值。
+runtime 用一次 `vkCmdCopyBuffer(clothPosition → clothPrevious)` 解决，
+**一次 transfer，不是一个新 kernel**。
+
+保留 v1 第七节"只反馈最终物理状态"的原则：GNN 下一帧的历史输入确实必须来自 XPBD 之后的状态，
+上面的结构已经保证了这一点。`gnn_finalize.comp:34` 那个显式速度的写法属于 grid 玩具路径，
+这条路径上没有对应物、也不需要。
 
 ---
 
@@ -477,7 +567,26 @@ v1 第六节"在 K_post 次迭代之后算 loss"原则上对，但忽略了 `res
 **方法修订**：Δλ head 的主要调参工具是**闭环指标搜索**，梯度训练只做初始化。穿过求解器的
 梯度路径更长更噪，没有理由指望它比上一轮表现更好。搜索必须在 ≥3 个场景上联合评分以抑制过拟合。
 
-### 6.2 指标噪声 18% —— G0 未被它挡住，但 S4 仍需先修确定性
+#### ➕ 实测新增：选型目标必须换成"带 XPBD 的分数"
+
+第二轮拿仓库现有三个 32×12 权重（覆盖"忠实 ↔ 稳定"这条轴，零训练成本）× XPBD 实测：
+
+| 场景 | shipped A | v3 A | r1 A | shipped C | v3 C | r1 C |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ch10032_tpose` | 0.2874 | 0.2813 | **0.2410** | 0.2120 | **0.1949** | 0.2186 |
+| `hood_grid64` | 1.3559 | **0.9125** | 2.3142 | **0.1447** | **0.1446** | 0.1590 |
+
+（tpose / grid64 各 3 次独立进程的均值；两处的三组区间都不重叠，见
+`GATE_G0_RESULTS.md` §9。另两个场景带 XPBD 后三者不可分辨。）
+
+**`ch10032_tpose` 上次序整个反转**：不接 XPBD 时搜索过的 r1 最好，接上 XPBD 后 r1 最差。
+机制正是 §6.1 那条 —— 搜索是靠**把学生变硬**买稳定性的（`under = 0.537`），而 XPBD 也加硬，
+两者叠加过了头。
+
+**所以 S7b 的训练/搜索目标必须是带 XPBD 的闭环分。** 按裸分选出来的权重，恰好是接上 XPBD
+之后最差的那一个 —— 这不是一个小偏置，而是选反了方向。
+
+### 6.2 指标噪声 —— 原来 18% 的估计方法本身是无效的
 
 同一份权重连续评 5 次：`0.3946 / 0.3636 / 0.4304 / 0.3866 / 0.4342`，极差 `0.0705`，
 相对 `0.40` 的分值是 **18%**。根因是 `index_add_` 在 CUDA 上对 float 没有确定性实现。
@@ -488,6 +597,24 @@ v1 第六节"在 K_post 次迭代之后算 loss"原则上对，但忽略了 `res
 3 次重复实测 A 支极差 **0.0141**、XPBD 各支 0.0000–0.0110，而效应量是 0.27–1.72 ——
 **大 13 倍以上**。XPBD 自身用 padded-gather 固定顺序累加，逐位可复现，不贡献噪声
 （`tests/test_xpbd.py::test_repeated_projection_is_bit_identical`，CPU 与 CUDA 各一次）。
+
+**❌ 第二轮更正：`--repeats`（进程内重复）不是这条管线的有效噪声估计器，它低估 10–30 倍。**
+同一配置跨独立进程重跑 4 次：
+
+| 场景 | 进程内 `--repeats` 极差 | **跨进程极差（A / C）** |
+| --- | ---: | ---: |
+| `hml_001962` | 0.0035 | 0.0025 / 0.0162 |
+| `ch10032_tpose` | 0.0000 | 0.0003 / 0.0048 |
+| `ch10032_sprint` | 0.0007 | **0.1208** / **0.1436** |
+| `hood_grid64` | 0.0000 | **0.5995** / 0.0002 |
+
+机制：同一进程内两次 rollout 背靠背执行，分配器状态与 launch 配置相同，`index_add_` 的原子
+累加顺序恰好复现；换进程才变。**`tools/refine_student.py` 的 `--eval-repeats` /
+`--confirm-repeats` 是同一个进程内平均，所以它记录的 "0.40 上 ±0.035" 也是低估** ——
+那一轮 500 轮搜索可能在比真实噪声更小的差异上做过取舍。这是 S7b 开工前要修的方法学问题。
+
+**另一个独立结果：XPBD 消掉 run-to-run 方差。** `hood_grid64` 上 A 支跨进程极差 0.5995、
+C 支 0.0002，相差 3000 倍 —— 学生发散时轨迹混沌，约束投影把它按回稳定吸引子。
 
 **S4 的前置条件仍然成立**：Δλ head 的收益预期本来就小（§5.1 实测它接近零），那才是落在噪声
 量级里的东西。若真要做 S4，先把 `real_scene/fine15.py:137,143` 的两个 `index_add_` 换成同样的
@@ -571,8 +698,11 @@ v1 这一条对，保留：基线要加入"更多子步、每子步一次 XPBD"�
 | --- | --- | --- | --- |
 | **XPBD 吃掉 GNN 的贡献** | G0 中 B ≈ C | 终止方案 | ✅ **未发生**：C ≪ min(A,B) 四场景 |
 | 非结构化色数过高 | 每迭代 > 0.09 ms | 改 Jacobi | ✅ **已解决**：色数 18，改用 Jacobi |
-| **Jacobi 迭代的真实 ms 远高于换算估计** | S2'c 实测 ≫ 0.36 ms / k=128 | 重估 S7 赔率；考虑降 k 或 fused kernel | ⚠️ **现在最大的未知量** |
-| 等预算下混合不划算 | S7 中 6 block + XPBD 不优于 12 block | 保留 12 block，把 XPBD 当纯稳定性保险而非省算力手段 | ⏸ 待测 |
+| **Jacobi 迭代的真实 ms 远高于换算估计** | S2'c 实测 ≫ 0.36 ms / k=128 | 重估 S7 赔率；考虑降 k 或 fused kernel | ❌ **已发生**：实测 1.208 ms（3.4×）。诊断为 occupancy 受限，处置是 **S8**，不是降 k |
+| 等预算下混合不划算 | S7 中 6 block + XPBD 不优于 12 block | 保留 12 block，把 XPBD 当纯稳定性保险而非省算力手段 | ⚠️ **当前确实不划算**（k=128 = 18.7 block）。S8 之后重估 |
+| **闭环搜索把学生变硬，与 XPBD 叠加过头** | 搜索过的权重带 XPBD 后反而更差 | 选型目标换成带 XPBD 的分数 | ❌ **已发生**：tpose 上 r1 次序反转，见 §6.1 |
+| **距离约束管不住三角形塌成零面积** | 退化三角形比例上升 | 加面积或二面角约束（**S9**） | ❌ **已发生**：`sprint` 上 0.0035 → 0.0191 |
+| 饱和投影的不动点落在自己的分支边界上 | CPU/GPU 对拍误差跳变 | 按机制判断，不要直接放宽阈值 | ⚠️ 10 步 max 1.68e-3 对阈值 2e-3，余量 16% |
 | Δλ head 的改进落在噪声里 | — | 不开工 | ⏸ **已基本证实**，见 §5.1 |
 | 闭环搜索过拟合单场景 | 换场景后分数崩 | ≥3 场景联合评分 | ⚠️ r1 已经中招；混合架构恰好缓解了它 |
 | **标定选错使混合反而变差** | 某场景上 C > A | 检查该场景蒙皮初态 edge ratio，换 `teacher` 标定 | ⚠️ **已发生过**（tpose + `bind`） |
@@ -622,8 +752,34 @@ v1 这一条对，保留：基线要加入"更多子步、每子步一次 XPBD"�
 | **A（GNN only）score（四场景）** | 0.736 / 0.241 / 2.530 / 1.877 | 同上 |
 | B（XPBD only）score（四场景） | 2.412 / 2.254 / 2.172 / 1.695 | 同上 |
 | 3 次重复的噪声底 | A 支 0.0141，XPBD 支 0.0000–0.0110 | `gate_g0_confirm.json` |
-| compliance 有效量级 | **~1e-2**（0～1e-6 完全无效） | `gate_g0_params.json` |
+| compliance 有效量级 | ~~**~1e-2**~~ → 见下表 | `gate_g0_params.json` |
 | Python rollout 成本 | 16 ms/step（teacher 与学生相同 → 计时无意义） | — |
+
+### S7a / S2' 新增的实测常数（2026-08-19 第二轮）
+
+| 量 | 值 | 来源 |
+| --- | ---: | --- |
+| **Jacobi XPBD 每迭代（CH10032，1377 顶点 / 11 workgroup）** | **9.44 µs** | `xpbd_timing_k*.csv` |
+| Jacobi XPBD 每迭代（grid64，4096 顶点 / 32 workgroup） | **6.72 µs** | `xpbd_timing_grid64_k128.csv` |
+| 每 slot 成本 CH10032 / grid64 | 0.381 / **0.117 ns**（3.3× 差） | 同上 —— **occupancy 受限的判据** |
+| k=8 / 32 / 128 / 256 的 XPBD min ms | 0.076 / 0.302 / **1.208** / 2.415 | `xpbd_timing_k*.csv` |
+| k=128 折算 GNN block | **18.7 个**（不是估计的 5.6 个） | — |
+| CH10032 slot 宽度 / 总 slot / padding | 18 / 24,786 / 38% | `xpbd_bake_*.json` |
+| grid64 约束 / slot 宽 / 总 slot | 27,783 / 14 / 57,344 | 同上 |
+| `.vxpbd` 大小（CH10032 / grid64） | 360 KB / 1,039 KB | 同上 |
+| 全 pin 的死约束（CH10032 / grid64） | 72 / 63 | 同上 |
+| **10 步对拍 max / mean abs error（k=128）** | **1.684e-3 / 8.85e-7**（阈值 2e-3 / —） | `xpbd128_verify.json` |
+| k=0 对纯 GNN golden 的误差 | `8.478760719e-06`（与既有记录逐位相同） | — |
+| 每步落在分支边界 1e-7 内的约束 / 接触 | ~90 / ~330 | 对拍误差的机制 |
+| **跨进程 score 极差（A / C）** `hml` | 0.0025 / 0.0162 | `GATE_G0_RESULTS.md` §8 |
+| 同上 `tpose` | 0.0003 / 0.0048 | 同上 |
+| 同上 `sprint` | **0.1208** / **0.1436** | 同上 |
+| 同上 `grid64` | **0.5995** / 0.0002 | 同上 —— XPBD 消掉 3000 倍方差 |
+| `weight_sum`（逆质量和，`hml`） | p5 9,092 / 中位 13,816 / p95 154,101 | — |
+| **compliance 使 α̃ 追平中位 weight_sum** | **≈ 15**（可用区间 [1, 100]） | `gate_g0_compliance.json` |
+| 标定跨动作迁移（tpose→sprint / sprint→tpose） | 0.5343（区间内）/ **0.1936（更好 0.025）** | `gate_g0_calib_*.json` |
+| 渲染器 300 步 `grid64` edge max（off / on） | **328.97 / 1.134** | `xpbd_stability_hood_grid64_*.json` |
+| 渲染器 `sprint` 退化三角形（off / on） | 0.0035 / **0.0191（恶化 5.4×）** | `xpbd_stability_ch10032_sprint_*.json` |
 
 ## 附录 B：v1 中被删除的条目及理由
 
@@ -641,5 +797,5 @@ v1 这一条对，保留：基线要加入"更多子步、每子步一次 XPBD"�
 2. **S2a bake 期边着色** —— Jacobi 不需要着色。色数 18 这个测量结果的用处，恰恰是证明不该着色。
 3. **方案 C 提为一等变体** —— §5.1 实测推翻。`g = M·a_gnn` 免费这一点仍然成立，只是不值得用。
 4. **§6.2 确定性改造作为硬前置** —— 效应量比噪声大 13 倍，G0 不需要。仍是 S4 的前置，但 S4 已降级。
-4. **"2~4 次 XPBD 是否能替代原本十几次迭代"** —— 蒸馏路径上不存在"原本十几次迭代"这个基线。
+5. **"2~4 次 XPBD 是否能替代原本十几次迭代"** —— 蒸馏路径上不存在"原本十几次迭代"这个基线。
    替代：G0 的三支对照。
