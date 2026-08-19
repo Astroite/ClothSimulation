@@ -1,0 +1,529 @@
+{
+  "collision": true,
+  "gravity": [
+    0.0,
+    -9.81,
+    0.0
+  ],
+  "relaxation": 1.0,
+  "scenes": {
+    "ch10032_sprint": {
+      "calibration": {
+        "teacher": {
+          "colours": 18,
+          "constraints": 7682,
+          "suspect_constraints": 262,
+          "target_length_p95": 0.05074
+        }
+      },
+      "configs": {
+        "A_gnn_only": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 1.5668723583221436,
+            "120": 7.795226573944092,
+            "30": 2.984961986541748,
+            "5": 1.4448938369750977,
+            "60": 4.856631278991699
+          },
+          "first_step_above_1.2": 1,
+          "first_step_above_1.5": 1,
+          "first_step_above_2.0": 20,
+          "first_step_above_5.0": 77,
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.41103730858303605,
+            "drift_rms_max": 0.8300589323043823,
+            "flip": 0.08712062227229277,
+            "over": 1.558308830857277,
+            "score": 2.5546246925679346,
+            "score_uncapped": 3.744183862178276,
+            "under": 0.0
+          },
+          "score_mean": 2.529683775710873,
+          "score_repeats": [
+            2.5546246925679346,
+            2.504742858853812
+          ],
+          "score_spread": 0.04988183371412269
+        },
+        "B_xpbd_k128_teacher_sc0_bc1e-05_onesided": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 3.010568618774414,
+            "120": 3.9560353755950928,
+            "30": 3.3480753898620605,
+            "5": 2.9154391288757324,
+            "60": 3.4828343391418457
+          },
+          "first_step_above_1.2": 1,
+          "first_step_above_1.5": 1,
+          "first_step_above_2.0": 1,
+          "first_step_above_5.0": ">120",
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.186711012898013,
+            "drift_rms_max": 0.2821885049343109,
+            "flip": 0.007791828674574693,
+            "over": 1.783247987429301,
+            "score": 2.1722536705744764,
+            "score_uncapped": 2.309363498569777,
+            "under": 0.0
+          },
+          "score_mean": 2.1722536705744764,
+          "score_repeats": [
+            2.1722536705744764,
+            2.1722536705744764
+          ],
+          "score_spread": 0.0
+        },
+        "C_hybrid_k128_standard_teacher_sc0_bc1e-05_onesided": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 1.4708565473556519,
+            "120": 1.6117486953735352,
+            "30": 2.1887619495391846,
+            "5": 1.2943428754806519,
+            "60": 2.9711380004882812
+          },
+          "first_step_above_1.2": 1,
+          "first_step_above_1.5": 13,
+          "first_step_above_2.0": 26,
+          "first_step_above_5.0": ">120",
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.12354385062741736,
+            "drift_rms_max": 0.2235420048236847,
+            "flip": 0.00663099829107523,
+            "over": 0.34493716557820636,
+            "score": 0.6061370819496611,
+            "score_uncapped": 0.6061370819496611,
+            "under": 0.003400874137878418
+          },
+          "score_mean": 0.6064854921928295,
+          "score_repeats": [
+            0.6061370819496611,
+            0.6068339024359981
+          ],
+          "score_spread": 0.0006968204863370131
+        }
+      },
+      "frames": 62,
+      "steps": 120,
+      "teacher": {
+        "completed_steps": 120,
+        "edge_p95_at": {
+          "10": 1.421307921409607,
+          "120": 1.5476529598236084,
+          "30": 1.5252716541290283,
+          "5": 1.2954984903335571,
+          "60": 1.5084296464920044
+        },
+        "first_step_above_1.2": 1,
+        "first_step_above_1.5": 1,
+        "first_step_above_2.0": ">120",
+        "first_step_above_5.0": ">120",
+        "score": {
+          "compared_steps": 120,
+          "drift_rms": 0.0,
+          "drift_rms_max": 0.0,
+          "flip": 0.0,
+          "over": 0.0,
+          "score": 0.0,
+          "score_uncapped": 0.0,
+          "under": 0.0
+        }
+      }
+    },
+    "ch10032_tpose": {
+      "calibration": {
+        "teacher": {
+          "colours": 18,
+          "constraints": 7682,
+          "suspect_constraints": 117,
+          "target_length_p95": 0.05567
+        }
+      },
+      "configs": {
+        "A_gnn_only": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 1.1839165687561035,
+            "120": 1.21965491771698,
+            "30": 1.2637357711791992,
+            "5": 1.2064099311828613,
+            "60": 1.3393315076828003
+          },
+          "first_step_above_1.2": 1,
+          "first_step_above_1.5": 1,
+          "first_step_above_2.0": ">120",
+          "first_step_above_5.0": ">120",
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.05904156833421439,
+            "drift_rms_max": 0.07485801726579666,
+            "flip": 0.0,
+            "over": 0.0003777007261912028,
+            "score": 0.24101874022744596,
+            "score_uncapped": 0.24101874022744596,
+            "under": 0.49023161133130394
+          },
+          "score_mean": 0.2411822550270396,
+          "score_repeats": [
+            0.24101874022744596,
+            0.24134576982663325
+          ],
+          "score_spread": 0.0003270295991872896
+        },
+        "B_xpbd_k128_teacher_sc0_bc1e-05_onesided": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 5.070321559906006,
+            "120": 4.846763610839844,
+            "30": 4.032031059265137,
+            "5": 2.214235544204712,
+            "60": 4.717337131500244
+          },
+          "first_step_above_1.2": 1,
+          "first_step_above_1.5": 2,
+          "first_step_above_2.0": 5,
+          "first_step_above_5.0": 10,
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.14993279968233159,
+            "drift_rms_max": 0.21283982694149017,
+            "flip": 0.012675096994886796,
+            "over": 1.928687463204066,
+            "score": 2.2539032565585027,
+            "score_uncapped": 3.318002686602995,
+            "under": 0.0
+          },
+          "score_mean": 2.2539032565585027,
+          "score_repeats": [
+            2.2539032565585027,
+            2.2539032565585027
+          ],
+          "score_spread": 0.0
+        },
+        "C_hybrid_k128_standard_teacher_sc0_bc1e-05_onesided": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 1.2684876918792725,
+            "120": 1.3375983238220215,
+            "30": 1.279327630996704,
+            "5": 1.3129408359527588,
+            "60": 1.3320707082748413
+          },
+          "first_step_above_1.2": 1,
+          "first_step_above_1.5": ">120",
+          "first_step_above_2.0": ">120",
+          "first_step_above_5.0": ">120",
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.05454846133943647,
+            "drift_rms_max": 0.06301207095384598,
+            "flip": 0.0,
+            "over": 2.5060772895812988e-05,
+            "score": 0.2174391224514693,
+            "score_uncapped": 0.2174391224514693,
+            "under": 0.4332685559988022
+          },
+          "score_mean": 0.21743458192019413,
+          "score_repeats": [
+            0.2174391224514693,
+            0.21743004138891897
+          ],
+          "score_spread": 9.081062550320151e-06
+        }
+      },
+      "frames": 1,
+      "steps": 120,
+      "teacher": {
+        "completed_steps": 120,
+        "edge_p95_at": {
+          "10": 1.4800987243652344,
+          "120": 1.7853816747665405,
+          "30": 1.827471375465393,
+          "5": 1.3239973783493042,
+          "60": 1.7999728918075562
+        },
+        "first_step_above_1.2": 1,
+        "first_step_above_1.5": 12,
+        "first_step_above_2.0": ">120",
+        "first_step_above_5.0": ">120",
+        "score": {
+          "compared_steps": 120,
+          "drift_rms": 0.0,
+          "drift_rms_max": 0.0,
+          "flip": 0.0,
+          "over": 0.0,
+          "score": 0.0,
+          "score_uncapped": 0.0,
+          "under": 0.0
+        }
+      }
+    },
+    "hml_001962": {
+      "calibration": {
+        "teacher": {
+          "colours": 18,
+          "constraints": 7682,
+          "suspect_constraints": 29,
+          "target_length_p95": 0.047201
+        }
+      },
+      "configs": {
+        "A_gnn_only": {
+          "completed_steps": 137,
+          "edge_p95_at": {
+            "10": 1.1404801607131958,
+            "120": 1.9492464065551758,
+            "30": 1.169696569442749,
+            "5": 1.1258069276809692,
+            "60": 1.5666313171386719
+          },
+          "first_step_above_1.2": 1,
+          "first_step_above_1.5": 42,
+          "first_step_above_2.0": 122,
+          "first_step_above_5.0": ">137",
+          "score": {
+            "compared_steps": 137,
+            "drift_rms": 0.11618277169492124,
+            "drift_rms_max": 0.2879270613193512,
+            "flip": 0.002715214855805801,
+            "over": 0.4996098958662827,
+            "score": 0.7374058689677367,
+            "score_uncapped": 0.7374058689677367,
+            "under": 0.0
+          },
+          "score_mean": 0.7356405532307053,
+          "score_repeats": [
+            0.7374058689677367,
+            0.7338752374936739
+          ],
+          "score_spread": 0.003530631474062851
+        },
+        "B_xpbd_k128_teacher_sc0_bc1e-05_onesided": {
+          "completed_steps": 137,
+          "edge_p95_at": {
+            "10": 5.050942897796631,
+            "120": 3.863499879837036,
+            "30": 3.1461358070373535,
+            "5": 2.5078890323638916,
+            "60": 3.4548985958099365
+          },
+          "first_step_above_1.2": 2,
+          "first_step_above_1.5": 3,
+          "first_step_above_2.0": 4,
+          "first_step_above_5.0": 10,
+          "score": {
+            "compared_steps": 137,
+            "drift_rms": 0.18714792095124722,
+            "drift_rms_max": 0.24814069271087646,
+            "flip": 0.04390354637297917,
+            "over": 1.950189749689868,
+            "score": 2.4122926843383206,
+            "score_uncapped": 3.4683601806589475,
+            "under": 0.0
+          },
+          "score_mean": 2.4122926843383206,
+          "score_repeats": [
+            2.4122926843383206,
+            2.4122926843383206
+          ],
+          "score_spread": 0.0
+        },
+        "C_hybrid_k128_standard_teacher_sc0_bc1e-05_onesided": {
+          "completed_steps": 137,
+          "edge_p95_at": {
+            "10": 1.1486122608184814,
+            "120": 1.363297939300537,
+            "30": 1.1888521909713745,
+            "5": 1.1424474716186523,
+            "60": 1.0877883434295654
+          },
+          "first_step_above_1.2": 31,
+          "first_step_above_1.5": 106,
+          "first_step_above_2.0": ">137",
+          "first_step_above_5.0": ">137",
+          "score": {
+            "compared_steps": 137,
+            "drift_rms": 0.10305878554001777,
+            "drift_rms_max": 0.15240032970905304,
+            "flip": 0.006523900096012402,
+            "over": 0.1893952101686575,
+            "score": 0.4085715510882437,
+            "score_uncapped": 0.4085715510882437,
+            "under": 4.387859010348355e-05
+          },
+          "score_mean": 0.40488302078859434,
+          "score_repeats": [
+            0.4085715510882437,
+            0.40119449048894495
+          ],
+          "score_spread": 0.007377060599298768
+        }
+      },
+      "frames": 137,
+      "steps": 137,
+      "teacher": {
+        "completed_steps": 137,
+        "edge_p95_at": {
+          "10": 1.0320284366607666,
+          "120": 1.0524711608886719,
+          "30": 1.0470491647720337,
+          "5": 1.0279039144515991,
+          "60": 1.057647943496704
+        },
+        "first_step_above_1.2": ">137",
+        "first_step_above_1.5": ">137",
+        "first_step_above_2.0": ">137",
+        "first_step_above_5.0": ">137",
+        "score": {
+          "compared_steps": 137,
+          "drift_rms": 0.0,
+          "drift_rms_max": 0.0,
+          "flip": 0.0,
+          "over": 0.0,
+          "score": 0.0,
+          "score_uncapped": 0.0,
+          "under": 0.0
+        }
+      }
+    },
+    "hood_grid64": {
+      "calibration": {
+        "teacher": {
+          "colours": 14,
+          "constraints": 27783,
+          "suspect_constraints": 0,
+          "target_length_p95": 0.027526
+        }
+      },
+      "configs": {
+        "A_gnn_only": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 1.159138798713684,
+            "120": 4.081033706665039,
+            "30": 2.0785880088806152,
+            "5": 1.0705043077468872,
+            "60": 1.7792274951934814
+          },
+          "first_step_above_1.2": 12,
+          "first_step_above_1.5": 16,
+          "first_step_above_2.0": 28,
+          "first_step_above_5.0": ">120",
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.21368199485586956,
+            "drift_rms_max": 0.7115817666053772,
+            "flip": 0.17721614208688455,
+            "over": 1.0364057103792825,
+            "score": 1.8182019842647907,
+            "score_uncapped": 2.0223625831786194,
+            "under": 0.0
+          },
+          "score_mean": 1.877037048365552,
+          "score_repeats": [
+            1.8182019842647907,
+            1.9358721124663134
+          ],
+          "score_spread": 0.11767012820152267
+        },
+        "B_xpbd_k128_teacher_sc0_bc1e-05_onesided": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 1.7206566333770752,
+            "120": 1.9343680143356323,
+            "30": 2.310749053955078,
+            "5": 1.2283543348312378,
+            "60": 2.214775323867798
+          },
+          "first_step_above_1.2": 5,
+          "first_step_above_1.5": 8,
+          "first_step_above_2.0": 13,
+          "first_step_above_5.0": ">120",
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.3277101666782983,
+            "drift_rms_max": 0.55487060546875,
+            "flip": 0.0733087715429671,
+            "over": 0.8929652124643326,
+            "score": 1.695048995162506,
+            "score_uncapped": 1.695048995162506,
+            "under": 0.00018362502257029216
+          },
+          "score_mean": 1.695048995162506,
+          "score_repeats": [
+            1.695048995162506,
+            1.695048995162506
+          ],
+          "score_spread": 0.0
+        },
+        "C_hybrid_k128_standard_teacher_sc0_bc1e-05_onesided": {
+          "completed_steps": 120,
+          "edge_p95_at": {
+            "10": 1.1017398834228516,
+            "120": 1.0697400569915771,
+            "30": 1.105652093887329,
+            "5": 1.0470447540283203,
+            "60": 1.0756925344467163
+          },
+          "first_step_above_1.2": ">120",
+          "first_step_above_1.5": ">120",
+          "first_step_above_2.0": ">120",
+          "first_step_above_5.0": ">120",
+          "score": {
+            "compared_steps": 120,
+            "drift_rms": 0.06864885213241602,
+            "drift_rms_max": 0.10749970376491547,
+            "flip": 6.0888556739276585e-05,
+            "over": 0.021631773312886557,
+            "score": 0.15906040971628196,
+            "score_uncapped": 0.15906040971628196,
+            "under": 3.662010033925374e-05
+          },
+          "score_mean": 0.15905605714336463,
+          "score_repeats": [
+            0.15906040971628196,
+            0.15905170457044732
+          ],
+          "score_spread": 8.705145834647654e-06
+        }
+      },
+      "frames": 1,
+      "steps": 120,
+      "teacher": {
+        "completed_steps": 120,
+        "edge_p95_at": {
+          "10": 1.0622261762619019,
+          "120": 1.0662610530853271,
+          "30": 1.0657485723495483,
+          "5": 1.0339689254760742,
+          "60": 1.0625721216201782
+        },
+        "first_step_above_1.2": ">120",
+        "first_step_above_1.5": ">120",
+        "first_step_above_2.0": ">120",
+        "first_step_above_5.0": ">120",
+        "score": {
+          "compared_steps": 120,
+          "drift_rms": 0.0,
+          "drift_rms_max": 0.0,
+          "flip": 0.0,
+          "over": 0.0,
+          "score": 0.0,
+          "score_uncapped": 0.0,
+          "under": 0.0
+        }
+      }
+    }
+  },
+  "score_weights": {
+    "drift": 2.0,
+    "over_cap": 2.0,
+    "stiff": 0.25
+  },
+  "student": "student32x12_r1.vhood"
+}

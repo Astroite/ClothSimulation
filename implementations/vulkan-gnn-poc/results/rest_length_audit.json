@@ -1,0 +1,113 @@
+{
+  "scenes": {
+    "ch10032_sprint": {
+      "bend_constraints": 3735,
+      "cloth_vertices": 1377,
+      "edges_above_1.5": 323,
+      "edges_above_3": 111,
+      "edges_above_6": 79,
+      "fraction_above_1.5": 0.08183,
+      "frames": 62,
+      "pinned_vertices": 72,
+      "rest_edge_length": {
+        "q0": 0.005061,
+        "q100": 0.061842,
+        "q5": 0.006952,
+        "q50": 0.029892,
+        "q95": 0.046113
+      },
+      "rest_is_usable_target": false,
+      "skinned_over_rest": {
+        "q0": 0.30396,
+        "q100": 16.312149,
+        "q5": 0.886941,
+        "q50": 1.003041,
+        "q95": 2.02513
+      },
+      "stretch_constraints": 3947,
+      "suspect_under_bind_calibration": 262
+    },
+    "ch10032_tpose": {
+      "bend_constraints": 3735,
+      "cloth_vertices": 1377,
+      "edges_above_1.5": 305,
+      "edges_above_3": 69,
+      "edges_above_6": 17,
+      "fraction_above_1.5": 0.07727,
+      "frames": 1,
+      "pinned_vertices": 72,
+      "rest_edge_length": {
+        "q0": 0.005061,
+        "q100": 0.061842,
+        "q5": 0.006952,
+        "q50": 0.029892,
+        "q95": 0.046113
+      },
+      "rest_is_usable_target": false,
+      "skinned_over_rest": {
+        "q0": 0.271248,
+        "q100": 12.111816,
+        "q5": 0.874526,
+        "q50": 1.000002,
+        "q95": 1.89
+      },
+      "stretch_constraints": 3947,
+      "suspect_under_bind_calibration": 117
+    },
+    "hml_001962": {
+      "bend_constraints": 3735,
+      "cloth_vertices": 1377,
+      "edges_above_1.5": 86,
+      "edges_above_3": 27,
+      "edges_above_6": 0,
+      "fraction_above_1.5": 0.02179,
+      "frames": 137,
+      "pinned_vertices": 72,
+      "rest_edge_length": {
+        "q0": 0.005061,
+        "q100": 0.061842,
+        "q5": 0.006952,
+        "q50": 0.029892,
+        "q95": 0.046113
+      },
+      "rest_is_usable_target": false,
+      "skinned_over_rest": {
+        "q0": 0.353319,
+        "q100": 5.268515,
+        "q5": 0.946236,
+        "q50": 1.0,
+        "q95": 1.081026
+      },
+      "stretch_constraints": 3947,
+      "suspect_under_bind_calibration": 29
+    },
+    "hood_grid64": {
+      "bend_constraints": 11781,
+      "cloth_vertices": 4096,
+      "edges_above_1.5": 0,
+      "edges_above_3": 0,
+      "edges_above_6": 0,
+      "fraction_above_1.5": 0.0,
+      "frames": 1,
+      "pinned_vertices": 64,
+      "rest_edge_length": {
+        "q0": 0.019048,
+        "q100": 0.026937,
+        "q5": 0.019048,
+        "q50": 0.019048,
+        "q95": 0.026937
+      },
+      "rest_is_usable_target": true,
+      "skinned_over_rest": {
+        "q0": 1.0,
+        "q100": 1.0,
+        "q5": 1.0,
+        "q50": 1.0,
+        "q95": 1.0
+      },
+      "stretch_constraints": 16002,
+      "suspect_under_bind_calibration": 0
+    }
+  },
+  "suspect_above": 3.0
+}

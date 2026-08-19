@@ -49,7 +49,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def trace(predictor, builder, scene, steps, mean, std, reference=None) -> dict:
+def trace(predictor, builder, scene, steps, mean, std, reference=None, project=None) -> dict:
+    """Roll out `steps` closed-loop steps and record the per-step curves.
+
+    `project` is an optional `(position, graph, step) -> position` hook used by tools/gate_g0.py to
+    insert a constraint solve between the network's prediction and the next step's input. It has to
+    be applied here rather than afterwards because the corrected position is what feeds the next
+    graph -- that is the whole point of the hybrid, and it is also what stops an uncorrected
+    prediction from staying in the loop.
+    """
     position = scene.cloth_target(0)
     previous = position.clone()
     edge: list[float] = []
@@ -58,7 +66,14 @@ def trace(predictor, builder, scene, steps, mean, std, reference=None) -> dict:
     positions: list[torch.Tensor] = []
     with torch.no_grad():
         for step in range(steps):
-            position, previous, _, _ = advance(predictor, builder, scene, position, previous, step, mean, std)
+            position, previous, graph, _ = advance(predictor, builder, scene, position, previous, step, mean, std)
+            if project is not None:
+                corrected = project(position, graph, step)
+                # advance() carries the prediction itself forward as `previous` on the settle
+                # step, so the correction has to replace it there too or step 1 sees a velocity
+                # built from an uncorrected position.
+                previous = corrected if step == 0 else previous
+                position = corrected
             if not torch.isfinite(position).all():
                 edge.append(float("inf"))
                 break

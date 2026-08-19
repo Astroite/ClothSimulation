@@ -1,0 +1,82 @@
+{
+  "collision": true,
+  "gravity": [
+    0.0,
+    -9.81,
+    0.0
+  ],
+  "relaxation": 1.0,
+  "scenes": {
+    "ch10032_tpose": {
+      "calibration": {
+        "bind": {
+          "suspect_constraints": 117,
+          "target_length_p95": 0.066381
+        }
+      },
+      "configs": {
+        "A_gnn_only": {
+          "completed_steps": 360,
+          "edge_p95_at": {
+            "10": 1.1839181184768677,
+            "120": 1.2169485092163086,
+            "30": 1.261521816253662,
+            "5": 1.2064101696014404,
+            "60": 1.3419982194900513
+          },
+          "first_step_above_1.2": 1,
+          "first_step_above_1.5": 1,
+          "first_step_above_2.0": ">360",
+          "first_step_above_5.0": ">360",
+          "score": {
+            "compared_steps": 360,
+            "drift_rms": 0.06419733619162192,
+            "drift_rms_max": 0.08498591184616089,
+            "flip": 0.0,
+            "over": 0.00012589924865298802,
+            "score": 0.264584617342593,
+            "score_uncapped": 0.264584617342593,
+            "under": 0.5442561828427844
+          },
+          "score_mean": 0.264584617342593,
+          "score_repeats": [
+            0.264584617342593
+          ],
+          "score_spread": 0.0
+        }
+      },
+      "frames": 1,
+      "steps": 360,
+      "teacher": {
+        "completed_steps": 360,
+        "edge_p95_at": {
+          "10": 1.4800982475280762,
+          "120": 1.7870506048202515,
+          "30": 1.8274928331375122,
+          "5": 1.3239973783493042,
+          "60": 1.7999604940414429
+        },
+        "first_step_above_1.2": 1,
+        "first_step_above_1.5": 12,
+        "first_step_above_2.0": ">360",
+        "first_step_above_5.0": ">360",
+        "score": {
+          "compared_steps": 360,
+          "drift_rms": 0.0,
+          "drift_rms_max": 0.0,
+          "flip": 0.0,
+          "over": 0.0,
+          "score": 0.0,
+          "score_uncapped": 0.0,
+          "under": 0.0
+        }
+      }
+    }
+  },
+  "score_weights": {
+    "drift": 2.0,
+    "over_cap": 2.0,
+    "stiff": 0.25
+  },
+  "student": "student32x12_r1.vhood"
+}
