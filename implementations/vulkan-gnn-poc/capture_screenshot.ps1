@@ -10,7 +10,17 @@ param(
     [int]$SimulationSteps = 0,
     [ValidateRange(0, 30000)]
     [int]$WarmupMilliseconds = 2000,
-    [string]$AssetRoot = ''
+    [string]$AssetRoot = '',
+    # Without this the TinyHood default is tinyhood64x4.vhood, the first student, which diverges
+    # within four steps -- so every TinyHood screenshot taken so far was of the broken model.
+    [string]$HoodModel = '',
+    # Jacobi XPBD after the network. Needs a .vxpbd from tools/bake_xpbd_constraints.py.
+    [switch]$Xpbd,
+    [ValidateRange(0, 1024)]
+    [int]$XpbdIterations = 128,
+    [string]$XpbdAsset = '',
+    # Distinguishes otherwise-identical output names, e.g. -Suffix _xpbd128 next to a plain run.
+    [string]$Suffix = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +28,7 @@ $PocRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $UpstreamRoot = Join-Path $PocRoot '.work/Vulkan'
 $Executable = Join-Path $UpstreamRoot 'build-gnn/bin/gnncloth.exe'
 $OutputName = if ($Solver -eq 'PostCvpr' -and $Scene -eq 'HoodGrid64') { 'results/postcvpr_grid64.png' } elseif ($Solver -eq 'PostCvpr') { 'results/postcvpr_ch10032_tpose.png' } elseif ($Solver -eq 'TinyHood' -and $Scene -eq 'HoodGrid64') { 'results/tinyhood_grid64.png' } elseif ($Solver -eq 'TinyHood' -and $Motion -eq 'ch10032_tpose') { 'results/tinyhood_ch10032_tpose.png' } elseif ($Solver -eq 'TinyHood') { 'results/tinyhood_ch10032.png' } elseif ($Scene -eq 'HoodGrid64') { 'results/hood_grid64_fine15.png' } elseif ($Scene -eq 'CH10032' -and $Motion -eq 'ch10032_tpose' -and $Solver -eq 'Toy2L') { 'results/hood_ch10032_tpose_toy2l.png' } elseif ($Scene -eq 'CH10032' -and $Motion -eq 'ch10032_tpose') { 'results/hood_ch10032_tpose.png' } elseif ($Scene -eq 'CH10032') { 'results/hood_ch10032.png' } else { 'results/gnn_cloth.png' }
+if ($Suffix) { $OutputName = ($OutputName -replace '\.png$', '') + $Suffix + '.png' }
 $Output = Join-Path $PocRoot $OutputName
 $Arguments = @('-s', 'hlsl', '-vs', '-w', '1280', '-h', '720')
 if ($Scene -in @('CH10032', 'HoodGrid64')) {
@@ -30,9 +41,18 @@ if ($Scene -in @('CH10032', 'HoodGrid64')) {
     $Arguments += @(
         '--scene', ($IsHoodGrid ? 'hoodgrid' : 'ch10032'), '--motion', $Motion, '--solver', ($Solver -eq 'Toy2L' ? 'toy2l' : ($Solver -eq 'PostCvpr' ? 'postcvpr' : ($Solver -eq 'TinyHood' ? 'tinyhood' : 'fine15'))),
         '--asset-root', $AssetRoot,
-        '--hood-model', (Join-Path $PocRoot ($Solver -eq 'PostCvpr' ? '.work/hood_data/postcvpr.vhood' : ($Solver -eq 'TinyHood' ? '.work/hood_data/tinyhood64x4.vhood' : '.work/hood_data/fine15.vhood')))
+        '--hood-model', ($HoodModel ? [System.IO.Path]::GetFullPath($HoodModel)
+            : (Join-Path $PocRoot ($Solver -eq 'PostCvpr' ? '.work/hood_data/postcvpr.vhood' : ($Solver -eq 'TinyHood' ? '.work/hood_data/tinyhood64x4.vhood' : '.work/hood_data/fine15.vhood'))))
     )
     if ($SimulationSteps -gt 0) { $Arguments += @('--hood-pause-after', $SimulationSteps) }
+    if ($Xpbd) {
+        if (-not $XpbdAsset) { $XpbdAsset = Join-Path $AssetRoot "$Motion.vxpbd" }
+        $XpbdAsset = [System.IO.Path]::GetFullPath($XpbdAsset)
+        if (-not (Test-Path -LiteralPath $XpbdAsset -PathType Leaf)) {
+            throw "XPBD asset is missing: $XpbdAsset`nRun .\.venv\Scripts\python.exe -B toolsake_xpbd_constraints.py --scene $Motion first."
+        }
+        $Arguments += @('--hood-xpbd', '--hood-xpbd-iterations', $XpbdIterations, '--hood-xpbd-asset', $XpbdAsset)
+    }
 } else {
     $Arguments += @('--gnn-grid', $Grid)
 }

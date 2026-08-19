@@ -9,7 +9,8 @@
   - `xpbd/`：XPBD/PBD 出处与中文导读——**当前实现的物理实际依据**
 - `plans/`：技术方案与可行性分析
 - `implementations/`：算法实现、示例工程和实验代码
-  - `vulkan-gnn-poc/`：目前唯一的实质实现
+  - `vulkan-gnn-poc/`：目前唯一的实质实现。进展总览见
+    [`results/PROGRESS.md`](implementations/vulkan-gnn-poc/results/PROGRESS.md)
 - `notes/`、`tutorials/`、`assets/`：**尚未填充**，仅有占位 README
 
 当前内容重心明显偏向 `implementations/vulkan-gnn-poc/` 与其相关论文；上面标注
