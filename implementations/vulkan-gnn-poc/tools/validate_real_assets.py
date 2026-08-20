@@ -27,6 +27,43 @@ def finite(section) -> None:
         raise FormatError(f"section {section.name} contains NaN/Inf")
 
 
+MAXIMUM_ROOT_JERK_M = 0.25
+MAXIMUM_ROOT_STEP_M = 1.0
+
+
+def check_root_motion(roots: tuple[float, ...]) -> tuple[float, float]:
+    """Reject a skeleton that jump-cuts, and return `(max step, max jerk)` in m/frame and m/frame^2.
+
+    `root_pos` has no consumer in the solver -- it is derived from the same animation's own skin
+    matrices (`tools/bake_ch10032_scene.py`) -- so its value here is as a cheap sanity proxy for
+    those matrices: if the root bone teleports, the whole skeleton did, and the cloth would explode.
+    The renderer does read it, to keep the camera following the character
+    (`overlay/examples/gnncloth/hood_runtime.inl`, `camera.setTranslation(-root.x, ...)`), so a jump
+    cut here is also directly visible rather than merely a hygiene concern.
+
+    That makes the *discontinuity* the thing to test, and speed the wrong quantity to test it with,
+    because cloth only feels acceleration: a uniform translation at any constant velocity is inert.
+    An earlier form of this check thresholded the step at 0.25 m/frame and so rejected
+    `sprint_start` (0.325 m/frame = 9.7 m/s) and `sprint_start_180`, both of which ramp
+    monotonically from rest over five frames (0.006 -> 0.035 -> 0.079 -> 0.149 -> 0.275 -> 0.325)
+    -- a real sprint launch, not a jump cut. The CH10032 library's step distribution is bimodal for
+    an authoring reason and not a data fault: every other clip is animated in place (<= 0.15
+    m/frame) with world travel left to the game's movement component, while those two carry their
+    translation in the clip. Measured over all 33 baked clips the jerk margin is wide -- the worst
+    is `sprint_start` at 0.126 -- so the spike a teleport produces is not close to any real gait.
+    """
+    steps = [math.dist(roots[(frame - 1) * 3 : frame * 3], roots[frame * 3 : (frame + 1) * 3])
+             for frame in range(1, len(roots) // 3)]
+    maximum_step = max(steps, default=0.0)
+    maximum_jerk = max((abs(steps[index] - steps[index - 1]) for index in range(1, len(steps))),
+                       default=0.0)
+    if maximum_jerk > MAXIMUM_ROOT_JERK_M:
+        raise FormatError(f"root motion contains a discontinuity: {maximum_jerk:.6f} m/frame^2")
+    if maximum_step > MAXIMUM_ROOT_STEP_M:
+        raise FormatError(f"root motion exceeds any plausible gait: {maximum_step:.6f} m/frame")
+    return maximum_step, maximum_jerk
+
+
 def validate(asset_root: Path, motion: str) -> dict:
     character = load_sectioned(
         asset_root / "ch10032.vchar",
@@ -107,14 +144,7 @@ def validate(asset_root: Path, motion: str) -> dict:
         raise FormatError("animation declaration does not match the character")
     finite(animation.require("skin_matrices", count=frame_count * bone_count, stride=48))
     finite(animation.require("root_pos", count=frame_count, stride=12))
-    roots = unpack(animation.require("root_pos"), "f")
-    maximum_root_step = 0.0
-    for frame in range(1, frame_count):
-        previous = roots[(frame - 1) * 3 : frame * 3]
-        current = roots[frame * 3 : (frame + 1) * 3]
-        maximum_root_step = max(maximum_root_step, math.dist(previous, current))
-    if maximum_root_step > 0.25:
-        raise FormatError(f"root motion contains a discontinuity: {maximum_root_step:.6f} m/frame")
+    maximum_root_step, maximum_root_jerk = check_root_motion(unpack(animation.require("root_pos"), "f"))
 
     metadata = json.loads((asset_root / "scene.json").read_text(encoding="utf-8"))
     if metadata.get("character") != "CH10032" or metadata.get("motion") != motion:
@@ -134,6 +164,7 @@ def validate(asset_root: Path, motion: str) -> dict:
         "fps": fps,
         "pinned_vertices": sum(bool(value) for value in pin_mask),
         "max_root_step_m": maximum_root_step,
+        "max_root_jerk_m": maximum_root_jerk,
         "max_weight_sum_error": max(render_weight_error, proxy_weight_error, cloth_weight_error),
         "material_slots": material_count,
     }

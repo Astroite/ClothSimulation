@@ -21,6 +21,39 @@ from real_scene.formats import (  # noqa: E402
 from real_scene.fine15 import Fine15Graph  # noqa: E402
 from real_scene.tinyhood import TinyHood  # noqa: E402
 from tools.bake_hood_grid_scene import make_grid, make_uv_sphere  # noqa: E402
+from tools.validate_real_assets import check_root_motion  # noqa: E402
+
+
+class RootMotionGuardTests(unittest.TestCase):
+    """The guard has to separate a fast gait from a jump cut, which speed alone cannot do."""
+
+    @staticmethod
+    def _line(steps: list[float]) -> tuple[float, ...]:
+        position, roots = 0.0, [0.0, 0.0, 0.0]
+        for step in steps:
+            position += step
+            roots += [position, 0.0, 0.0]
+        return tuple(roots)
+
+    def test_a_smooth_sprint_launch_is_accepted(self) -> None:
+        # sprint_start's measured ramp, which the earlier step-thresholded guard rejected.
+        ramp = [0.0064, 0.0347, 0.0792, 0.1488, 0.2749, 0.3247, 0.3130, 0.3146, 0.3092]
+        step, jerk = check_root_motion(self._line(ramp))
+        self.assertAlmostEqual(step, 0.3247, places=4)
+        self.assertAlmostEqual(jerk, 0.1261, places=4)  # 0.2749 -> 0.3247, the ramp's steepest rung
+
+    def test_a_teleport_is_still_rejected(self) -> None:
+        # A single-frame jump cut inside an otherwise stationary clip: the step guard's real target.
+        with self.assertRaisesRegex(FormatError, "discontinuity"):
+            check_root_motion(self._line([0.01, 0.01, 2.0, 0.01, 0.01]))
+
+    def test_an_impossible_gait_is_rejected_even_when_smooth(self) -> None:
+        # Ramped gently enough to keep the jerk legal, so only the absolute ceiling can catch it.
+        with self.assertRaisesRegex(FormatError, "plausible gait"):
+            check_root_motion(self._line([0.2 * index for index in range(12)]))
+
+    def test_a_static_pose_has_no_motion_to_judge(self) -> None:
+        self.assertEqual(check_root_motion((0.0, 0.0, 0.0)), (0.0, 0.0))
 
 
 class RealFormatTests(unittest.TestCase):
