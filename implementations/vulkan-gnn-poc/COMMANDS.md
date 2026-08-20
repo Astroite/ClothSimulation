@@ -196,6 +196,97 @@ skirt 档的帧数（262 / 346 / 202 / 189 / 202）都远长于既有的 `ch1003
 
 键位：`G` 切换求解器，`R` 重置，`P` 暂停/继续。网格规模在启动时确定，无法在交互中更改。
 
+### 3.1 A/B/C 三方同屏对照
+
+同一套骨骼动画同时驱动三份布料并排显示 —— **A 纯网络（蓝）/ B 纯约束（橙）/ C 混合（绿）**，
+动画与播放速度可运行时切换。它回答的是标量指标答不了的问题：`edge_p95` 说不出 12.3 是裙摆炸开、
+几个三角形拉长还是整体穿进腿里，而这三种情况的工程含义完全不同。
+
+```powershell
+.\run.ps1 -Scene CH10032 -Motion sprint_start -Solver TinyHood `
+    -HoodModel .work\hood_data\student32x12_r1.vhood -Compare
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `-Compare` | 关 | 隐含 `-Xpbd`；与 `-Solver Toy`/`Toy2L`/`PostCvpr` 互斥 |
+| `-XpbdIterations` | `128` | C 支的 sweep 次数 |
+| `-XpbdIterationsB` | `228` | **B 支单独的次数 —— 等 GPU 预算而非等迭代数** |
+| `-FrameStep` | `1` | 播放速度 1–4×，即 `--frame-scales` 的交互版 |
+| `-CompareSpacing` | `1.2` | 三份之间的间距（米） |
+| `-HoldLastFrame` | 关 | 片段播完后**钳在末帧**而不是循环 |
+
+overlay 里可以逐支勾掉、拖间距/相机距离/B 迭代数、从下拉菜单换动画（**列出 `.work/real_scene/`
+下所有该角色的动画**，不重启进程）、拖播放速度、切换末帧钳住。
+
+> **`-HoldLastFrame` 是评估恢复力的必需项。** 默认循环播放对单支演示更顺，但它藏掉了对照里
+> 信息量最大的一半：C 在难片段上的超冲会在动画停下后完全松回（`sprint_start` 第 60 → 90 步是
+> 10.364 → 1.219），而 A 不会 —— **循环播放的片段永远不会停。** 钳住末帧同时也让渲染器与
+> `tools/recovery_probe.py` 同口径（后者用 `min(frame_of(step), frame_count - 1)`）。
+
+> **`-XpbdIterationsB` 为什么不是 128。** C 的成本是 GNN 0.924 ms + 128 × 9.437 µs = 2.154 ms，
+> 等预算给 B 的是 2.154/0.009437 ≈ **228** 次（`results/RECOVERY_SPEED_RESULTS.md` §0）。两边都给
+> 128 会让 B 只拿到 56% 预算 —— 那正是 `results/GATE_G0_RESULTS.md` 已修正过的 G0 缺陷。
+> 渲染器里 B 还额外付一次 feature pass，所以 228 是**略微超配** B，方向保守。
+
+> **对照模式不是性能测量路径。** 三支共用一套 timestamp 槽位（一个槽位每帧只能写一次），
+> 面板里的 ms 只反映最后一支。性能一律用 `benchmark_hood_static.ps1`（第 5 节）。
+
+> **切动画不重载 `.vchar` / `.vcloth2` / `.vxpbd`** —— 它们按服装共享。这既是正确性保证，
+> 也正是"零逐动画配置"这个主张本身的演示。所以对照模式**只认衣服级的
+> `.work/real_scene/ch10032_lower.vxpbd`**，不用各动作目录下的那几份逐动作标定（混用会让跨动作
+> 比较的标定不一致）。缺这个文件会明确报错，不静默降级。烘法：
+
+```powershell
+.\.venv\Scripts\python.exe -B tools\bake_xpbd_constraints.py --scene sprint_start `
+    --calibration teacher --output .work\real_scene\ch10032_lower.vxpbd `
+    --report results\ch10032_lower_vxpbd.json
+```
+
+标定取 `sprint_start` 是因为它是全库根运动 jerk 最大的一条（0.126 m/frame²），而
+`GATE_G0_RESULTS.md` §11 实测的结论是**标定可跨动作迁移、且应该用最动态的动作来标定**。
+
+#### 定量对照（无需交互）
+
+`tools/compare_probe.ps1` 跑固定步数后落 `results/*.json`，含逐支的
+`edge_length_ratio.p95` —— 与 Python 探针的 `edge_p95` **同参照、同边表**，可直接对数。
+
+```powershell
+.\tools\compare_probe.ps1 -Motion sprint_start -Steps 60 -Branches ABC
+.\tools\compare_probe.ps1 -Motion ch10032_sprint -Steps 60 -Branches C -Single   # 回归对照
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `-Steps` | `120` | 片段播完后钳在末帧，所以可以超过帧数（见下） |
+| `-Branches` | `ABC` | 字母子集；`C` 单支用于回归 |
+| `-Single` | 关 | 去掉 `--hood-compare`，走原来的单支路径 |
+| `-XpbdAsset` | 衣服级 | 指向逐动作 `.vxpbd` 可单独衡量标定的影响 |
+| `-Loop` | 关 | 循环播放而不是钳住末帧（**会让跨语言对数失效**） |
+
+> **口径：默认钳住末帧，因为 Python 探针也钳住。** 如果加 `-Loop`，渲染器会在 62 帧的
+> `ch10032_sprint` 上重头播第二遍，而探针的第 120 步是 58 步**静态松弛**之后的状态（C 正是靠这个
+> 赢末态）—— 两边测的就不是同一件事了。实测（对探针的同步数值）：
+>
+> | 动作 | 步 | A | B | C |
+> | --- | ---: | --- | --- | --- |
+> | `ch10032_sprint` | 60 | 4.604 / 4.978 = **0.92** | 2.558 / 2.545 = **1.01** | 2.965 / 2.636 = **1.12** |
+> | `sprint_start` | 60 | 5.453 / 5.253 = **1.04** | 1.908 / 2.491 = 0.77 | **10.430 / 10.364 = 1.01** |
+> | `sprint_start` | 120 | 8.197 / 9.472 = 0.87 | 2.719 / 2.754 = **0.99** | **1.291 / 1.287 = 1.00** |
+>
+> 两条独立实现的差异在已确立的跨进程噪声量级内（`GATE_G0_RESULTS.md` §8），
+> 且**C 在 `sprint_start` 上先超冲到 10.4 再完全松回 1.29 这条曲线被 1% 内复现** ——
+> 它不是 Python 侧的仪表问题。
+>
+> **`compare_probe.ps1` 需要交互桌面，窗口必须可见**：上游 sample 基类在最小化时停止渲染，
+> 而模拟由渲染循环驱动，最小化跑出来的是一份全零的 JSON。
+
+> **一个踩过的坑：这批 `.ps1` 会静默吞掉拼错的参数。** 它们的 `param()` 只用了
+> `[ValidateSet]` / `[ValidateRange]`，没有 `[CmdletBinding()]` 也没有 `[Parameter()]`，所以不是
+> advanced function —— 未绑定的实参落进 `$args` 而**不报错**。给 `capture_screenshot.ps1` 传一个它
+> 当时还没有的 `-HoldLastFrame` 时，脚本照常成功、截图却是循环播放的。**加了新开关就要确认
+> 它真的在 `param()` 里。**
+
 ---
 
 ## 4. 正确性验证
