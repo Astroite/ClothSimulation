@@ -94,6 +94,46 @@ uv sync --python 3.11
 
 产物全部落在被忽略的 `.work/` 下：`.work/real_scene/<motion>/` 与 `.work/hood_data/`。
 
+### 2.1 CH10032 动画 / 模型库批量导出
+
+`bake_real_scene.ps1` 一次只处理一条动画。要一次性从 Z2Game 工程取一批资产用于评测，
+用下面这条；清单在 `tools/ch10032_export_manifest.json`（31 条动画 + 2 个骨骼网格 +
+4 个 physics asset + 4 个 skeleton），产物落在 `.work/ch10032_library/`。
+
+```powershell
+.\tools\export_ch10032_assets.ps1                    # 全量
+.\tools\export_ch10032_assets.ps1 -Tier skirt        # 只要 6 条美术为裙子调过的
+.\tools\export_ch10032_assets.ps1 -Only sprint_skirt,body -Force
+```
+
+| 脚本 | 参数 |
+| --- | --- |
+| `export_ch10032_assets.ps1` | `-Tier all\|skirt\|locomotion`、`-Only <id,...>`、`-Force`、`-OutputRoot`、`-UnrealEditor`、`-Project` |
+| `validate_ch10032_exports.py` | `--library-root`、`--min-bones 100`、`--sample-frames 8`（经 Blender 运行） |
+
+导出完成后校验 FBX 真的可用（骨架、动画曲线、帧数、蒙皮、NaN）：
+
+```powershell
+& 'C:\Program Files\Blender Foundation\Blender 4.5\blender.exe' --background --factory-startup `
+    --python tools\validate_ch10032_exports.py -- --library-root .work\ch10032_library
+```
+
+> **调用方式是有讲究的，不要「顺手简化」。** 本工程给引擎打过补丁，
+> `FPythonScriptPlugin::StartupModule` 在 `IsRunningCommandlet() || FApp::IsUnattended()`
+> 时直接 return，因此 `-run=pythonscript` 和任何带 `-unattended` 的调用都拿不到 Python，
+> 且没有命令行开关能救回来（`-ForceEnablePython` 也不行）。可行的方式是
+> `-ExecCmds="py <script>"` 且**两者都不传**。另外**不能加 `-nullrhi`**：
+> SkeletalMesh 导出会在 `GetCPUSkinnedVertices` 断言失败。
+>
+> 走 `OBJ EXPORT` 控制台命令则完全是另一套限制：它只认被
+> `PackagesToBeFullyLoadedAtStartup` 预载的那一个包，而重复传 `-ini:` 只有最后一个生效，
+> 所以那条路要每个资产启动一次编辑器（约 33 次）。Python 路线一次启动全部搞定。
+
+`data/` 下 physics asset 以 `.t3d` 为准（`SkeletalBodySetups` 不是反射属性，
+`get_editor_property` 拿不到，只有 `ObjectExporterT3D` 会输出），旁边的 `.json` 是摘要。
+skeleton 的 `.json` 同时给 `parent_local_*` 与 `component_*` 两个空间，
+前者与 `Assets/Characters/CH10032/SK_JZ_CH_10032_Body.json` 的约定一致。
+
 ---
 
 ## 3. 交互运行

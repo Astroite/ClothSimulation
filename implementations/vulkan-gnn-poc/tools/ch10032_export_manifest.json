@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "generated_by": "tools/export_ch10032_assets.ps1",
+  "source_project": "E:/Main/Projects/Z2Game/Z2Game.uproject",
+  "content_root": "/Game/Developers/jinzhao/AICloth/CH_10032",
+  "selection_policy": "Two tiers. Tier 'skirt' is every clip the animators hand-authored against the skirt, so it carries the strongest cloth signal available in the project. Tier 'locomotion' is a 25-clip spread across walk/run/sprint/strafe/turn/jump/dodge chosen to cover the speed range, both turning directions, start/stop transients, and airborne phases, so a model can be scored on motion types it was not fitted to.",
+  "data_terms_notice": "These are proprietary character and garment assets from the Z2Game project. The PoC MIT license does not relicense them. Keep exports inside the ignored .work/ cache or an authorized private workspace.",
+  "animations": [
+    { "id": "sprint_skirt",            "tier": "skirt",      "category": "04_Sprint",         "package": "Animation/04_Sprint/AS_C10032_ArmedSprint_Skirt",            "purpose": "fastest gait, hand-tuned for the skirt; already the PoC baseline" },
+    { "id": "attack_01_skirt",         "tier": "skirt",      "category": "08_Attack",         "package": "Animation/08_Attack/AS_C10032_ArmedAttack_01_Skirt",         "purpose": "swing with torso rotation, hand-tuned for the skirt" },
+    { "id": "attack_02_skirt",         "tier": "skirt",      "category": "08_Attack",         "package": "Animation/08_Attack/AS_C10032_ArmedAttack_02_Skirt",         "purpose": "second swing variant, hand-tuned for the skirt" },
+    { "id": "block_loop_skirt",        "tier": "skirt",      "category": "10_Block",          "package": "Animation/10_Block/AS_C10032_ArmedBlock_Loop_Skirt",        "purpose": "near-static hold; exposes drift and jitter" },
+    { "id": "block_start_skirt",       "tier": "skirt",      "category": "10_Block",          "package": "Animation/10_Block/AS_C10032_ArmedBlock_Start_Skirt",       "purpose": "sharp entry into the hold; impulse response" },
+    { "id": "guard_skirt",             "tier": "skirt",      "category": "11_Guard",          "package": "Animation/11_Guard/AS_C10032_ArmedGuard_Skirt",             "purpose": "low-motion guard stance, hand-tuned for the skirt" },
+
+    { "id": "walk_armed",              "tier": "locomotion", "category": "02_Walk",           "package": "Animation/02_Walk/AS_C10032_ArmedWalk",                     "purpose": "walk cycle, armed" },
+    { "id": "walk_unarmed",            "tier": "locomotion", "category": "02_Walk",           "package": "Animation/02_Walk/AS_C10032_UnarmedWalk",                   "purpose": "walk cycle, unarmed; different upper-body carriage" },
+    { "id": "walk_start",              "tier": "locomotion", "category": "02_Walk",           "package": "Animation/02_Walk/AS_C10032_ArmedWalk_start",               "purpose": "rest-to-walk transient" },
+    { "id": "walk_end",                "tier": "locomotion", "category": "02_Walk",           "package": "Animation/02_Walk/AS_C10032_ArmedWalk_End",                 "purpose": "walk-to-rest settle" },
+    { "id": "walk_start_pivot",        "tier": "locomotion", "category": "02_Walk",           "package": "Animation/02_Walk/AS_C10032_UnarmedWalk_Start_Pivot",       "purpose": "start with a pivot; asymmetric hip swing" },
+
+    { "id": "run_armed",               "tier": "locomotion", "category": "03_Run",            "package": "Animation/03_Run/AS_C10032_ArmedRun",                       "purpose": "run cycle, armed" },
+    { "id": "run_unarmed",             "tier": "locomotion", "category": "03_Run",            "package": "Animation/03_Run/AS_C10032_UnarmedRun",                     "purpose": "run cycle, unarmed" },
+    { "id": "run_start",               "tier": "locomotion", "category": "03_Run",            "package": "Animation/03_Run/AS_C10032_ArmedRun_Start",                 "purpose": "acceleration into run" },
+    { "id": "run_start_180",           "tier": "locomotion", "category": "03_Run",            "package": "Animation/03_Run/AS_C10032_ArmedRun_Start_180",             "purpose": "180-degree reversal; largest lateral cloth swing" },
+    { "id": "run_lean_left",           "tier": "locomotion", "category": "03_Run",            "package": "Animation/03_Run/AS_C10032_ArmedRun_Lean_L",                "purpose": "sustained banked turn, left" },
+    { "id": "run_start_pivot",         "tier": "locomotion", "category": "03_Run",            "package": "Animation/03_Run/AS_C10032_ArmedRun_Start_Pivot",           "purpose": "pivot into run" },
+
+    { "id": "sprint_unarmed",          "tier": "locomotion", "category": "04_Sprint",         "package": "Animation/04_Sprint/AS_C10032_UnarmedSprint",               "purpose": "sprint cycle without the skirt-specific tuning" },
+    { "id": "sprint_start",            "tier": "locomotion", "category": "04_Sprint",         "package": "Animation/04_Sprint/AS_C10032_UnarmedSprint_Start",         "purpose": "hardest acceleration transient in the set" },
+    { "id": "sprint_end",              "tier": "locomotion", "category": "04_Sprint",         "package": "Animation/04_Sprint/AS_C10032_UnarmedSprint_End",           "purpose": "hardest deceleration transient in the set" },
+    { "id": "sprint_start_180",        "tier": "locomotion", "category": "04_Sprint",         "package": "Animation/04_Sprint/AS_C10032_UnarmedSprint_Start_180",     "purpose": "sprint reversal; worst-case angular velocity" },
+
+    { "id": "strafe_walk_left",        "tier": "locomotion", "category": "05_Strafe_Turn",    "package": "Animation/05_Strafe_Turn/AS_C10032_ArmedStrafeWalk_L",      "purpose": "pure lateral translation, left" },
+    { "id": "strafe_walk_right",       "tier": "locomotion", "category": "05_Strafe_Turn",    "package": "Animation/05_Strafe_Turn/AS_C10032_ArmedStrafeWalk_R",      "purpose": "pure lateral translation, right; mirror check" },
+    { "id": "strafe_walk_back",        "tier": "locomotion", "category": "05_Strafe_Turn",    "package": "Animation/05_Strafe_Turn/AS_C10032_ArmedStrafeWalk_B",      "purpose": "backpedal; cloth leads the body" },
+    { "id": "turn_left_180",           "tier": "locomotion", "category": "05_Strafe_Turn",    "package": "Animation/05_Strafe_Turn/AS_C10032_ArmedTurn_L180",         "purpose": "in-place 180 turn; pure axial rotation" },
+    { "id": "turn_right_90",           "tier": "locomotion", "category": "05_Strafe_Turn",    "package": "Animation/05_Strafe_Turn/AS_C10032_ArmedTurn_R90",          "purpose": "in-place 90 turn, opposite direction" },
+
+    { "id": "jump_from_run",           "tier": "locomotion", "category": "06_Jump_Fall_Land", "package": "Animation/06_Jump_Fall_Land/AS_C10032_UnarmedJump_RunTo",   "purpose": "takeoff; sudden loss of ground contact" },
+    { "id": "fall_from_sprint",        "tier": "locomotion", "category": "06_Jump_Fall_Land", "package": "Animation/06_Jump_Fall_Land/AS_C10032_UnarmedFall_SprintTo","purpose": "free fall; near-ballistic cloth" },
+    { "id": "land_heavy",              "tier": "locomotion", "category": "06_Jump_Fall_Land", "package": "Animation/06_Jump_Fall_Land/AS_C10032_Armed02Jump_Land_Hvy","purpose": "hard landing; impulse spike and recovery" },
+
+    { "id": "dodge_forward",           "tier": "locomotion", "category": "07_Dodge",          "package": "Animation/07_Dodge/AS_C10032_ArmedDodge_F",                 "purpose": "short explosive burst forward" },
+    { "id": "dodge_left",              "tier": "locomotion", "category": "07_Dodge",          "package": "Animation/07_Dodge/AS_C10032_ArmedDodge_L",                 "purpose": "short explosive burst sideways" }
+  ],
+  "models": [
+    { "id": "body",                    "kind": "SkeletalMesh",  "package": "Model/SK_JZ_CH_10032_Body",                "purpose": "re-export of the runtime body mesh; replaces the 2026-05-14 copy in Assets/Characters/CH10032" },
+    { "id": "body_v1",                 "kind": "SkeletalMesh",  "package": "Model/V1/SK_CH_10032_Body_V1",             "purpose": "V1 body used by the project's own ML-cloth blueprint; alignment cross-check" }
+  ],
+  "physics": [
+    { "id": "body_physics_runtime",    "kind": "PhysicsAsset",  "object_path": "/Game/Prototype/Demo/Character/CH_P_C10032/Model/PA_SK_C10032_Body", "purpose": "the physics asset SK_JZ_CH_10032_Body actually references at runtime, and therefore the collision the cloth solver must respect. Lives outside the AICloth folder." },
+    { "id": "body_physics",            "kind": "PhysicsAsset",  "package": "Model/SK_JZ_CH_10032_Body_Physics",        "purpose": "AICloth-folder variant; holds a single Root_M skinned-triangle body, so it is closer to a placeholder than to runtime collision" },
+    { "id": "body_physics_normal",     "kind": "PhysicsAsset",  "package": "Model/SK_JZ_CH_10032_Body_Physics_Normal", "purpose": "normal-detail collision variant" },
+    { "id": "body_physics_stm",        "kind": "PhysicsAsset",  "package": "Model/SK_JZ_CH_10032_Body_Physics_STM",    "purpose": "STM collision variant" }
+  ],
+  "skeletons": [
+    { "id": "skeleton",                "kind": "Skeleton",      "package": "Model/Skeleton_JZ_CH_10032_Body",          "bone_source_model": "body",    "purpose": "reference hierarchy and bone names; bone transforms read off the body mesh" },
+    { "id": "skeleton_v1",             "kind": "Skeleton",      "package": "Model/V1/Skeleton_CH_10032_Body_V1",       "bone_source_model": "body_v1", "purpose": "V1 hierarchy, for cross-checking the ML-cloth blueprint's rig" },
+    { "id": "skeleton_t_pose",         "kind": "Skeleton",      "package": "Model/Skeleton_JZ_CH_10032_Body_T_Pose",   "purpose": "T-pose reference used for cloth bind alignment; no mesh binds to it, so text dump only" },
+    { "id": "skeleton_a_pose",         "kind": "Skeleton",      "package": "Model/Skeleton_JZ_CH_10032_Body_A_Pose",   "purpose": "A-pose reference variant; text dump only" }
+  ]
+}
