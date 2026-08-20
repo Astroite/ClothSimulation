@@ -1,0 +1,56 @@
+{
+  "scene": "ch10032",
+  "solver": "tinyhood32x12",
+  "motion": "sprint_start",
+  "frame_step": 1,
+  "branches": {
+    "A": {
+      "xpbd": false,
+      "xpbd_iterations": 0,
+      "network": true,
+      "collision_projection": false,
+      "completed_steps": 60,
+      "structure_preserved": false,
+      "invalid_vertices": 0,
+      "active_world_edges": 100,
+      "maximum_displacement_m": 8.486099404,
+      "maximum_pinned_error_m": 0,
+      "edge_length_ratio": {"mean": 28.51299166, "p95": 5.452711317, "max": 940.3454227, "collapsed_fraction_lt_0_5": 0.01849505954, "stretched_fraction_gt_1_5": 0.4111983785},
+      "triangle_area_ratio": {"mean": 62.84676247, "median": 1.230627556, "degenerate_fraction_lt_0_1": 0.003112840467, "flipped_fraction": 0.2809338521},
+      "bounds_min_m": [-0.1627433449, -1.050827026, 1.564696431],
+      "bounds_max_m": [1.258354306, -0.0898026675, 8.557720184]
+    },
+    "B": {
+      "xpbd": true,
+      "xpbd_iterations": 228,
+      "network": false,
+      "collision_projection": false,
+      "completed_steps": 60,
+      "structure_preserved": false,
+      "invalid_vertices": 0,
+      "active_world_edges": 100,
+      "maximum_displacement_m": 8.846518566,
+      "maximum_pinned_error_m": 0,
+      "edge_length_ratio": {"mean": 1.039883257, "p95": 1.907918851, "max": 4.460614676, "collapsed_fraction_lt_0_5": 0.0646060299, "stretched_fraction_gt_1_5": 0.1071700025},
+      "triangle_area_ratio": {"mean": 0.8472489954, "median": 0.7660667392, "degenerate_fraction_lt_0_1": 0.02529182879, "flipped_fraction": 0.340077821},
+      "bounds_min_m": [-0.1776601076, -1.045692444, 8.016052246],
+      "bounds_max_m": [0.1288719028, -0.07611782849, 8.754319191]
+    },
+    "C": {
+      "xpbd": true,
+      "xpbd_iterations": 128,
+      "network": true,
+      "collision_projection": false,
+      "completed_steps": 60,
+      "structure_preserved": false,
+      "invalid_vertices": 0,
+      "active_world_edges": 100,
+      "maximum_displacement_m": 8.486099404,
+      "maximum_pinned_error_m": 0,
+      "edge_length_ratio": {"mean": 2.364315474, "p95": 10.42974458, "max": 25.7013988, "collapsed_fraction_lt_0_5": 0.09880922219, "stretched_fraction_gt_1_5": 0.2802128199},
+      "triangle_area_ratio": {"mean": 3.258496354, "median": 0.5383365781, "degenerate_fraction_lt_0_1": 0.04241245136, "flipped_fraction": 0.3891050584},
+      "bounds_min_m": [-0.1627433449, -0.2545014322, 6.837786198],
+      "bounds_max_m": [0.4494561851, 0.1316729635, 8.557720184]
+    }
+  }
+}
