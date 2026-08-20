@@ -134,6 +134,35 @@ uv sync --python 3.11
 skeleton 的 `.json` 同时给 `parent_local_*` 与 `component_*` 两个空间，
 前者与 `Assets/Characters/CH10032/SK_JZ_CH_10032_Body.json` 的约定一致。
 
+### 2.2 把导出的库烘成场景资产
+
+导出出来的是 FBX，而求解器与 `tools/recovery_probe.py` 吃的是
+`.work/real_scene/<motion>/` 下的 `.vchar` / `.vanim` / `.vcloth2`。`bake_real_scene.ps1`
+的 `-AnimationFbx` 直接指向库里任意一条，配 `-SkipUnrealExport` 就不再启动编辑器：
+
+```powershell
+foreach ($m in 'sprint_skirt','attack_01_skirt','guard_skirt') {
+    .\tools\bake_real_scene.ps1 -Motion $m `
+        -AnimationFbx ".work/ch10032_library/animations/$m.fbx" `
+        -SkipUnrealExport -SkipFine15Golden
+}
+```
+
+**约 9.7 秒一条**，31 条全量约 5 分钟。`-SkipFine15Golden` 是有意的：那步要跑 Fine15 的整段
+teacher rollout，而 Python 侧的评测工具自己在内存里算 teacher 参考，不读 `.vhgold`。
+要给 Vulkan 侧做逐步对拍时才需要去掉这个开关。
+
+> **两条路产出的数据是等价的，已验证。** `sprint_skirt.fbx` 就是 `bake_real_scene.ps1`
+> 默认那条 `AS_C10032_ArmedSprint_Skirt`，两边烘出来的 `ch10032.vchar` /
+> `ch10032_lower.vcloth2` / `.vanim` 的 **`payload_sha256` 三个全部相同**
+> （`7e77d2a4` / `ca67f21d` / `b2f2f21d`）。只有 `file_sha256` 不同，因为文件头里嵌了输入
+> FBX 的 `source_sha256`（`47c52d58` 对 `fb445152`）—— 差的是来源记录而不是数据。
+> 也就是说 UE Python 导出器与 `OBJ EXPORT` 给出的 FBX 字节不同，但解出的蒙皮矩阵逐位一致，
+> **所以新老场景的评测结果可以直接混用比较。**
+
+skirt 档的帧数（262 / 346 / 202 / 189 / 202）都远长于既有的 `ch10032_sprint`（62），
+所以 120 步的评测在 1× 下不会把片段播完 —— 对 `--frame-scales` 的速度轴是更干净的输入。
+
 ---
 
 ## 3. 交互运行

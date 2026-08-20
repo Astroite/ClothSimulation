@@ -1,6 +1,12 @@
 param(
     [string]$Motion = 'ch10032_sprint',
     [string]$AnimAsset = '/Game/Developers/jinzhao/AICloth/CH_10032/Animation/04_Sprint/AS_C10032_ArmedSprint_Skirt.AS_C10032_ArmedSprint_Skirt',
+    # Point this at an FBX already on disk -- for example one of the 31 clips
+    # tools/export_ch10032_assets.ps1 pulled into .work/ch10032_library/animations --
+    # and pass -SkipUnrealExport to bake it without launching the editor again. The
+    # default keeps the per-scene path the Unreal export writes to, so leaving it
+    # unset reproduces the original single-clip behaviour exactly.
+    [string]$AnimationFbx = '',
     [double]$Duration = 0.0,
     [switch]$SkipUnrealExport,
     [switch]$SkipFine15Golden,
@@ -11,7 +17,14 @@ $ErrorActionPreference = 'Stop'
 $PocRoot = Split-Path -Parent $PSScriptRoot
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PocRoot)
 $RuntimeRoot = Join-Path $PocRoot ".work/real_scene/$Motion"
-$AnimationFbx = Join-Path $RuntimeRoot 'target_animation.fbx'
+if ([string]::IsNullOrWhiteSpace($AnimationFbx)) {
+    $AnimationFbx = Join-Path $RuntimeRoot 'target_animation.fbx'
+} else {
+    $AnimationFbx = (Resolve-Path -LiteralPath $AnimationFbx).Path
+    if (-not $SkipUnrealExport) {
+        throw '-AnimationFbx names an existing FBX, so pass -SkipUnrealExport too; otherwise the Unreal export would overwrite it.'
+    }
+}
 $UnrealEditor = 'E:\Main\Engine\Binaries\Win64\UnrealEditor-Cmd.exe'
 $Project = 'E:\Main\Projects\Z2Game\Z2Game.uproject'
 $Blender = 'C:\Program Files\Blender Foundation\Blender 4.5\blender.exe'
