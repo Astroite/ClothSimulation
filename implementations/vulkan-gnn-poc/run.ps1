@@ -15,6 +15,21 @@ param(
     [ValidateRange(0, 1024)]
     [int]$XpbdIterations = 128,
     [string]$XpbdAsset = '',
+    # Side-by-side A/B/C comparison: one animation driving network-only, constraints-only and hybrid
+    # at once, with the animation and playback speed switchable live. Implies -Xpbd and needs the
+    # garment-level .vxpbd rather than the per-motion one.
+    [switch]$Compare,
+    # Equal GPU budget, not equal iterations: C is 0.924 ms of network plus 128 sweeps, which buys the
+    # constraints-only branch about 228. See results/RECOVERY_SPEED_RESULTS.md section 0.
+    [ValidateRange(0, 1024)]
+    [int]$XpbdIterationsB = 228,
+    [ValidateRange(1, 4)]
+    [int]$FrameStep = 1,
+    [ValidateRange(0.5, 3.0)]
+    [double]$CompareSpacing = 1.2,
+    # Stop on the final frame instead of looping, so the post-motion settle is observable -- that is
+    # where C's overshoot resolves and A's does not. Also toggleable live in the overlay.
+    [switch]$HoldLastFrame,
     [switch]$StaticPose
 )
 
@@ -57,7 +72,20 @@ if ($Scene -in @('CH10032', 'HoodGrid64') -or $Solver -in @('Fine15', 'PostCvpr'
     $RuntimeSolver = $Solver -eq 'Toy2L' ? 'toy2l' : ($Solver -eq 'PostCvpr' ? 'postcvpr' : ($Solver -eq 'TinyHood' ? 'tinyhood' : 'fine15'))
     $Arguments += @('--scene', ($IsHoodGrid ? 'hoodgrid' : 'ch10032'), '--motion', $Motion, '--solver', $RuntimeSolver, '--asset-root', (Quote-ProcessArgument $AssetRoot), '--hood-model', (Quote-ProcessArgument $HoodModel))
     if ($CollisionProjection) { $Arguments += '--hood-collision-projection' }
-    if ($Xpbd) {
+    if ($Compare) {
+        # Comparison mode reads the garment-level constraint set, not the per-motion one, so one
+        # calibration is shared by every clip the Animation dropdown offers. results/GATE_G0_RESULTS.md
+        # section 11 measured that calibration as transferable across motions.
+        if (-not $XpbdAsset) { $XpbdAsset = Join-Path (Split-Path -Parent $AssetRoot) ($IsHoodGrid ? 'hood_grid64.vxpbd' : 'ch10032_lower.vxpbd') }
+        $XpbdAsset = [System.IO.Path]::GetFullPath($XpbdAsset)
+        if (-not (Test-Path -LiteralPath $XpbdAsset -PathType Leaf)) {
+            throw "Comparison mode needs a garment-level XPBD asset: $XpbdAsset`nBake it with .\.venv\Scripts\python.exe -B tools\bake_xpbd_constraints.py --scene sprint_start --output $XpbdAsset"
+        }
+        $Arguments += @('--hood-compare', '--hood-xpbd-iterations', $XpbdIterations,
+            '--hood-xpbd-iterations-b', $XpbdIterationsB, '--hood-frame-step', $FrameStep,
+            '--hood-compare-spacing', $CompareSpacing, '--hood-xpbd-asset', (Quote-ProcessArgument $XpbdAsset))
+        if ($HoldLastFrame) { $Arguments += '--hood-hold-last-frame' }
+    } elseif ($Xpbd) {
         if (-not $XpbdAsset) { $XpbdAsset = Join-Path $AssetRoot "$Motion.vxpbd" }
         $XpbdAsset = [System.IO.Path]::GetFullPath($XpbdAsset)
         if (-not (Test-Path -LiteralPath $XpbdAsset -PathType Leaf)) {

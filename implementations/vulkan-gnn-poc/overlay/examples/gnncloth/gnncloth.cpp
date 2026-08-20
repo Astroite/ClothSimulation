@@ -248,6 +248,32 @@ public:
 		hoodXpbdStretchCompliance = std::strtof(argumentValue("--hood-xpbd-stretch-compliance", "0").c_str(), nullptr);
 		hoodXpbdBendCompliance = std::strtof(argumentValue("--hood-xpbd-bend-compliance", "0").c_str(), nullptr);
 		if (hoodXpbdIterations < 0) throw std::runtime_error("--hood-xpbd-iterations must not be negative");
+		// Side-by-side A/B/C comparison. Needs the garment-level .vxpbd, and errors out without one
+		// rather than silently degrading into three copies of A -- COMMANDS.md already records how
+		// much trouble one silent fallback (-Solver TinyHood without -HoodModel) caused.
+		hoodCompareMode = hasArgument("--hood-compare");
+		hoodXpbdIterationsB = static_cast<int32_t>(std::strtol(argumentValue("--hood-xpbd-iterations-b", "228").c_str(), nullptr, 10));
+		hoodFrameStep = static_cast<int32_t>(std::strtol(argumentValue("--hood-frame-step", "1").c_str(), nullptr, 10));
+		hoodCompareSpacing = std::strtof(argumentValue("--hood-compare-spacing", "1.2").c_str(), nullptr);
+		hoodHoldLastFrame = hasArgument("--hood-hold-last-frame");
+		if (hoodXpbdIterationsB < 0) throw std::runtime_error("--hood-xpbd-iterations-b must not be negative");
+		if (hoodFrameStep < 1) throw std::runtime_error("--hood-frame-step must be at least 1");
+		if (hoodCompareMode) {
+			if (hoodSolver == HoodToy2L || hoodSolver == HoodPostCvpr)
+				throw std::runtime_error("--hood-compare supports the Fine15 and TinyHood solvers");
+			if (hoodVerifyMode) throw std::runtime_error("--hood-verify checks one branch against a golden; drop --hood-compare");
+			if (hoodStaticBenchmarkMode) throw std::runtime_error("--hood-compare is not a benchmark path; drop one of the two");
+			hoodXpbdRequested = true;
+			// Letters, so the headless checks can isolate a branch: "C" alone must reproduce the
+			// pre-comparison single-branch run, which is the regression guard for the branch loop.
+			const std::string enabled = argumentValue("--hood-compare-branches", "ABC");
+			hoodBranchEnabled = { enabled.find('A') != std::string::npos,
+				enabled.find('B') != std::string::npos, enabled.find('C') != std::string::npos };
+			if (!hoodBranchEnabled[0] && !hoodBranchEnabled[1] && !hoodBranchEnabled[2])
+				throw std::runtime_error("--hood-compare-branches must name at least one of A, B, C");
+		}
+		// Wide enough for three copies at the default spacing when comparing; unchanged otherwise.
+		hoodCameraDistance = std::strtof(argumentValue("--hood-camera-distance", hoodCompareMode ? "5.6" : "3.2").c_str(), nullptr);
 		hoodGoldenPath = argumentValue("--hood-golden", "");
 		hoodVerifyOutput = argumentValue("--hood-verify-output", "hood_verify.json");
 		hoodStaticBenchmarkOutput = argumentValue("--hood-benchmark-output", hoodSolver == HoodToy2L ? "hood_static_toy2l_timing.csv"

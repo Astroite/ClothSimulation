@@ -1,6 +1,12 @@
 #include "hood_mlp.hlsli"
 
-struct Params { uint clothCount, firstStep, collisionProjection, decoderMlp; };
+// See tinyhood_integrate.comp for why `predictor` exists and why branch B takes the displacement
+// directly rather than through gate_g0.py's normalise/denormalise round trip.
+struct Params {
+    uint clothCount, firstStep, collisionProjection, decoderMlp;
+    uint predictor, pad0, pad1, pad2;
+    float4 gravityDisplacement;
+};
 cbuffer ubo : register(b13) { Params params; };
 [[vk::binding(0)]] StructuredBuffer<float> weights;
 [[vk::binding(1)]] StructuredBuffer<uint4> mlpTable;
@@ -21,18 +27,23 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const uint vertex = groupId.x;
     if (vertex >= params.clothCount) return;
-    const MlpDesc mlp = loadMlp(mlpTable, params.decoderMlp);
-    hoodScratchA[lane] = nodeLatent[vertex * 128 + lane];
-    GroupMemoryBarrierWithGroupSync();
-    hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w0, mlp.b0, lane, 128, 128, true), 0.0);
-    GroupMemoryBarrierWithGroupSync();
-    hoodScratchA[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, 128, false), 0.0);
-    GroupMemoryBarrierWithGroupSync();
-    // The decoder's third layer emits 3 channels, so its transposed row stride is 3.
-    if (lane < 3) hoodScratchB[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, 3, true) * normalizers[73 + lane] + normalizers[70 + lane];
-    GroupMemoryBarrierWithGroupSync();
+    // `predictor` is uniform across the dispatch, so every lane takes the same side of this branch
+    // and the barriers inside it stay group-synchronous.
+    if (params.predictor == 0) {
+        const MlpDesc mlp = loadMlp(mlpTable, params.decoderMlp);
+        hoodScratchA[lane] = nodeLatent[vertex * 128 + lane];
+        GroupMemoryBarrierWithGroupSync();
+        hoodScratchB[lane] = max(hiddenLinear(weights, mlp.w0, mlp.b0, lane, 128, 128, true), 0.0);
+        GroupMemoryBarrierWithGroupSync();
+        hoodScratchA[lane] = max(hiddenLinear(weights, mlp.w1, mlp.b1, lane, 128, 128, false), 0.0);
+        GroupMemoryBarrierWithGroupSync();
+        // The decoder's third layer emits 3 channels, so its transposed row stride is 3.
+        if (lane < 3) hoodScratchB[lane] = hiddenLinear(weights, mlp.w2, mlp.b2, lane, 128, 3, true) * normalizers[73 + lane] + normalizers[70 + lane];
+        GroupMemoryBarrierWithGroupSync();
+    }
     if (lane == 0) {
-        const float3 acceleration = float3(hoodScratchB[0], hoodScratchB[1], hoodScratchB[2]);
+        const float3 acceleration = params.predictor != 0 ? params.gravityDisplacement.xyz
+            : float3(hoodScratchB[0], hoodScratchB[1], hoodScratchB[2]);
         const float3 effective = effectivePosition[vertex].xyz;
         const float3 oldPosition = clothPosition[vertex].xyz;
         const float3 oldPrevious = clothPrevious[vertex].xyz;

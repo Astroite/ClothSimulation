@@ -19,6 +19,14 @@ param(
     [ValidateRange(0, 1024)]
     [int]$XpbdIterations = 128,
     [string]$XpbdAsset = '',
+    # Side-by-side A/B/C. Implies -Xpbd and reads the garment-level .vxpbd; see COMMANDS.md 3.1.
+    [switch]$Compare,
+    [ValidateRange(0, 1024)]
+    [int]$XpbdIterationsB = 228,
+    [ValidateRange(1, 4)]
+    [int]$FrameStep = 1,
+    # Stop on the clip's final frame instead of looping, so the post-motion settle is visible.
+    [switch]$HoldLastFrame,
     # Distinguishes otherwise-identical output names, e.g. -Suffix _xpbd128 next to a plain run.
     [string]$Suffix = ''
 )
@@ -45,7 +53,17 @@ if ($Scene -in @('CH10032', 'HoodGrid64')) {
             : (Join-Path $PocRoot ($Solver -eq 'PostCvpr' ? '.work/hood_data/postcvpr.vhood' : ($Solver -eq 'TinyHood' ? '.work/hood_data/tinyhood64x4.vhood' : '.work/hood_data/fine15.vhood'))))
     )
     if ($SimulationSteps -gt 0) { $Arguments += @('--hood-pause-after', $SimulationSteps) }
-    if ($Xpbd) {
+    if ($Compare) {
+        if (-not $XpbdAsset) { $XpbdAsset = Join-Path (Split-Path -Parent $AssetRoot) ($IsHoodGrid ? 'hood_grid64.vxpbd' : 'ch10032_lower.vxpbd') }
+        $XpbdAsset = [System.IO.Path]::GetFullPath($XpbdAsset)
+        if (-not (Test-Path -LiteralPath $XpbdAsset -PathType Leaf)) {
+            throw "Comparison mode needs a garment-level XPBD asset: $XpbdAsset"
+        }
+        $Arguments += @('--hood-compare', '--hood-xpbd-iterations', $XpbdIterations,
+            '--hood-xpbd-iterations-b', $XpbdIterationsB, '--hood-frame-step', $FrameStep,
+            '--hood-xpbd-asset', $XpbdAsset)
+        if ($HoldLastFrame) { $Arguments += '--hood-hold-last-frame' }
+    } elseif ($Xpbd) {
         if (-not $XpbdAsset) { $XpbdAsset = Join-Path $AssetRoot "$Motion.vxpbd" }
         $XpbdAsset = [System.IO.Path]::GetFullPath($XpbdAsset)
         if (-not (Test-Path -LiteralPath $XpbdAsset -PathType Leaf)) {

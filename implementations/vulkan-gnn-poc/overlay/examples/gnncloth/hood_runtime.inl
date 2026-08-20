@@ -22,7 +22,34 @@
 	// (3 + blocks * 3). It used to be a literal in each integrate shader, which silently made
 	// a student with any depth other than the one the literal was written for decode with a
 	// processor MLP instead. Pass it in.
-	struct HoodIntegrateParams { uint32_t clothCount{}, firstStep{}, collisionProjection{}, decoderMlp{}; };
+	struct HoodIntegrateParams {
+		uint32_t clothCount{}, firstStep{}, collisionProjection{}, decoderMlp{};
+		// Non-zero `predictor` makes the integrate shader skip the decoder and use
+		// `gravityDisplacement` instead -- comparison branch B. The three padding words keep
+		// `gravityDisplacement` on a 16-byte boundary so the HLSL cbuffer layout is unambiguous.
+		uint32_t predictor{}, integratePad0{}, integratePad1{}, integratePad2{};
+		glm::vec4 gravityDisplacement{};
+	};
+	static_assert(sizeof(HoodIntegrateParams) == 48);
+	// Side-by-side comparison of the three architectures gate G0 defined (tools/gate_g0.py):
+	// A network only, B constraints only (ballistic gravity, no network at all), C both. Everything
+	// else -- garment, calibration, animation, frame, camera -- is shared, so the only difference on
+	// screen is the solver. The scalar probes cannot say *how* a branch fails (a skirt blowing up, a
+	// few stretched triangles and a leg poking through all read as one `edge_p95` number), which is
+	// what this mode is for.
+	enum HoodBranch : uint32_t { HoodBranchNetwork = 0, HoodBranchConstraints = 1, HoodBranchHybrid = 2 };
+	static constexpr uint32_t hoodBranchCount = 3;
+	static constexpr const char* hoodBranchNames[hoodBranchCount]{ "A network only", "B constraints only", "C hybrid" };
+	// Blue A / orange B / green C. The single-branch path keeps the original blue. Held as plain
+	// floats because glm's vector constructors are not constexpr in the pinned glm commit.
+	static constexpr float hoodBranchTints[hoodBranchCount][3]{
+		{ 0.12f, 0.42f, 0.88f }, { 0.95f, 0.55f, 0.15f }, { 0.20f, 0.75f, 0.35f } };
+	static glm::vec4 hoodBranchTint(uint32_t branch)
+	{
+		return glm::vec4(hoodBranchTints[branch][0], hoodBranchTints[branch][1], hoodBranchTints[branch][2], 1.0f);
+	}
+	struct HoodInstancePush { glm::vec4 offset{}; glm::vec4 tint{ 0.12f, 0.42f, 0.88f, 1.0f }; };
+	static_assert(sizeof(HoodInstancePush) == 32);
 	// Push constants for hood_xpbd.comp. Mirrors `struct Push` there; keep the two in step.
 	struct HoodXpbdPush {
 		uint32_t clothCount{}, constraintCount{}, slotWidth{}, flags{};
@@ -74,6 +101,30 @@
 	uint32_t hoodXpbdSlotWidth{};
 	uint32_t hoodXpbdStretchCount{};
 	std::filesystem::path hoodXpbdPath;
+	// Comparison mode. `hoodXpbdIterationsB` is separate on purpose: C costs GNN 0.924 ms + 128
+	// sweeps x 9.437 us = 2.154 ms, so an equal GPU budget buys branch B 2.154/0.009437 ~= 228
+	// sweeps (results/RECOVERY_SPEED_RESULTS.md section 0). Giving both 128 would hand B 56% of C's
+	// budget, which is exactly the flaw results/GATE_G0_RESULTS.md had to correct in gate G0 -- not a
+	// flaw to reproduce in a new tool. Here B additionally pays for the feature pass it needs for
+	// `effectivePosition` and contacts, so 228 slightly over-budgets it; that errs in favour of the
+	// branch C is being measured against, which is the safe direction.
+	bool hoodCompareMode{ false };
+	std::array<bool, hoodBranchCount> hoodBranchEnabled{ true, true, true };
+	int32_t hoodXpbdIterationsB{ 228 };
+	float hoodCompareSpacing{ 1.2f };
+	float hoodCameraDistance{ 3.2f };
+	// Animation frame advance per simulation step: the interactive form of the probe's
+	// `--frame-scales`, and the same decimation tools/train_student.py::frame_of performs. Integer
+	// only, which reproduces the published 1x/2x/3x columns exactly; fractional scales stay Python-only.
+	int32_t hoodFrameStep{ 1 };
+	// What to do when the clip runs out. Looping is the better default for a single-branch demo, but
+	// it hides the most informative half of the comparison: C's overshoot on a hard clip fully
+	// relaxes once the motion stops (sprint_start step 60 -> 90 is 10.364 -> 1.219) while A's does
+	// not, and a looping clip never stops. Holding the last frame also matches
+	// tools/recovery_probe.py, which clamps with min(frame_of(step), frame_count - 1).
+	bool hoodHoldLastFrame{ false };
+	std::vector<std::string> hoodAvailableMotions;
+	int32_t hoodSelectedMotion{};
 	bool hoodVerifyMode{ false };
 	bool hoodVerifyWritten{ false };
 	bool hoodStaticBenchmarkMode{ false };
@@ -144,7 +195,12 @@
 		vks::Buffer proxyRestPosition, proxyRestNormal, proxyBoneIndices, proxyBoneWeights;
 		vks::Buffer proxyPosition, proxyNormal, proxyTarget;
 		vks::Buffer clothRestPosition, clothBoneIndices, clothBoneWeights, pinTarget, pinMask, mass;
-		vks::Buffer clothPosition, clothPrevious, effectivePosition, acceleration, clothTriangles, clothIndices;
+		// The only per-branch *persistent* state. Every other cloth buffer -- effectivePosition,
+		// worldObstacle, activeProxy, the latents, xpbdLambda, xpbdScratch -- is written and consumed
+		// inside one step, and the branches are recorded sequentially within a frame, so they share
+		// those. Three copies of two float4 arrays is 132 KB on CH10032.
+		std::array<vks::Buffer, hoodBranchCount> clothPosition, clothPrevious;
+		vks::Buffer effectivePosition, acceleration, clothTriangles, clothIndices;
 		vks::Buffer meshSenders, meshReceivers, csrOffsets, worldObstacle, activeProxy;
 		vks::Buffer clothTriangleOffsets, clothTriangleIndices;
 		vks::Buffer worldReverseCloth, worldReverseBegin, worldReverseCount;
@@ -171,20 +227,29 @@
 		VkPipelineLayout skinPipeline{}, featuresPipeline{}, encodePipeline{}, edgePipeline{}, nodePipeline{}, integratePipeline{}, toyPipeline{}, graphicsPipeline{};
 		VkDescriptorSetLayout worldNearestLayout{}, worldReverseLayout{};
 		VkPipelineLayout worldNearestPipeline{}, worldReversePipeline{};
-		VkDescriptorSet worldNearestSet{}, worldReverseSet{};
+		// A descriptor set cannot be rewritten while a recorded command buffer still references it,
+		// and all three branches are recorded into one command buffer, so every set that binds
+		// clothPosition/clothPrevious needs its own copy per branch.
+		std::array<VkDescriptorSet, hoodBranchCount> worldNearestSets{};
+		VkDescriptorSet worldReverseSet{};
 		VkDescriptorSetLayout xpbdLayout{};
 		VkPipelineLayout xpbdPipeline{};
-		// Two sets: [0] reads clothPosition and writes the scratch buffer, [1] the other way round.
-		std::array<VkDescriptorSet, 2> xpbdSets{};
+		// Per branch, two sets: [0] reads that branch's clothPosition and writes the shared scratch
+		// buffer, [1] the other way round.
+		std::array<std::array<VkDescriptorSet, 2>, hoodBranchCount> xpbdSets{};
 		VkPipeline xpbd{};
-		std::array<VkDescriptorSet, maxConcurrentFrames> skinSets{}, featureSets{}, integrateSets{}, graphicsSets{};
+		std::array<VkDescriptorSet, maxConcurrentFrames> skinSets{}, graphicsSets{};
+		// Per branch as well as per frame: these bind the branch's position/previous pair, and the
+		// integrate uniform additionally carries the branch's `predictor` selection.
+		std::array<std::array<VkDescriptorSet, hoodBranchCount>, maxConcurrentFrames> featureSets{}, integrateSets{};
 		std::array<VkDescriptorSet, maxConcurrentFrames> toySets{};
 		VkDescriptorSet encodeSet{};
 		std::array<VkDescriptorSet, 2> edgeSets{}, nodeSets{};
 		VkPipeline skin{}, features{}, encode{}, edge{}, node{}, integrate{}, toyLayer0{}, toyLayer1{};
 		VkPipeline worldNearest{}, worldReverse{};
 		VkPipeline sky{}, character{}, cloth{};
-		std::array<vks::Buffer, maxConcurrentFrames> skinUniforms, featureUniforms, integrateUniforms, toyUniforms, graphicsUniforms;
+		std::array<vks::Buffer, maxConcurrentFrames> skinUniforms, featureUniforms, toyUniforms, graphicsUniforms;
+		std::array<std::array<vks::Buffer, hoodBranchCount>, maxConcurrentFrames> integrateUniforms;
 		std::array<VkQueryPool, maxConcurrentFrames> queryPools{};
 		std::array<bool, maxConcurrentFrames> queryWritten{}, querySimulated{};
 	} hood;
@@ -202,6 +267,95 @@
 		}
 	} hoodTiming;
 	std::vector<HoodTiming> hoodStaticBenchmarkSamples;
+
+	// gate_g0.py's `--gravity` default, in the scene's y-up metre frame. Plain floats because glm's
+	// vector constructors are not constexpr in the pinned glm commit.
+	static constexpr float hoodGravity[3]{ 0.0f, -9.81f, 0.0f };
+
+	// Outside comparison mode there is one branch, index 0, and it keeps the legacy semantics --
+	// network on, sweep on iff --hood-xpbd asked for it. That is what makes "compare mode with only
+	// C enabled" bit-identical to the old single-branch path testable as a regression.
+	bool hoodBranchUsesNetwork(uint32_t branch) const { return !hoodCompareMode || branch != HoodBranchConstraints; }
+	bool hoodBranchUsesXpbd(uint32_t branch) const
+	{
+		return hoodCompareMode ? branch != HoodBranchNetwork : hoodXpbdEnabled;
+	}
+	int32_t hoodBranchIterations(uint32_t branch) const
+	{
+		return (hoodCompareMode && branch == HoodBranchConstraints) ? hoodXpbdIterationsB : hoodXpbdIterations;
+	}
+	std::vector<uint32_t> hoodActiveBranches() const
+	{
+		if (!hoodCompareMode) return { HoodBranchNetwork };
+		std::vector<uint32_t> active;
+		for (uint32_t branch = 0; branch < hoodBranchCount; ++branch) if (hoodBranchEnabled[branch]) active.push_back(branch);
+		// Never empty: unchecking every box would leave the timestamp slots unwritten, which
+		// hoodCollectTiming reads unconditionally. A is the cheapest branch to fall back on.
+		if (active.empty()) active.push_back(HoodBranchNetwork);
+		return active;
+	}
+	// x offset of a branch's copy on screen: A left, B centre, C right, so the camera's existing
+	// root-following translation still keeps the middle one framed.
+	float hoodBranchOffset(uint32_t branch) const
+	{
+		if (!hoodCompareMode) return 0.0f;
+		return (static_cast<float>(branch) - 1.0f) * hoodCompareSpacing;
+	}
+
+	// Every baked scene directory that holds this character and an animation for it. The
+	// ch10032.vchar requirement excludes hood_grid64, which is a different garment entirely; the
+	// bone-count assertion in hoodLoadAnimation catches anything baked against another skeleton.
+	void hoodCollectMotions()
+	{
+		hoodAvailableMotions.clear();
+		const auto root = hoodAssetRoot.parent_path();
+		const std::string stem = hoodGridScene ? "hood_grid64" : "ch10032";
+		if (std::filesystem::is_directory(root)) for (const auto& entry : std::filesystem::directory_iterator(root)) {
+			if (!entry.is_directory()) continue;
+			const auto name = entry.path().filename().string();
+			if (!std::filesystem::exists(entry.path() / (stem + ".vchar"))) continue;
+			if (!std::filesystem::exists(entry.path() / (name + ".vanim"))) continue;
+			hoodAvailableMotions.push_back(name);
+		}
+		std::sort(hoodAvailableMotions.begin(), hoodAvailableMotions.end());
+		const auto found = std::find(hoodAvailableMotions.begin(), hoodAvailableMotions.end(), hoodMotion);
+		if (found == hoodAvailableMotions.end()) {
+			hoodAvailableMotions.insert(hoodAvailableMotions.begin(), hoodMotion);
+			hoodSelectedMotion = 0;
+		} else {
+			hoodSelectedMotion = static_cast<int32_t>(std::distance(hoodAvailableMotions.begin(), found));
+		}
+	}
+
+	// Swap the animation without touching the character, garment or constraint set: those are shared
+	// by every motion of this garment, which is both the correctness argument here and the zero
+	// per-asset-authoring claim the comparison is meant to demonstrate.
+	void hoodLoadAnimation(const std::string& motion)
+	{
+		const auto root = hoodAssetRoot.parent_path() / motion;
+		const auto animation = vhood::loadSectioned(root / (motion + ".vanim"), "VANIM001", 1);
+		const auto info = animation.require("info", 4, 4).as<uint32_t>();
+		if (info[1] != hoodBoneCount || info[2] != 30 || !info[0])
+			throw std::runtime_error("VANIM " + motion + " bone count/FPS does not match the loaded character");
+		vkDeviceWaitIdle(device);
+		hoodBuffers.skinMatrices.destroy();
+		hoodUploadView(hoodBuffers.skinMatrices, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			animation.require("skin_matrices", 48, info[0] * hoodBoneCount));
+		const auto roots = animation.require("root_pos", 12, info[0]).as<HoodPlain3>(12);
+		hoodRootPositions.clear();
+		hoodRootPositions.reserve(roots.size());
+		for (const auto& root : roots) hoodRootPositions.emplace_back(root.x, root.y, root.z);
+		hoodAssetRoot = root;
+		hoodMotion = motion;
+		hoodFrameCount = info[0];
+		hoodFps = info[2];
+		hoodFirstStep = true;
+		hoodRequestReset = true;
+		// The skin descriptor sets point at the buffer object, which vks::Buffer recreated, so they
+		// have to be rewritten. Nothing is in flight after the wait above.
+		for (uint32_t frame = 0; frame < maxConcurrentFrames; ++frame)
+			hoodWriteSetBinding(hood.skinSets[frame], 0, &hoodBuffers.skinMatrices);
+	}
 
 	template <typename T>
 	static std::vector<glm::vec4> hoodExpandVec3(std::span<const T> input, float w)
@@ -248,12 +402,13 @@
 		return result;
 	}
 
-	VkPipelineLayout hoodMakePipelineLayout(VkDescriptorSetLayout layout, uint32_t pushBytes = 0)
+	VkPipelineLayout hoodMakePipelineLayout(VkDescriptorSetLayout layout, uint32_t pushBytes = 0,
+		VkShaderStageFlags pushStages = VK_SHADER_STAGE_COMPUTE_BIT)
 	{
 		auto info = vks::initializers::pipelineLayoutCreateInfo(&layout, 1);
 		VkPushConstantRange range{};
 		if (pushBytes) {
-			range = vks::initializers::pushConstantRange(VK_SHADER_STAGE_COMPUTE_BIT, pushBytes, 0);
+			range = vks::initializers::pushConstantRange(pushStages, pushBytes, 0);
 			info.pushConstantRangeCount = 1;
 			info.pPushConstantRanges = &range;
 		}
@@ -276,6 +431,19 @@
 		for (uint32_t binding = 0; binding < buffers.size(); ++binding)
 			writes.push_back(vks::initializers::writeDescriptorSet(set, buffers[binding].first, binding, &buffers[binding].second->descriptor));
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+	}
+
+	// Repoint one binding of an existing set. Only safe with nothing in flight, which is why the one
+	// caller (hoodLoadAnimation, after recreating the skin matrix buffer) waits for device idle first.
+	void hoodWriteSetBinding(VkDescriptorSet set, uint32_t binding, vks::Buffer* buffer)
+	{
+		const auto write = vks::initializers::writeDescriptorSet(set, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, binding, &buffer->descriptor);
+		vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+	}
+
+	void hoodUploadView(vks::Buffer& destination, VkBufferUsageFlags usage, const vhood::ByteView& view)
+	{
+		hoodUpload(destination, usage, view.bytes.data(), view.bytes.size());
 	}
 
 	void hoodLoadAssets()
@@ -344,7 +512,22 @@
 		// change its payload hash, which the existing goldens are pinned to. Missing is not an
 		// error: without it the runtime is exactly what it was before.
 		vhood::SectionedAsset xpbd;
-		if (hoodXpbdPath.empty()) hoodXpbdPath = hoodAssetRoot / (hoodMotion + ".vxpbd");
+		// Comparison mode insists on the garment-level file. Its target lengths are calibrated from
+		// one clip and reused for every motion, which results/GATE_G0_RESULTS.md section 11 measured
+		// as transferable (and found the *more dynamic* clip to be the better calibrator). Falling
+		// back to the per-motion files here would silently change the calibration as the user
+		// switched clips, making the cross-motion comparison the mode exists for meaningless.
+		if (hoodXpbdPath.empty()) {
+			const auto garment = hoodAssetRoot.parent_path() / (hoodGridScene ? "hood_grid64.vxpbd" : "ch10032_lower.vxpbd");
+			if (hoodCompareMode) {
+				if (!std::filesystem::exists(garment))
+					throw std::runtime_error("--hood-compare needs a garment-level XPBD asset at " + garment.string()
+						+ "; bake it with tools/bake_xpbd_constraints.py (see COMMANDS.md)");
+				hoodXpbdPath = garment;
+			} else {
+				hoodXpbdPath = hoodAssetRoot / (hoodMotion + ".vxpbd");
+			}
+		}
 		hoodXpbdAvailable = std::filesystem::exists(hoodXpbdPath);
 		if (hoodXpbdAvailable) {
 			xpbd = vhood::loadSectioned(hoodXpbdPath, "VXPBD001", 1);
@@ -357,6 +540,12 @@
 				throw std::runtime_error("VXPBD dimensions do not match the cloth asset");
 		}
 		hoodXpbdEnabled = hoodXpbdRequested && hoodXpbdAvailable;
+		if (hoodCompareMode) {
+			// B and C are constraint branches; without the sweep they would be duplicates of A.
+			if (!hoodXpbdAvailable) throw std::runtime_error("--hood-compare requires a loadable XPBD asset");
+			hoodXpbdEnabled = true;
+			hoodCollectMotions();
+		}
 		if (hoodSolver == HoodPostCvpr) {
 			const auto hierarchyInfo = hierarchy.require("info", 4, 6).as<uint32_t>();
 			if (hierarchyInfo[0] != hoodClothCount || hierarchyInfo[5] != 3) throw std::runtime_error("PostCVPR hierarchy dimensions are invalid");
@@ -487,9 +676,12 @@
 		hoodEmpty(hoodBuffers.pinTarget, storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
 		// The XPBD sweep ping-pongs into xpbdScratch, so clothPosition may need a copy back, and on
 		// the settle step the corrected position also has to replace clothPrevious. Both are
-		// transfers, hence the extra usage bits.
-		hoodEmpty(hoodBuffers.clothPosition, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, hoodClothCount * sizeof(glm::vec4));
-		hoodEmpty(hoodBuffers.clothPrevious, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, hoodClothCount * sizeof(glm::vec4));
+		// transfers, hence the extra usage bits. `clothPosition` also carries TRANSFER_SRC because
+		// the reset step seeds branches B and C by copying A's skinned pose across.
+		for (uint32_t branch = 0; branch < hoodBranchCount; ++branch) {
+			hoodEmpty(hoodBuffers.clothPosition[branch], storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, hoodClothCount * sizeof(glm::vec4));
+			hoodEmpty(hoodBuffers.clothPrevious[branch], storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, hoodClothCount * sizeof(glm::vec4));
+		}
 		hoodEmpty(hoodBuffers.effectivePosition, storage, hoodClothCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.acceleration, storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.toyHidden, storage, static_cast<VkDeviceSize>(hoodClothCount) * 4 * sizeof(glm::vec4));
@@ -523,11 +715,15 @@
 
 	void hoodPrepareDescriptors()
 	{
+		// Comparison mode multiplies the sets that bind a branch's position pair by three: measured
+		// worst case is 33 sets / 448 storage / 14 uniform descriptors, against 19 / 236 / 8 for a
+		// single branch. Sized with headroom; overflow is not silent, vkAllocateDescriptorSets
+		// returns VK_ERROR_OUT_OF_POOL_MEMORY and VK_CHECK_RESULT aborts.
 		const std::vector<VkDescriptorPoolSize> sizes = {
-			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 400),
-			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 16),
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024),
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32),
 		};
-		auto poolInfo = vks::initializers::descriptorPoolCreateInfo(sizes, 32);
+		auto poolInfo = vks::initializers::descriptorPoolCreateInfo(sizes, 64);
 		VK_CHECK_RESULT(vkCreateDescriptorPool(device, &poolInfo, nullptr, &hood.pool));
 		auto storageTypes = [](uint32_t count) { return std::vector<VkDescriptorType>(count, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); };
 		auto skinTypes = storageTypes(22); skinTypes[21] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -559,16 +755,25 @@
 		hood.worldNearestPipeline = hoodMakePipelineLayout(hood.worldNearestLayout, 12);
 		hood.worldReversePipeline = hoodMakePipelineLayout(hood.worldReverseLayout, 4);
 		if (hoodXpbdAvailable) hood.xpbdPipeline = hoodMakePipelineLayout(hood.xpbdLayout, sizeof(HoodXpbdPush));
-		hood.graphicsPipeline = hoodMakePipelineLayout(hood.graphicsLayout);
+		hood.graphicsPipeline = hoodMakePipelineLayout(hood.graphicsLayout, sizeof(HoodInstancePush),
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 
 		for (uint32_t frame = 0; frame < maxConcurrentFrames; ++frame) {
-			for (auto* buffer : { &hood.skinUniforms[frame], &hood.featureUniforms[frame], &hood.integrateUniforms[frame], &hood.toyUniforms[frame], &hood.graphicsUniforms[frame] }) {
+			for (auto* buffer : { &hood.skinUniforms[frame], &hood.featureUniforms[frame], &hood.toyUniforms[frame], &hood.graphicsUniforms[frame] }) {
 				const VkDeviceSize size = buffer == &hood.skinUniforms[frame] ? sizeof(HoodSkinParams) : buffer == &hood.featureUniforms[frame]
 					? (hoodSolver == HoodPostCvpr ? sizeof(HoodPostFeatureParams) : sizeof(HoodFeatureParams))
-					: buffer == &hood.integrateUniforms[frame] ? sizeof(HoodIntegrateParams) : buffer == &hood.toyUniforms[frame] ? sizeof(HoodToyParams) : sizeof(HoodGraphicsUniform);
+					: buffer == &hood.toyUniforms[frame] ? sizeof(HoodToyParams) : sizeof(HoodGraphicsUniform);
 				VK_CHECK_RESULT(vulkanDevice->createBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 					VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, buffer, size));
 				VK_CHECK_RESULT(buffer->map());
+			}
+			// One per branch: only branch B sets `predictor`, and the three sets are live in the same
+			// command buffer, so they cannot share one buffer.
+			for (uint32_t branch = 0; branch < hoodBranchCount; ++branch) {
+				VK_CHECK_RESULT(vulkanDevice->createBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+					VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+					&hood.integrateUniforms[frame][branch], sizeof(HoodIntegrateParams)));
+				VK_CHECK_RESULT(hood.integrateUniforms[frame][branch].map());
 			}
 			hood.skinSets[frame] = hoodAllocateSet(hood.skinLayout);
 			hoodWriteSet(hood.skinSets[frame], {
@@ -581,11 +786,18 @@
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyTarget},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothRestPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothBoneIndices},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothBoneWeights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
+				// hood_skin.comp only writes the cloth pair when `resetState` is set, and the three
+				// branches all start from the same skinned pose, so skinning stays one dispatch
+				// bound to branch A. hoodRecord copies A's seed across on the reset step.
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition[HoodBranchNetwork]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious[HoodBranchNetwork]},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.skinUniforms[frame]} });
-			hood.featureSets[frame] = hoodAllocateSet(hood.featuresLayout);
-			if (hoodSolver == HoodPostCvpr) hoodWriteSet(hood.featureSets[frame], {
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
+			for (uint32_t branch = 0; branch < hoodBranchCount; ++branch) {
+			auto* branchPosition = &hoodBuffers.clothPosition[branch];
+			auto* branchPrevious = &hoodBuffers.clothPrevious[branch];
+			hood.featureSets[frame][branch] = hoodAllocateSet(hood.featuresLayout);
+			if (hoodSolver == HoodPostCvpr) hoodWriteSet(hood.featureSets[frame][branch], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,branchPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,branchPrevious},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangles},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshSenders},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshReceivers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothRestPosition},
@@ -601,8 +813,8 @@
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.coarseFeatures[0]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.coarseFeatures[1]},
 				{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.featureUniforms[frame]},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangleOffsets},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangleIndices} });
-			else hoodWriteSet(hood.featureSets[frame], {
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
+			else hoodWriteSet(hood.featureSets[frame][branch], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,branchPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,branchPrevious},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangles},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshSenders},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshReceivers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothRestPosition},
@@ -614,18 +826,21 @@
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.normalizers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.effectivePosition},
 				{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.featureUniforms[frame]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.activeProxy},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangleOffsets},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangleIndices} });
-			hood.integrateSets[frame] = hoodAllocateSet(hood.integrateLayout);
-			hoodWriteSet(hood.integrateSets[frame], {
+			hood.integrateSets[frame][branch] = hoodAllocateSet(hood.integrateLayout);
+			hoodWriteSet(hood.integrateSets[frame][branch], {
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.weights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.mlpTable},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.normalizers},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.nodeLatent[hoodActiveProcessorBlocks & 1u]},
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,branchPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,branchPrevious},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.effectivePosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.acceleration},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyTarget},
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.integrateUniforms[frame]} });
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.integrateUniforms[frame][branch]} });
+			}
 			hood.toySets[frame] = hoodAllocateSet(hood.toyLayout);
 			hoodWriteSet(hood.toySets[frame], {
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious},
+				// The toy solver has no comparison mode; it always runs on branch A's state.
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition[HoodBranchNetwork]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious[HoodBranchNetwork]},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.csrOffsets},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.meshSenders},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.toyWeights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.toyHidden},
@@ -635,21 +850,24 @@
 		}
 
 		hood.encodeSet = hoodAllocateSet(hood.encodeLayout);
-		hood.worldNearestSet = hoodAllocateSet(hood.worldNearestLayout);
-		hoodWriteSet(hood.worldNearestSet, {
-			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},
-			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyPosition},
-			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.activeProxy} });
+		for (uint32_t branch = 0; branch < hoodBranchCount; ++branch) {
+			hood.worldNearestSets[branch] = hoodAllocateSet(hood.worldNearestLayout);
+			hoodWriteSet(hood.worldNearestSets[branch], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition[branch]},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyPosition},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.activeProxy} });
+		}
 		hood.worldReverseSet = hoodAllocateSet(hood.worldReverseLayout);
 		hoodWriteSet(hood.worldReverseSet, {
 			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldReverseCloth},
 			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldReverseBegin},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldReverseCount} });
-		if (hoodXpbdAvailable) for (uint32_t ping = 0; ping < 2; ++ping) {
-			// ping 0 reads clothPosition and writes the scratch buffer; ping 1 is the reverse.
-			auto* read = ping == 0 ? &hoodBuffers.clothPosition : &hoodBuffers.xpbdScratch;
-			auto* write = ping == 0 ? &hoodBuffers.xpbdScratch : &hoodBuffers.clothPosition;
-			hood.xpbdSets[ping] = hoodAllocateSet(hood.xpbdLayout);
-			hoodWriteSet(hood.xpbdSets[ping], {
+		if (hoodXpbdAvailable) for (uint32_t branch = 0; branch < hoodBranchCount; ++branch) for (uint32_t ping = 0; ping < 2; ++ping) {
+			// ping 0 reads this branch's clothPosition and writes the scratch buffer; ping 1 is the
+			// reverse. The scratch buffer is shared because the branches are recorded in sequence.
+			auto* read = ping == 0 ? &hoodBuffers.clothPosition[branch] : &hoodBuffers.xpbdScratch;
+			auto* write = ping == 0 ? &hoodBuffers.xpbdScratch : &hoodBuffers.clothPosition[branch];
+			hood.xpbdSets[branch][ping] = hoodAllocateSet(hood.xpbdLayout);
+			hoodWriteSet(hood.xpbdSets[branch][ping], {
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdPairs},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdTargetLength},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdWeightSum},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdKind},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdSlots},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdSigns},
@@ -839,8 +1057,21 @@
 			return;
 		}
 		hoodComputeFrame = hoodFrame;
-		hoodNextFrame = hoodFrame + 1;
+		// The obstacle frame is frame_of(step) and the target frame frame_of(step + 1), so under a
+		// scaled clip the target leads by `hoodFrameStep` frames rather than one. Advancing only
+		// hoodFrame would leave the contact target one frame ahead while the body jumped several --
+		// a silent change of contact semantics rather than a speed test. Mirrors
+		// tools/train_student.py::make_graph, which does the same for --frame-scales.
+		const uint32_t step = static_cast<uint32_t>(std::max(1, hoodFrameStep));
+		hoodNextFrame = hoodFrame + step;
 		if (hoodNextFrame >= hoodFrameCount) {
+			if (hoodHoldLastFrame) {
+				// Keep stepping against the final pose so the settle is observable. The body stops
+				// moving, so this is the static relaxation the probe measures after clip_exhausted_at.
+				hoodFrame = hoodComputeFrame = hoodNextFrame = hoodRenderFrame = hoodFrameCount - 1;
+				hoodSimulateFrame = true;
+				return;
+			}
 			hoodFrame = hoodComputeFrame = hoodNextFrame = hoodRenderFrame = 0;
 			hoodRequestReset = true;
 			hoodFirstStep = true;
@@ -872,13 +1103,29 @@
 		// once at the end. Leaving integrate's own projection on as well would apply the half-plane
 		// twice per step and would not match the configuration gate G0 measured in Python, where
 		// `integrate()` does no projection at all.
-		HoodIntegrateParams integrate{ hoodClothCount, hoodFirstStep ? 1u : 0u,
-			(hoodCollisionProjection && !hoodXpbdEnabled) ? 1u : 0u, hoodDecoderMlpId };
-		std::memcpy(hood.integrateUniforms[currentBuffer].mapped, &integrate, sizeof(integrate));
+		for (uint32_t branch = 0; branch < hoodBranchCount; ++branch) {
+			HoodIntegrateParams integrate{ hoodClothCount, hoodFirstStep ? 1u : 0u,
+				(hoodCollisionProjection && !hoodBranchUsesXpbd(branch)) ? 1u : 0u, hoodDecoderMlpId };
+			if (hoodBranchUsesNetwork(branch)) {
+				integrate.predictor = 0u;
+			} else {
+				// gate_g0.py's BallisticGravity: the step displacement is dt^2 * g, and zero on the
+				// settle step, whose nominal dt of 1/3 s would otherwise displace 1.09 m.
+				integrate.predictor = 1u;
+				const float timestep = 1.0f / 30.0f;
+				const float scale = hoodFirstStep ? 0.0f : timestep * timestep;
+				integrate.gravityDisplacement = glm::vec4(hoodGravity[0] * scale, hoodGravity[1] * scale,
+					hoodGravity[2] * scale, 0.0f);
+			}
+			std::memcpy(hood.integrateUniforms[currentBuffer][branch].mapped, &integrate, sizeof(integrate));
+		}
 		HoodToyParams toy{ hoodClothCount, 1.0f / static_cast<float>(hoodFps), 8.0f, 30.0f, glm::vec4(0.0f, -9.8f, 0.0f, 0.0f) };
 		std::memcpy(hood.toyUniforms[currentBuffer].mapped, &toy, sizeof(toy));
 		const glm::vec3 root = hoodRootPositions[hoodRenderFrame];
-		camera.setTranslation(glm::vec3(-root.x, 0.35f - root.y, -3.2f - root.z));
+		// Follows the root so a clip with real world travel -- sprint_start covers 9.7 m/s -- stays in
+		// frame. Comparison mode only needs to pull back far enough to hold all three copies; B sits
+		// at x = 0, so the horizontal framing is unchanged.
+		camera.setTranslation(glm::vec3(-root.x, 0.35f - root.y, -hoodCameraDistance - root.z));
 		glm::mat4 projection = camera.matrices.perspective;
 		projection[1][1] *= -1.0f;
 		HoodGraphicsUniform graphics{ projection, camera.matrices.view, glm::vec4(-2.0f, 4.0f, -2.0f, 1.0f), glm::vec4(root, 1.0f) };
@@ -894,10 +1141,10 @@
 
 	// Jacobi XPBD after the network's integrate pass. See hood_xpbd.comp for why one dispatch per
 	// iteration is the whole point, and plans/gnn/gnn-xpbd-v2.md section 3.3 for what it buys.
-	void hoodRecordXpbd(VkCommandBuffer command)
+	void hoodRecordXpbd(VkCommandBuffer command, uint32_t branch)
 	{
-		if (!hoodXpbdEnabled || hoodXpbdIterations <= 0) return;
-		const uint32_t iterations = static_cast<uint32_t>(hoodXpbdIterations);
+		if (!hoodXpbdAvailable || !hoodBranchUsesXpbd(branch) || hoodBranchIterations(branch) <= 0) return;
+		const uint32_t iterations = static_cast<uint32_t>(hoodBranchIterations(branch));
 
 		// lambda accumulates within a step and must start at zero in every step, exactly as
 		// real_scene/xpbd.py::project builds a fresh multiplier vector per call. This barrier also
@@ -928,16 +1175,17 @@
 		vkCmdPushConstants(command, hood.xpbdPipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 		for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
 			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.xpbdPipeline, 0, 1,
-				&hood.xpbdSets[iteration & 1u], 0, nullptr);
+				&hood.xpbdSets[branch][iteration & 1u], 0, nullptr);
 			vkCmdDispatch(command, (hoodClothCount + 127) / 128, 1, 1);
 			hoodComputeBarrier(command);
 		}
 
 		// An odd iteration count leaves the result in the scratch buffer. k is 128 by default so
 		// this never fires, but silently rounding the count would be worse than one transfer.
+		// Branch B's equal-budget 228 is even too.
 		if (iterations & 1u) {
 			VkBufferCopy copy{ .size = hoodClothCount * sizeof(glm::vec4) };
-			vkCmdCopyBuffer(command, hoodBuffers.xpbdScratch.buffer, hoodBuffers.clothPosition.buffer, 1, &copy);
+			vkCmdCopyBuffer(command, hoodBuffers.xpbdScratch.buffer, hoodBuffers.clothPosition[branch].buffer, 1, &copy);
 			hoodTransferThenComputeBarrier(command);
 		}
 
@@ -947,7 +1195,7 @@
 		// or step 1 builds its velocity from a position the solver already rejected.
 		if (hoodFirstStep) {
 			VkBufferCopy copy{ .size = hoodClothCount * sizeof(glm::vec4) };
-			vkCmdCopyBuffer(command, hoodBuffers.clothPosition.buffer, hoodBuffers.clothPrevious.buffer, 1, &copy);
+			vkCmdCopyBuffer(command, hoodBuffers.clothPosition[branch].buffer, hoodBuffers.clothPrevious[branch].buffer, 1, &copy);
 			hoodTransferThenComputeBarrier(command);
 		}
 	}
@@ -979,6 +1227,17 @@
 		const uint32_t skinCount = std::max({ hoodCharacterCount, hoodProxyCount, hoodClothCount });
 		vkCmdDispatch(command, (skinCount + 127) / 128, 1, 1);
 		hoodComputeBarrier(command);
+		// hood_skin.comp writes the cloth pair only on the reset step, and it is bound to branch A,
+		// so on that step the other branches take a byte copy of A's seed. Identical starting state
+		// is a precondition of the comparison, and a copy makes it exact rather than merely equal.
+		if (hoodRequestReset && hoodCompareMode) {
+			VkBufferCopy copy{ .size = hoodClothCount * sizeof(glm::vec4) };
+			for (uint32_t branch = 1; branch < hoodBranchCount; ++branch) {
+				vkCmdCopyBuffer(command, hoodBuffers.clothPosition[HoodBranchNetwork].buffer, hoodBuffers.clothPosition[branch].buffer, 1, &copy);
+				vkCmdCopyBuffer(command, hoodBuffers.clothPrevious[HoodBranchNetwork].buffer, hoodBuffers.clothPrevious[branch].buffer, 1, &copy);
+			}
+			hoodTransferThenComputeBarrier(command);
+		}
 		vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 1);
 		if (hoodSimulateFrame) {
 			if (hoodSolver == HoodToy2L) {
@@ -993,17 +1252,26 @@
 				for (uint32_t timestamp = 4; timestamp < hoodTimestampCount; ++timestamp)
 					vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], timestamp);
 			} else {
+			// Each branch replays this whole sequence against its own position pair. Only the
+			// skinning above is shared -- the three copies wear the same body driven by the same
+			// animation frame. Everything between here and hoodRecordXpbd writes step-local scratch
+			// (worldObstacle, activeProxy, effectivePosition, the latents), which is safe to share
+			// precisely because the branches are recorded in sequence rather than concurrently.
+			const auto branches = hoodActiveBranches();
+			for (const uint32_t branch : branches) {
 			vkCmdFillBuffer(command, hoodBuffers.activeProxy.buffer, 0, VK_WHOLE_SIZE, 0);
 			vkCmdFillBuffer(command, hoodBuffers.worldReverseCount.buffer, 0, VK_WHOLE_SIZE, 0);
-			VkMemoryBarrier clearBarrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+			VkMemoryBarrier clearBarrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+				.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
 				.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
-			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clearBarrier, 0, nullptr, 0, nullptr);
+			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clearBarrier, 0, nullptr, 0, nullptr);
 			// Pick the nearest body proxy per cloth vertex before the feature pass, which now
 			// reads worldObstacle instead of scanning every proxy itself. Both passes sit
 			// inside the same timestamp pair, so `features_world` still covers all of the
 			// feature work and stays comparable against earlier runs.
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.worldNearest);
-			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.worldNearestPipeline, 0, 1, &hood.worldNearestSet, 0, nullptr);
+			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.worldNearestPipeline, 0, 1, &hood.worldNearestSets[branch], 0, nullptr);
 			const struct { uint32_t clothCount, proxyCount; float collisionRadius; } nearestPush{ hoodClothCount, hoodProxyCount, hoodCollisionRadius };
 			vkCmdPushConstants(command, hood.worldNearestPipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(nearestPush), &nearestPush);
 			vkCmdDispatch(command, hoodClothCount, 1, 1);
@@ -1016,14 +1284,24 @@
 			vkCmdDispatch(command, hoodClothCount, 1, 1);
 			hoodComputeBarrier(command);
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.features);
-			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.featuresPipeline, 0, 1, &hood.featureSets[currentBuffer], 0, nullptr);
+			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.featuresPipeline, 0, 1, &hood.featureSets[currentBuffer][branch], 0, nullptr);
 			const uint32_t featureCount = hoodSolver == HoodPostCvpr
 				? std::max({ hoodClothCount, hoodProxyCount, hoodMeshEdgeCount, hoodCoarseEdgeCounts[0], hoodCoarseEdgeCounts[1] })
 				: std::max({ hoodClothCount, hoodProxyCount, hoodMeshEdgeCount });
 			vkCmdDispatch(command, (featureCount + 127) / 128, 1, 1);
 			hoodComputeBarrier(command);
-			vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 2);
+			// A timestamp slot may only be written once per reset, so in comparison mode the
+			// per-stage slots are filled by the last enabled branch alone and every earlier branch
+			// skips them. That is fine because comparison mode is not a timing path and never was:
+			// COMMANDS.md section 5 already records that interactive ms run about 2.6x the
+			// locked-clock benchmark. Performance still comes only from benchmark_hood_static.ps1.
+			const bool stamps = branch == branches.back();
+			auto stamp = [&](uint32_t index) {
+				if (stamps) vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], index);
+			};
+			stamp(2);
 
+			if (hoodBranchUsesNetwork(branch)) {
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.encode);
 			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.encodePipeline, 0, 1, &hood.encodeSet, 0, nullptr);
 			if (hoodSolver == HoodPostCvpr) {
@@ -1037,10 +1315,10 @@
 					vkCmdPushConstants(command, hood.encodePipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push);
 					vkCmdDispatch(command, push[2], 1, 1);
 					hoodComputeBarrier(command);
-					if (encoder == 0) vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 3);
-					else if (encoder == 3) vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 4);
-					else if (encoder == 4) vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 5);
-					else if (encoder == 5) vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 6);
+					if (encoder == 0) stamp(3);
+					else if (encoder == 3) stamp(4);
+					else if (encoder == 4) stamp(5);
+					else if (encoder == 5) stamp(6);
 				}
 			} else {
 				const uint32_t encodePushes[4][4] = { {0,0,hoodClothCount + hoodProxyCount,20}, {1,1,hoodMeshEdgeCount,12}, {2,2,hoodClothCount,9}, {2,3,hoodClothCount,9} };
@@ -1049,7 +1327,7 @@
 					vkCmdPushConstants(command, hood.encodePipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push);
 					vkCmdDispatch(command, push[2], 1, 1);
 					hoodComputeBarrier(command);
-					vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 3 + encoder);
+					stamp(3 + encoder);
 				}
 			}
 
@@ -1070,7 +1348,7 @@
 					for (const auto& push : edgePushes) { vkCmdPushConstants(command, hood.edgePipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push); vkCmdDispatch(command, push[2], 1, 1); }
 				}
 				hoodComputeBarrier(command);
-				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 7 + block * 2);
+				stamp(7 + block * 2);
 				vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.node);
 				vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.nodePipeline, 0, 1, &hood.nodeSets[ping], 0, nullptr);
 				if (hoodSolver == HoodPostCvpr) {
@@ -1083,18 +1361,24 @@
 				}
 				vkCmdDispatch(command, hoodClothCount + hoodProxyCount, 1, 1);
 				hoodComputeBarrier(command);
-				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 8 + block * 2);
+				stamp(8 + block * 2);
 			}
-			for (uint32_t block = hoodActiveProcessorBlocks; block < hoodProcessorBlocks; ++block) {
-				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 7 + block * 2);
-				vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], 8 + block * 2);
+			}
+			// A branch that skipped the network left the encoder and block slots unwritten. Fill
+			// them here so every slot is still written exactly once, which is what hoodCollectTiming
+			// and the validation layers both require.
+			if (!hoodBranchUsesNetwork(branch)) for (uint32_t encoder = 0; encoder < 4; ++encoder) stamp(3 + encoder);
+			for (uint32_t block = hoodBranchUsesNetwork(branch) ? hoodActiveProcessorBlocks : 0u; block < hoodProcessorBlocks; ++block) {
+				stamp(7 + block * 2);
+				stamp(8 + block * 2);
 			}
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.integrate);
-			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.integratePipeline, 0, 1, &hood.integrateSets[currentBuffer], 0, nullptr);
+			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.integratePipeline, 0, 1, &hood.integrateSets[currentBuffer][branch], 0, nullptr);
 			vkCmdDispatch(command, hoodClothCount, 1, 1);
-			vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], hoodIntegrateTimestamp);
-			hoodRecordXpbd(command);
-			vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, hood.queryPools[currentBuffer], hoodXpbdTimestamp);
+			stamp(hoodIntegrateTimestamp);
+			hoodRecordXpbd(command, branch);
+			stamp(hoodXpbdTimestamp);
+			}
 			}
 		} else {
 			for (uint32_t timestamp = 2; timestamp < hoodTimestampCount; ++timestamp)
@@ -1223,15 +1507,26 @@
 		return result;
 	}
 
-	void hoodWriteStabilityJson()
+	// Per-branch structure metrics. `edge_length_ratio` is measured against the authored rest mesh
+	// with the same directed edge list tools/train_student.py::edge_ratios uses, so `p95` here is
+	// directly comparable to the Python probe's `edge_p95` -- that cross-language agreement is what
+	// makes the comparison view trustworthy rather than merely plausible.
+	struct HoodStructure {
+		uint32_t invalidVertices{}, activeWorldEdges{};
+		double maximumDisplacement{}, maximumPinnedError{};
+		double edgeMean{}, edgeP95{}, edgeMaximum{}, collapsedFraction{}, stretchedFraction{};
+		double areaMean{}, areaMedian{}, degenerateFraction{}, flippedFraction{};
+		glm::dvec3 minimum{}, maximum{};
+		bool structurePreserved{};
+	};
+
+	HoodStructure hoodMeasureStructure(uint32_t branch)
 	{
-		if (hoodStabilityOutput.empty()) return;
-		const auto positions = hoodReadback<glm::vec4>(hoodBuffers.clothPosition.buffer, hoodClothCount);
+		const auto positions = hoodReadback<glm::vec4>(hoodBuffers.clothPosition[branch].buffer, hoodClothCount);
 		const auto pinTargets = hoodReadback<glm::vec4>(hoodBuffers.pinTarget.buffer, hoodClothCount);
 		const auto world = hoodReadback<uint32_t>(hoodBuffers.worldObstacle.buffer, hoodClothCount);
-		uint32_t invalidVertices = 0, activeWorldEdges = 0, collapsedEdges = 0, stretchedEdges = 0;
-		uint32_t degenerateTriangles = 0, flippedTriangles = 0;
-		double maximumDisplacement = 0.0, maximumPinnedError = 0.0;
+		HoodStructure result;
+		uint32_t collapsedEdges = 0, stretchedEdges = 0, degenerateTriangles = 0, flippedTriangles = 0;
 		glm::dvec3 minimum(std::numeric_limits<double>::max()), maximum(-std::numeric_limits<double>::max());
 		std::vector<double> edgeRatios, triangleAreaRatios;
 		edgeRatios.reserve(hoodMeshSendersCpu.size());
@@ -1240,22 +1535,23 @@
 			return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 		};
 		for (uint32_t vertex = 0; vertex < hoodClothCount; ++vertex) {
-			if (world[vertex] != 0xffffffffu) ++activeWorldEdges;
-			if (!finite3(positions[vertex])) { ++invalidVertices; continue; }
+			if (world[vertex] != 0xffffffffu) ++result.activeWorldEdges;
+			if (!finite3(positions[vertex])) { ++result.invalidVertices; continue; }
 			const glm::dvec3 position(positions[vertex]);
 			const glm::dvec3 rest(hoodRestPositionsCpu[vertex]);
 			minimum = glm::min(minimum, position); maximum = glm::max(maximum, position);
-			const double displacement = glm::length(position - rest);
-			maximumDisplacement = std::max(maximumDisplacement, displacement);
+			result.maximumDisplacement = std::max(result.maximumDisplacement, glm::length(position - rest));
 			if (hoodPinMaskCpu[vertex] && finite3(pinTargets[vertex])) {
-				maximumPinnedError = std::max(maximumPinnedError,
+				result.maximumPinnedError = std::max(result.maximumPinnedError,
 					glm::length(position - glm::dvec3(pinTargets[vertex])));
 			}
 		}
-		if (invalidVertices == hoodClothCount) {
+		if (result.invalidVertices == hoodClothCount) {
 			minimum = glm::dvec3(0.0);
 			maximum = glm::dvec3(0.0);
 		}
+		result.minimum = minimum;
+		result.maximum = maximum;
 		for (size_t edge = 0; edge < hoodMeshSendersCpu.size(); ++edge) {
 			const uint32_t sender = hoodMeshSendersCpu[edge], receiver = hoodMeshReceiversCpu[edge];
 			if (!finite3(positions[sender]) || !finite3(positions[receiver])) continue;
@@ -1280,45 +1576,85 @@
 			if (areaRatio < 0.1) ++degenerateTriangles;
 			if (glm::dot(restNormal, nowNormal) < 0.0) ++flippedTriangles;
 		}
-		const double edgeMean = edgeRatios.empty() ? 0.0
+		result.edgeMean = edgeRatios.empty() ? 0.0
 			: std::accumulate(edgeRatios.begin(), edgeRatios.end(), 0.0) / static_cast<double>(edgeRatios.size());
-		const double areaMean = triangleAreaRatios.empty() ? 0.0
+		result.areaMean = triangleAreaRatios.empty() ? 0.0
 			: std::accumulate(triangleAreaRatios.begin(), triangleAreaRatios.end(), 0.0) / static_cast<double>(triangleAreaRatios.size());
-		const double edgeP95 = edgeRatios.empty() ? 0.0 : percentile(edgeRatios, 0.95);
-		const double edgeMaximum = edgeRatios.empty() ? 0.0 : *std::max_element(edgeRatios.begin(), edgeRatios.end());
-		const double areaMedian = triangleAreaRatios.empty() ? 0.0 : percentile(triangleAreaRatios, 0.5);
-		const double collapsedFraction = hoodMeshSendersCpu.empty() ? 0.0 : collapsedEdges / static_cast<double>(hoodMeshSendersCpu.size());
-		const double stretchedFraction = hoodMeshSendersCpu.empty() ? 0.0 : stretchedEdges / static_cast<double>(hoodMeshSendersCpu.size());
-		const double degenerateFraction = hoodTrianglesCpu.empty() ? 0.0 : degenerateTriangles / static_cast<double>(hoodTrianglesCpu.size());
-		const double flippedFraction = hoodTrianglesCpu.empty() ? 0.0 : flippedTriangles / static_cast<double>(hoodTrianglesCpu.size());
-		const bool structurePreserved = invalidVertices == 0 && maximumPinnedError <= 1.0e-5 && edgeP95 <= 2.0
-			&& collapsedFraction <= 0.05 && degenerateFraction <= 0.05;
+		result.edgeP95 = edgeRatios.empty() ? 0.0 : percentile(edgeRatios, 0.95);
+		result.edgeMaximum = edgeRatios.empty() ? 0.0 : *std::max_element(edgeRatios.begin(), edgeRatios.end());
+		result.areaMedian = triangleAreaRatios.empty() ? 0.0 : percentile(triangleAreaRatios, 0.5);
+		result.collapsedFraction = hoodMeshSendersCpu.empty() ? 0.0 : collapsedEdges / static_cast<double>(hoodMeshSendersCpu.size());
+		result.stretchedFraction = hoodMeshSendersCpu.empty() ? 0.0 : stretchedEdges / static_cast<double>(hoodMeshSendersCpu.size());
+		result.degenerateFraction = hoodTrianglesCpu.empty() ? 0.0 : degenerateTriangles / static_cast<double>(hoodTrianglesCpu.size());
+		result.flippedFraction = hoodTrianglesCpu.empty() ? 0.0 : flippedTriangles / static_cast<double>(hoodTrianglesCpu.size());
+		result.structurePreserved = result.invalidVertices == 0 && result.maximumPinnedError <= 1.0e-5
+			&& result.edgeP95 <= 2.0 && result.collapsedFraction <= 0.05 && result.degenerateFraction <= 0.05;
+		return result;
+	}
+
+	void hoodWriteStabilityJson()
+	{
+		if (hoodStabilityOutput.empty()) return;
+		const auto branches = hoodActiveBranches();
 		if (hoodStabilityOutput.has_parent_path()) std::filesystem::create_directories(hoodStabilityOutput.parent_path());
 		std::ofstream output(hoodStabilityOutput);
 		if (!output) throw std::runtime_error("Could not create HOOD stability JSON");
 		output << std::setprecision(10)
 			<< "{\n  \"scene\": \"" << (hoodGridScene ? "hood_grid64" : "ch10032") << "\","
 			<< "\n  \"solver\": \"" << (hoodSolver == HoodToy2L ? "toy2l" : (hoodSolver == HoodTinyStudent ? "tinyhood" + hoodStudentLabel() : (hoodSolver == HoodPostCvpr ? "postcvpr" : "fine15"))) << "\","
-			<< "\n  \"xpbd\": " << (hoodXpbdEnabled ? "true" : "false")
-			<< ",\n  \"xpbd_iterations\": " << (hoodXpbdEnabled ? hoodXpbdIterations : 0)
-			<< ",\n  \"collision_projection\": " << ((hoodCollisionProjection && !hoodXpbdEnabled) ? "true" : "false") << ','
-			<< "\n  \"completed_steps\": " << hoodCompletedSteps << ",\n  \"structure_preserved\": " << (structurePreserved ? "true" : "false") << ','
-			<< "\n  \"invalid_vertices\": " << invalidVertices << ",\n  \"active_world_edges\": " << activeWorldEdges << ','
-			<< "\n  \"maximum_displacement_m\": " << maximumDisplacement << ",\n  \"maximum_pinned_error_m\": " << maximumPinnedError << ','
-			<< "\n  \"edge_length_ratio\": {\"mean\": " << edgeMean << ", \"p95\": " << edgeP95 << ", \"max\": " << edgeMaximum
-			<< ", \"collapsed_fraction_lt_0_5\": " << collapsedFraction << ", \"stretched_fraction_gt_1_5\": " << stretchedFraction << "},"
-			<< "\n  \"triangle_area_ratio\": {\"mean\": " << areaMean << ", \"median\": " << areaMedian
-			<< ", \"degenerate_fraction_lt_0_1\": " << degenerateFraction << ", \"flipped_fraction\": " << flippedFraction << "},"
-			<< "\n  \"bounds_min_m\": [" << minimum.x << ", " << minimum.y << ", " << minimum.z << "],"
-			<< "\n  \"bounds_max_m\": [" << maximum.x << ", " << maximum.y << ", " << maximum.z << "]\n}\n";
-		std::cout << "Wrote " << hoodStabilityOutput << " after " << hoodCompletedSteps << " steps; structure "
-			<< (structurePreserved ? "preserved" : "failed") << ", edge p95=" << edgeP95 << ", degenerate triangles=" << degenerateFraction << "\n";
+			<< "\n  \"motion\": \"" << hoodMotion << "\",\n  \"frame_step\": " << hoodFrameStep << ',';
+		// One active branch keeps the historical flat shape, so "comparison mode with only C enabled"
+		// yields a file whose fields line up with a pre-comparison single-branch run. Several branches
+		// nest one object each under "branches", keyed by the branch letter.
+		auto emit = [&](const HoodStructure& m, uint32_t branch, const char* indent) {
+			output << "\n" << indent << "\"xpbd\": " << (hoodBranchUsesXpbd(branch) ? "true" : "false")
+				<< ",\n" << indent << "\"xpbd_iterations\": " << (hoodBranchUsesXpbd(branch) ? hoodBranchIterations(branch) : 0)
+				<< ",\n" << indent << "\"network\": " << (hoodBranchUsesNetwork(branch) ? "true" : "false")
+				<< ",\n" << indent << "\"collision_projection\": " << ((hoodCollisionProjection && !hoodBranchUsesXpbd(branch)) ? "true" : "false") << ','
+				<< "\n" << indent << "\"completed_steps\": " << hoodCompletedSteps
+				<< ",\n" << indent << "\"structure_preserved\": " << (m.structurePreserved ? "true" : "false") << ','
+				<< "\n" << indent << "\"invalid_vertices\": " << m.invalidVertices
+				<< ",\n" << indent << "\"active_world_edges\": " << m.activeWorldEdges << ','
+				<< "\n" << indent << "\"maximum_displacement_m\": " << m.maximumDisplacement
+				<< ",\n" << indent << "\"maximum_pinned_error_m\": " << m.maximumPinnedError << ','
+				<< "\n" << indent << "\"edge_length_ratio\": {\"mean\": " << m.edgeMean << ", \"p95\": " << m.edgeP95 << ", \"max\": " << m.edgeMaximum
+				<< ", \"collapsed_fraction_lt_0_5\": " << m.collapsedFraction << ", \"stretched_fraction_gt_1_5\": " << m.stretchedFraction << "},"
+				<< "\n" << indent << "\"triangle_area_ratio\": {\"mean\": " << m.areaMean << ", \"median\": " << m.areaMedian
+				<< ", \"degenerate_fraction_lt_0_1\": " << m.degenerateFraction << ", \"flipped_fraction\": " << m.flippedFraction << "},"
+				<< "\n" << indent << "\"bounds_min_m\": [" << m.minimum.x << ", " << m.minimum.y << ", " << m.minimum.z << "],"
+				<< "\n" << indent << "\"bounds_max_m\": [" << m.maximum.x << ", " << m.maximum.y << ", " << m.maximum.z << "]";
+		};
+		auto report = [&](const HoodStructure& m, const char* label) {
+			std::cout << "Wrote " << label << " after " << hoodCompletedSteps << " steps; structure "
+				<< (m.structurePreserved ? "preserved" : "failed") << ", edge p95=" << m.edgeP95
+				<< ", degenerate triangles=" << m.degenerateFraction << "\n";
+		};
+		if (branches.size() == 1) {
+			const auto measured = hoodMeasureStructure(branches.front());
+			emit(measured, branches.front(), "  ");
+			output << "\n}\n";
+			report(measured, hoodStabilityOutput.string().c_str());
+			return;
+		}
+		output << "\n  \"branches\": {";
+		for (size_t index = 0; index < branches.size(); ++index) {
+			const uint32_t branch = branches[index];
+			const auto measured = hoodMeasureStructure(branch);
+			output << (index ? "," : "") << "\n    \"" << hoodBranchNames[branch][0] << "\": {";
+			emit(measured, branch, "      ");
+			output << "\n    }";
+			report(measured, hoodBranchNames[branch]);
+		}
+		output << "\n  }\n}\n";
+		std::cout << "Wrote " << hoodStabilityOutput << "\n";
 	}
 
 	void hoodVerifyCurrentStep()
 	{
 		if (!hoodVerifyMode || !hoodSimulateFrame || hoodVerifyStep >= hoodGoldenSteps) return;
-		const auto positions = hoodReadback<glm::vec4>(hoodBuffers.clothPosition.buffer, hoodClothCount);
+		// Verification is a single-branch contract against a Python golden, so it always reads A.
+		// --hood-compare and --hood-verify are rejected together in gnncloth.cpp.
+		const auto positions = hoodReadback<glm::vec4>(hoodBuffers.clothPosition[HoodBranchNetwork].buffer, hoodClothCount);
 		const auto acceleration = hoodVerifyStep == 0 ? hoodReadback<glm::vec4>(hoodBuffers.acceleration.buffer, hoodClothCount) : std::vector<glm::vec4>{};
 		double stepMaximum = 0.0, stepSum = 0.0;
 		for (uint32_t vertex = 0; vertex < hoodClothCount; ++vertex) {
@@ -1406,13 +1742,27 @@
 		const auto scissor = vks::initializers::rect2D(width, height, 0, 0); vkCmdSetViewport(command, 0, 1, &viewport); vkCmdSetScissor(command, 0, 1, &scissor);
 		vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.graphicsPipeline, 0, 1, &hood.graphicsSets[currentBuffer], 0, nullptr);
 		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.sky); vkCmdDraw(command, 3, 1, 0, 0);
-		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.character);
+		// One body plus one garment per branch, the same skinned body shifted along x. Outside
+		// comparison mode this is a single pass with a zero offset and the original blue tint, so the
+		// rendered result is unchanged.
 		const VkBuffer characterBuffers[3]{ hoodBuffers.characterPosition.buffer, hoodBuffers.characterNormal.buffer, hoodBuffers.characterUv.buffer };
-		const VkDeviceSize offsets[3]{}; vkCmdBindVertexBuffers(command, 0, 3, characterBuffers, offsets);
-		vkCmdBindIndexBuffer(command, hoodBuffers.characterIndices.buffer, 0, VK_INDEX_TYPE_UINT32); vkCmdDrawIndexed(command, hoodCharacterIndexCount, 1, 0, 0, 0);
-		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.cloth); const VkBuffer clothBuffer = hoodBuffers.clothPosition.buffer; const VkDeviceSize zero = 0;
-		vkCmdBindVertexBuffers(command, 0, 1, &clothBuffer, &zero); vkCmdBindIndexBuffer(command, hoodBuffers.clothIndices.buffer, 0, VK_INDEX_TYPE_UINT32);
-		vkCmdDrawIndexed(command, hoodClothIndexCount, 1, 0, 0, 0);
+		const VkDeviceSize offsets[3]{};
+		const VkDeviceSize zero = 0;
+		for (const uint32_t branch : hoodActiveBranches()) {
+			HoodInstancePush instance{ glm::vec4(hoodBranchOffset(branch), 0.0f, 0.0f, 0.0f),
+				hoodBranchTint(hoodCompareMode ? branch : HoodBranchNetwork) };
+			vkCmdPushConstants(command, hood.graphicsPipeline, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+				0, sizeof(instance), &instance);
+			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.character);
+			vkCmdBindVertexBuffers(command, 0, 3, characterBuffers, offsets);
+			vkCmdBindIndexBuffer(command, hoodBuffers.characterIndices.buffer, 0, VK_INDEX_TYPE_UINT32);
+			vkCmdDrawIndexed(command, hoodCharacterIndexCount, 1, 0, 0, 0);
+			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, hood.cloth);
+			const VkBuffer clothBuffer = hoodBuffers.clothPosition[branch].buffer;
+			vkCmdBindVertexBuffers(command, 0, 1, &clothBuffer, &zero);
+			vkCmdBindIndexBuffer(command, hoodBuffers.clothIndices.buffer, 0, VK_INDEX_TYPE_UINT32);
+			vkCmdDrawIndexed(command, hoodClothIndexCount, 1, 0, 0, 0);
+		}
 		drawUI(command); vkCmdEndRenderPass(command); VK_CHECK_RESULT(vkEndCommandBuffer(command));
 		VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 		auto submit = vks::initializers::submitInfo(); submit.waitSemaphoreCount = 1; submit.pWaitSemaphores = &presentCompleteSemaphores[currentBuffer];
@@ -1442,11 +1792,30 @@
 					: (hoodSolver == HoodPostCvpr ? "CH10032 + HOOD PostCVPR" : "CH10032 + HOOD Fine15")));
 		if (!overlay->header(header.c_str())) return;
 		overlay->checkBox("Paused", &hoodPaused);
+		if (hoodCompareMode) {
+			overlay->text("A blue = network only   B orange = constraints only   C green = hybrid");
+			overlay->checkBox("Show A (network only)", &hoodBranchEnabled[HoodBranchNetwork]);
+			overlay->checkBox("Show B (constraints only)", &hoodBranchEnabled[HoodBranchConstraints]);
+			overlay->checkBox("Show C (hybrid)", &hoodBranchEnabled[HoodBranchHybrid]);
+			overlay->sliderFloat("Branch spacing (m)", &hoodCompareSpacing, 0.5f, 3.0f);
+			overlay->sliderFloat("Camera distance (m)", &hoodCameraDistance, 2.0f, 12.0f);
+			// Equal GPU budget rather than equal iteration count -- see hoodXpbdIterationsB.
+			overlay->sliderInt("B iterations (equal budget)", &hoodXpbdIterationsB, 0, 512);
+			if (!hoodAvailableMotions.empty() && overlay->comboBox("Animation", &hoodSelectedMotion, hoodAvailableMotions)) {
+				const auto& chosen = hoodAvailableMotions[static_cast<size_t>(hoodSelectedMotion)];
+				if (chosen != hoodMotion) hoodLoadAnimation(chosen);
+			}
+			// The interactive form of the probe's --frame-scales. Integer only, so 1/2/3 reproduce
+			// the published columns exactly.
+			overlay->sliderInt("Playback speed (x)", &hoodFrameStep, 1, 4);
+			overlay->checkBox("Hold last frame (see the settle)", &hoodHoldLastFrame);
+			overlay->text("Comparison mode: GPU ms below are not a benchmark");
+		}
 		if (hoodSolver != HoodToy2L) overlay->checkBox("Body collision projection", &hoodCollisionProjection);
 		if (hoodXpbdAvailable && hoodSolver != HoodToy2L) {
-			overlay->checkBox("XPBD (Jacobi)", &hoodXpbdEnabled);
+			if (!hoodCompareMode) overlay->checkBox("XPBD (Jacobi)", &hoodXpbdEnabled);
 			if (hoodXpbdEnabled) {
-				overlay->sliderInt("XPBD iterations", &hoodXpbdIterations, 0, 256);
+				overlay->sliderInt(hoodCompareMode ? "C iterations" : "XPBD iterations", &hoodXpbdIterations, 0, 256);
 				overlay->checkBox("XPBD one-sided", &hoodXpbdOneSided);
 				overlay->checkBox("XPBD contacts", &hoodXpbdCollision);
 				// Gate G0 measured 0..1e-6 as completely inert: alpha = compliance / dt^2 is then
@@ -1492,7 +1861,11 @@
 		HOOD_DESTROY_BUFFER(proxyRestPosition); HOOD_DESTROY_BUFFER(proxyRestNormal); HOOD_DESTROY_BUFFER(proxyBoneIndices); HOOD_DESTROY_BUFFER(proxyBoneWeights);
 		HOOD_DESTROY_BUFFER(proxyPosition); HOOD_DESTROY_BUFFER(proxyNormal); HOOD_DESTROY_BUFFER(proxyTarget);
 		HOOD_DESTROY_BUFFER(clothRestPosition); HOOD_DESTROY_BUFFER(clothBoneIndices); HOOD_DESTROY_BUFFER(clothBoneWeights); HOOD_DESTROY_BUFFER(pinTarget);
-		HOOD_DESTROY_BUFFER(pinMask); HOOD_DESTROY_BUFFER(mass); HOOD_DESTROY_BUFFER(clothPosition); HOOD_DESTROY_BUFFER(clothPrevious);
+		HOOD_DESTROY_BUFFER(pinMask); HOOD_DESTROY_BUFFER(mass);
+		for (uint32_t branch = 0; branch < hoodBranchCount; ++branch) {
+			hoodBuffers.clothPosition[branch].destroy();
+			hoodBuffers.clothPrevious[branch].destroy();
+		}
 		HOOD_DESTROY_BUFFER(effectivePosition); HOOD_DESTROY_BUFFER(acceleration); HOOD_DESTROY_BUFFER(clothTriangles); HOOD_DESTROY_BUFFER(clothIndices);
 		HOOD_DESTROY_BUFFER(clothTriangleOffsets); HOOD_DESTROY_BUFFER(clothTriangleIndices);
 		HOOD_DESTROY_BUFFER(worldReverseCloth); HOOD_DESTROY_BUFFER(worldReverseBegin); HOOD_DESTROY_BUFFER(worldReverseCount);
@@ -1517,7 +1890,7 @@
 				if (hoodBuffers.coarseLatent[level][i].buffer != VK_NULL_HANDLE) hoodBuffers.coarseLatent[level][i].destroy();
 		}
 		#undef HOOD_DESTROY_BUFFER
-		for (uint32_t i=0;i<maxConcurrentFrames;++i) { hood.skinUniforms[i].destroy(); hood.featureUniforms[i].destroy(); hood.integrateUniforms[i].destroy(); hood.toyUniforms[i].destroy(); hood.graphicsUniforms[i].destroy(); vkDestroyQueryPool(device,hood.queryPools[i],nullptr); }
+		for (uint32_t i=0;i<maxConcurrentFrames;++i) { hood.skinUniforms[i].destroy(); hood.featureUniforms[i].destroy(); for (auto& branch : hood.integrateUniforms[i]) branch.destroy(); hood.toyUniforms[i].destroy(); hood.graphicsUniforms[i].destroy(); vkDestroyQueryPool(device,hood.queryPools[i],nullptr); }
 		for (auto pipeline : {hood.skin,hood.features,hood.encode,hood.edge,hood.node,hood.integrate,hood.toyLayer0,hood.toyLayer1,hood.worldNearest,hood.worldReverse,hood.sky,hood.character,hood.cloth}) vkDestroyPipeline(device,pipeline,nullptr);
 		for (auto layout : {hood.skinPipeline,hood.featuresPipeline,hood.encodePipeline,hood.edgePipeline,hood.nodePipeline,hood.integratePipeline,hood.toyPipeline,hood.worldNearestPipeline,hood.worldReversePipeline,hood.graphicsPipeline}) vkDestroyPipelineLayout(device,layout,nullptr);
 		for (auto layout : {hood.skinLayout,hood.featuresLayout,hood.encodeLayout,hood.edgeLayout,hood.nodeLayout,hood.integrateLayout,hood.toyLayout,hood.worldNearestLayout,hood.worldReverseLayout,hood.graphicsLayout}) vkDestroyDescriptorSetLayout(device,layout,nullptr);

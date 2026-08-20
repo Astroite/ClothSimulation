@@ -1,6 +1,22 @@
 #include "tinyhood_mlp.hlsli"
 
-struct Params { uint clothCount, firstStep, collisionProjection, decoderMlp; };
+// `predictor` selects where the step displacement comes from: 0 is the decoder, non-zero is
+// `gravityDisplacement` with the network skipped entirely. That second path is comparison branch B
+// of tools/gate_g0.py -- "XPBD only" means no network at all rather than a zeroed network output,
+// because the decoder's output mean is a dataset artifact and predicting it would leave branch B
+// with no downward force. The CPU passes dt^2 * g, and zero on the settle step (gate_g0.py's
+// BallisticGravity does the same: at dt = 1/3 a full gravity step is 1.09 m, a hundred times the
+// garment's per-step motion, and no number of sweeps recovers from it).
+//
+// gate_g0.py normalises dt^2 * g and lets integrate denormalise it again, which is an artifact of
+// reusing the predictor interface; taking the displacement directly is the same quantity minus one
+// float32 round trip (about 1e-7 m, four orders below the established cross-process noise -- see
+// results/GATE_G0_RESULTS.md section 8).
+struct Params {
+    uint clothCount, firstStep, collisionProjection, decoderMlp;
+    uint predictor, pad0, pad1, pad2;
+    float4 gravityDisplacement;
+};
 cbuffer ubo : register(b13) { Params params; };
 [[vk::binding(0)]] StructuredBuffer<float> weights;
 [[vk::binding(1)]] StructuredBuffer<uint4> mlpTable;
@@ -21,18 +37,23 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const uint vertex = groupId.x;
     if (vertex >= params.clothCount) return;
-    const MlpDesc mlp = loadMlp(mlpTable, params.decoderMlp);
-    tinyScratchA[lane] = nodeLatent[vertex * TINY_LATENT + lane];
-    GroupMemoryBarrierWithGroupSync();
-    tinyScratchB[lane] = max(tinyHiddenLinear(weights, mlp.w0, mlp.b0, lane, TINY_LATENT, TINY_LATENT, true), 0.0);
-    GroupMemoryBarrierWithGroupSync();
-    tinyScratchA[lane] = max(tinyHiddenLinear(weights, mlp.w1, mlp.b1, lane, TINY_LATENT, TINY_LATENT, false), 0.0);
-    GroupMemoryBarrierWithGroupSync();
-    if (lane < 3)
-        tinyScratchB[lane] = tinyHiddenLinear(weights, mlp.w2, mlp.b2, lane, TINY_LATENT, 3, true) * normalizers[73 + lane] + normalizers[70 + lane];
-    GroupMemoryBarrierWithGroupSync();
+    // `predictor` is uniform across the dispatch, so every lane of the group takes the same side of
+    // this branch and the barriers inside it stay group-synchronous.
+    if (params.predictor == 0) {
+        const MlpDesc mlp = loadMlp(mlpTable, params.decoderMlp);
+        tinyScratchA[lane] = nodeLatent[vertex * TINY_LATENT + lane];
+        GroupMemoryBarrierWithGroupSync();
+        tinyScratchB[lane] = max(tinyHiddenLinear(weights, mlp.w0, mlp.b0, lane, TINY_LATENT, TINY_LATENT, true), 0.0);
+        GroupMemoryBarrierWithGroupSync();
+        tinyScratchA[lane] = max(tinyHiddenLinear(weights, mlp.w1, mlp.b1, lane, TINY_LATENT, TINY_LATENT, false), 0.0);
+        GroupMemoryBarrierWithGroupSync();
+        if (lane < 3)
+            tinyScratchB[lane] = tinyHiddenLinear(weights, mlp.w2, mlp.b2, lane, TINY_LATENT, 3, true) * normalizers[73 + lane] + normalizers[70 + lane];
+        GroupMemoryBarrierWithGroupSync();
+    }
     if (lane == 0) {
-        const float3 acceleration = float3(tinyScratchB[0], tinyScratchB[1], tinyScratchB[2]);
+        const float3 acceleration = params.predictor != 0 ? params.gravityDisplacement.xyz
+            : float3(tinyScratchB[0], tinyScratchB[1], tinyScratchB[2]);
         const float3 effective = effectivePosition[vertex].xyz;
         const float3 oldPosition = clothPosition[vertex].xyz;
         const float3 oldPrevious = clothPrevious[vertex].xyz;
