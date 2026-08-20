@@ -288,16 +288,35 @@ def scene_specs(root: Path, trajectory_steps: int) -> list[SceneSpec]:
     ]
 
 
+def frame_of(step: int, frame_scale: float = 1.0) -> int:
+    """Animation frame driven by simulation step.
+
+    `frame_scale > 1` plays the motion faster without changing the timestep, so the body covers
+    more ground per solver step. That is the stress axis tools/recovery_probe.py sweeps: the
+    complaint against an authored solver is that it fails on fast motion, and a single clip gives
+    only a yes/no answer. Scaling the clip instead of the timestep is the honest form of the test --
+    scaling dt would hand every solver proportionally more budget and measure nothing.
+
+    `frame_scale == 1.0` returns `step` itself, so the default path is bit-identical to the
+    original expression and every existing golden still reproduces.
+    """
+    return step if frame_scale == 1.0 else int(step * frame_scale)
+
+
 def make_graph(
     builder: Fine15,
     scene: RuntimeScene,
     position: torch.Tensor,
     previous: torch.Tensor,
     step: int,
+    frame_scale: float = 1.0,
 ) -> Fine15Graph:
     """Build the HOOD graph for one step, matching run_fine15_reference exactly."""
-    target_frame = min(step + 1, scene.frame_count - 1)
-    obstacle_frame = min(step, scene.frame_count - 1)
+    # The obstacle sits on this step's frame and the target on the *next step's* frame, which under
+    # a scaled clip is `frame_scale` frames later rather than one -- otherwise the body would be
+    # asked to reach a half-step-ahead pose and the contact set would lag the motion.
+    target_frame = min(frame_of(step + 1, frame_scale), scene.frame_count - 1)
+    obstacle_frame = min(frame_of(step, frame_scale), scene.frame_count - 1)
     obstacle_position, obstacle_normals = scene.proxy(obstacle_frame)
     obstacle_target, _ = scene.proxy(target_frame)
     return builder.prepare_graph(
@@ -334,9 +353,10 @@ def advance(
     step: int,
     mean: torch.Tensor,
     std: torch.Tensor,
+    frame_scale: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor, Fine15Graph, torch.Tensor]:
     """One simulation step. Returns (next position, next previous, graph, normalised output)."""
-    graph = make_graph(builder, scene, position, previous, step)
+    graph = make_graph(builder, scene, position, previous, step, frame_scale)
     normalized = predictor(graph)
     predicted = integrate(graph, normalized, mean, std)
     # The reference runtime carries the effective (pin-corrected) position forward, and the
