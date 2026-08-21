@@ -6,5 +6,10 @@
 # Regenerable position dumps; the derived gnn_ablation.json report is tracked.
 /results/ablation_*.bin
 /results/hood_debug_*.bin
+# Per-cell probe output for tools/substep_matrix.py. Kept on disk so an interrupted sweep resumes
+# without rerunning the cells already in hand, but the aggregate substep_guide_matrix.json is the
+# tracked artefact -- 126 near-identical probe reports are not.
+/results/.substep_matrix/
+/results/substep_matrix_log.txt
 __pycache__/
 *.pyc

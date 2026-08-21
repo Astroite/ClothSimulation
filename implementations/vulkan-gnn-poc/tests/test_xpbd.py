@@ -17,16 +17,23 @@ sys.path.insert(0, str(POC_ROOT))
 
 from real_scene.xpbd import (  # noqa: E402
     BEND,
+    DEFAULT_SEARCH_RADIUS,
     STRETCH,
     ConstraintSet,
     SolverConfig,
     bake_tables,
     bend_pairs,
+    build_area_constraints,
     build_constraints,
+    calibrate_area_from_trajectory,
+    contacts_from_graph,
+    contacts_from_search,
     load_vxpbd,
     primal_residual,
     project,
+    step_substepped,
     stretch_residual,
+    triangle_areas,
     undirected_edges,
 )
 
@@ -48,6 +55,31 @@ class FakeScene:
                 receivers += [b, a]
         self.cloth_senders = torch.tensor(senders, dtype=torch.long)
         self.cloth_receivers = torch.tensor(receivers, dtype=torch.long)
+
+    # `step_substepped` interpolates the body between animation frames. A synthetic scene has one
+    # static pose, so both of these ignore the time and the substep tests isolate the solver rather
+    # than the interpolation. tests/test_xpbd.py::RuntimeSceneInterpolationTests covers the real thing.
+    def cloth_target_at(self, time: float) -> torch.Tensor:
+        return self.cloth_rest.clone()
+
+    def proxy_at(self, time: float) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            torch.zeros((0, 3), dtype=self.cloth_rest.dtype),
+            torch.zeros((0, 3), dtype=self.cloth_rest.dtype),
+        )
+
+
+class FakeGraph:
+    """The `Fine15Graph` fields `step_substepped` and `contacts_from_graph` read."""
+
+    def __init__(self, position, previous, pin_mask, pin_target):
+        self.effective_position = position
+        self.effective_previous = previous
+        self.pin_mask = pin_mask
+        self.pin_target = pin_target
+        self.world_cloth = torch.zeros(0, dtype=torch.long)
+        self.world_obstacle = torch.zeros(0, dtype=torch.long)
+        self.active_obstacle = torch.zeros(0, dtype=torch.long)
 
 
 def two_triangle_scene() -> FakeScene:
@@ -495,6 +527,302 @@ class RealSceneTests(unittest.TestCase):
             pin_mask=self.scene.cloth_pins, pin_target=start, timestep=1.0 / 30.0,
         )))
         self.assertLess(after, before * 0.8, f"8 iterations barely helped: {before:.5f} -> {after:.5f}")
+
+
+class SubstepTests(unittest.TestCase):
+    """The substep loop and the soft guide, on synthetic geometry."""
+
+    def _fixture(self, *, pins=None):
+        scene = two_triangle_scene()
+        if pins is not None:
+            scene.cloth_pins = pins
+        constraints = build_constraints(scene, scene.cloth_rest)
+        position = scene.cloth_rest.clone()
+        previous = scene.cloth_rest.clone()
+        graph = FakeGraph(position, previous, scene.cloth_pins, scene.cloth_rest.clone())
+        # A guide that stretches the square, so the guide and the constraints genuinely disagree.
+        guide = scene.cloth_rest * 1.30
+        return scene, constraints, graph, guide
+
+    def test_one_substep_reproduces_project_bit_for_bit(self) -> None:
+        """The regression anchor for the whole change: substeps=1 must change nothing at all.
+
+        Every result in results/ was measured through `project` called once per step. If this fails,
+        no comparison against those numbers means anything, so it is worth pinning at the bit level
+        rather than with a tolerance -- see `real_scene/xpbd.py::_blend` for the one place where the
+        obvious implementation would have lost the last few bits.
+        """
+        scene, constraints, graph, guide = self._fixture()
+        config = SolverConfig(iterations=8, mode="standard", sweep="fused", one_sided=True,
+                              collision=False)
+        expected = project(
+            constraints, config,
+            position=guide, inertial=2.0 * graph.effective_position - graph.effective_previous,
+            pin_mask=graph.pin_mask, pin_target=graph.pin_target, timestep=1.0 / 30.0,
+        )
+        actual = step_substepped(
+            constraints, config, scene=scene, graph=graph, guide=guide,
+            timestep=1.0 / 30.0, frame=0.0, frame_advance=1.0, substeps=1,
+        )
+        self.assertTrue(torch.equal(expected, actual))
+
+    def test_zero_confidence_guide_is_exactly_pure_xpbd(self) -> None:
+        """The guide's safe end of the dial has to be *exactly* the constraints-only solve.
+
+        This is the property the whole soft-guide scheme rests on: a vertex the trust region rejects
+        must fall back to physics, not to physics-plus-a-little-network. Note what is deliberately
+        NOT asserted here -- there is no compliance that makes the guide reproduce `mode="standard"`.
+        `standard` applies the network once with infinite stiffness and never again; the guide applies
+        it every iteration with finite stiffness. The dial is continuous towards pure XPBD only.
+        """
+        scene, constraints, graph, guide = self._fixture()
+        common = dict(sweep="fused", iterations=8, one_sided=True, collision=False)
+        nowarm = step_substepped(
+            constraints, SolverConfig(mode="nowarm", **common), scene=scene, graph=graph,
+            guide=None, timestep=1.0 / 30.0, frame=0.0, frame_advance=1.0, substeps=1,
+        )
+        # A trust radius of zero makes `guide_confidence` reject every vertex whose guide has moved
+        # at all, which for a guide that stretches the mesh is all of them.
+        guided = step_substepped(
+            constraints,
+            SolverConfig(mode="guide", guide_compliance=1.0, guide_trust_ratio=1.0e-9, **common),
+            scene=scene, graph=graph, guide=guide, timestep=1.0 / 30.0, frame=0.0,
+            frame_advance=1.0, substeps=1, min_edge=torch.ones(constraints.vertex_count),
+        )
+        self.assertTrue(torch.equal(nowarm, guided))
+
+    def test_guide_authority_is_monotone_in_compliance(self) -> None:
+        """Lower compliance must land closer to the network's prediction. That is the dial."""
+        scene, constraints, graph, guide = self._fixture()
+        distances = []
+        for compliance in (100.0, 10.0, 1.0, 0.1):
+            result = step_substepped(
+                constraints,
+                SolverConfig(mode="guide", guide_compliance=compliance, sweep="fused",
+                             iterations=8, one_sided=True, collision=False),
+                scene=scene, graph=graph, guide=guide, timestep=1.0 / 30.0,
+                frame=0.0, frame_advance=1.0, substeps=1,
+            )
+            distances.append(float((result - guide).square().mean().sqrt()))
+        for tighter, looser in zip(distances[1:], distances[:-1]):
+            self.assertLess(tighter, looser, f"guide authority not monotone: {distances}")
+
+    def test_compliant_guide_does_not_converge_onto_the_guide(self) -> None:
+        """Iterating must reach the compliant equilibrium, not silently stiffen into a hard guide.
+
+        This is what accumulating the guide multiplier buys. Recomputing it from scratch each
+        iteration would let a repeated soft pull walk the vertex all the way onto the target, which
+        would make `guide_compliance` a lie at high iteration counts -- and 128 is the shipping count.
+        """
+        scene, constraints, graph, guide = self._fixture()
+        gap = []
+        for iterations in (8, 32, 128):
+            result = step_substepped(
+                constraints,
+                SolverConfig(mode="guide", guide_compliance=10.0, sweep="fused",
+                             iterations=iterations, one_sided=True, collision=False),
+                scene=scene, graph=graph, guide=guide, timestep=1.0 / 30.0,
+                frame=0.0, frame_advance=1.0, substeps=1,
+            )
+            gap.append(float((result - guide).square().mean().sqrt()))
+        self.assertGreater(gap[-1], 0.1 * gap[0],
+                           f"the guide collapsed onto its target as iterations grew: {gap}")
+
+    def test_substeps_do_not_change_the_total_guide_travel(self) -> None:
+        """The guide arrives in instalments, so the last substep still aims at the full prediction."""
+        scene, constraints, graph, guide = self._fixture()
+        config = SolverConfig(mode="guide", guide_compliance=1.0e-6, sweep="fused",
+                              iterations=32, one_sided=True, collision=False)
+        for substeps in (1, 2, 4):
+            result = step_substepped(
+                constraints, config, scene=scene, graph=graph, guide=guide,
+                timestep=1.0 / 30.0, frame=0.0, frame_advance=1.0, substeps=substeps,
+            )
+            # A near-zero compliance is a near-hard guide, so whatever the schedule, the final state
+            # has to sit near the guide rather than a fraction of the way there.
+            self.assertLess(float((result - guide).abs().max()), 0.05,
+                            f"substeps={substeps} did not deliver the whole guide")
+
+    def test_substeps_must_be_positive(self) -> None:
+        scene, constraints, graph, guide = self._fixture()
+        with self.assertRaises(ValueError):
+            step_substepped(constraints, SolverConfig(iterations=1), scene=scene, graph=graph,
+                            guide=guide, timestep=1.0 / 30.0, frame=0.0, frame_advance=1.0,
+                            substeps=0)
+
+    def test_search_radius_tracks_the_graph_builder(self) -> None:
+        """`contacts_from_search` must accept exactly the proxies the network's own search accepted."""
+        from real_scene.fine15 import COLLISION_RADIUS
+
+        self.assertEqual(DEFAULT_SEARCH_RADIUS, COLLISION_RADIUS)
+
+
+class AreaConstraintTests(unittest.TestCase):
+    def _fixture(self, *, pins=None):
+        scene = two_triangle_scene()
+        if pins is not None:
+            scene.cloth_pins = pins
+        constraints = build_constraints(scene, scene.cloth_rest)
+        area = build_area_constraints(scene, reference_position=scene.cloth_rest)
+        return scene, constraints, area
+
+    def test_tables_cover_every_corner_once(self) -> None:
+        scene, _, area = self._fixture()
+        self.assertEqual(int(area.incident.sum().item()), 3 * area.count)
+        live = area.slots < area.count
+        for vertex in range(area.vertex_count):
+            owned = {(int(area.slots[vertex, k]), int(area.corner[vertex, k]))
+                     for k in range(area.slots.shape[1]) if live[vertex, k]}
+            for triangle, corner in owned:
+                self.assertEqual(int(scene.cloth_triangles[triangle, corner]), vertex)
+
+    def test_target_area_matches_the_geometry(self) -> None:
+        scene, _, area = self._fixture()
+        # Two right triangles of legs 1, so each has area 1/2.
+        torch.testing.assert_close(area.target_area, torch.full((2,), 0.5), rtol=0, atol=1e-7)
+
+    def test_floor_is_inert_when_every_triangle_is_large_enough(self) -> None:
+        """A one-sided floor must be a no-op on a satisfied state, exactly."""
+        scene, constraints, area = self._fixture()
+        state = {
+            "position": scene.cloth_rest.clone(), "inertial": scene.cloth_rest.clone(),
+            "pin_mask": scene.cloth_pins, "pin_target": scene.cloth_rest.clone(),
+            "timestep": 1.0 / 30.0,
+        }
+        result = project(constraints, SolverConfig(iterations=8, sweep="fused", area_floor=0.5),
+                         area=area, **state)
+        self.assertTrue(torch.equal(result, state["position"]))
+
+    def test_floor_inflates_a_squashed_triangle(self) -> None:
+        """The gap the existing constraint set leaves: an edge too short is legal, an area of zero
+        is legal, and a one-sided stretch constraint has no opinion about either."""
+        scene, constraints, area = self._fixture()
+        squashed = scene.cloth_rest.clone()
+        squashed[:, 1] *= 0.05          # flatten the square towards a sliver
+        before = triangle_areas(squashed, scene.cloth_triangles) / area.target_area
+        config = SolverConfig(iterations=64, sweep="fused", one_sided=True, area_floor=0.4)
+        result = project(constraints, config, position=squashed, inertial=squashed,
+                         pin_mask=scene.cloth_pins, pin_target=scene.cloth_rest.clone(),
+                         timestep=1.0 / 30.0, area=area)
+        after = triangle_areas(result, scene.cloth_triangles) / area.target_area
+        self.assertLess(float(before.min()), 0.1)
+        self.assertGreater(float(after.min()), float(before.min()) * 2.0,
+                           f"area floor did not inflate: {before.tolist()} -> {after.tolist()}")
+
+    def test_floor_never_moves_a_pinned_vertex(self) -> None:
+        pins = torch.tensor([True, True, False, False])
+        scene, constraints, area = self._fixture(pins=pins)
+        squashed = scene.cloth_rest.clone()
+        squashed[:, 1] *= 0.05
+        target = scene.cloth_rest.clone()
+        result = project(constraints, SolverConfig(iterations=32, sweep="fused", area_floor=0.5),
+                         position=squashed, inertial=squashed, pin_mask=pins, pin_target=target,
+                         timestep=1.0 / 30.0, area=area)
+        self.assertTrue(torch.equal(result[pins], target[pins]))
+
+    def test_area_gradients_match_finite_differences(self) -> None:
+        """The three corner gradients in `_apply_area`, checked against the area they differentiate.
+
+        A sign error here would inflate one corner and deflate another, which on a real mesh reads as
+        noise rather than as a broken constraint -- so it is checked directly.
+        """
+        generator = torch.Generator().manual_seed(19)
+        corner = [torch.randn(3, dtype=torch.float64, generator=generator) for _ in range(3)]
+
+        def area_of(points):
+            return 0.5 * torch.linalg.cross(points[1] - points[0], points[2] - points[0]).norm()
+
+        normal = torch.linalg.cross(corner[1] - corner[0], corner[2] - corner[0])
+        unit = normal / normal.norm()
+        analytic = [
+            0.5 * torch.linalg.cross(corner[1] - corner[2], unit),
+            0.5 * torch.linalg.cross(corner[2] - corner[0], unit),
+            0.5 * torch.linalg.cross(corner[0] - corner[1], unit),
+        ]
+        # A constraint that cannot move the centre of mass must have gradients summing to zero.
+        self.assertLess(float(sum(analytic).abs().max()), 1e-12)
+        epsilon = 1e-6
+        for index in range(3):
+            for axis in range(3):
+                shifted = [point.clone() for point in corner]
+                shifted[index][axis] += epsilon
+                plus = area_of(shifted)
+                shifted[index][axis] -= 2.0 * epsilon
+                numeric = float((plus - area_of(shifted)) / (2.0 * epsilon))
+                self.assertAlmostEqual(float(analytic[index][axis]), numeric, places=6)
+
+    def test_calibrated_area_is_the_median_not_the_rest(self) -> None:
+        scene = two_triangle_scene()
+        frames = [scene.cloth_rest * scale for scale in (1.0, 2.0, 3.0, 10.0)]
+        median = calibrate_area_from_trajectory(scene.cloth_triangles, frames)
+        # Areas scale with the square of the frame scale: 0.5, 2, 4.5, 50. `torch.median` takes the
+        # lower of the two middle elements rather than averaging them, so this is 2 and not 3.25 --
+        # the same convention `calibrate_from_trajectory` already relies on for the lengths.
+        torch.testing.assert_close(median, torch.full((2,), 2.0), rtol=0, atol=1e-6)
+        # `skip` drops the settling transient, exactly as the length calibration does: the remaining
+        # areas are 4.5 and 50, whose lower median is 4.5.
+        skipped = calibrate_area_from_trajectory(scene.cloth_triangles, frames, skip=2)
+        torch.testing.assert_close(skipped, torch.full((2,), 4.5), rtol=0, atol=1e-5)
+
+
+@unittest.skipUnless((SCENE_ROOT / "hml_001962").is_dir(), "baked scenes not present")
+class RuntimeSceneInterpolationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        from real_scene.runtime_scene import RuntimeScene
+
+        cls.scene = RuntimeScene.load(SCENE_ROOT / "hml_001962", "hml_001962", device="cpu",
+                                      asset_stem="ch10032")
+
+    def test_integral_time_is_bit_identical_to_the_frame_lookup(self) -> None:
+        """Substepping must not perturb the un-substepped path, and the frames are where it would.
+
+        `matrices_at` short-circuits an integral time to the stored matrices rather than blending with
+        weight 0, because `lerp(a, b, 0)` is only equal to `a` up to rounding.
+        """
+        for frame in (0, 7, self.scene.frame_count - 1):
+            position, normal = self.scene.proxy(frame)
+            interpolated_position, interpolated_normal = self.scene.proxy_at(float(frame))
+            self.assertTrue(torch.equal(position, interpolated_position), f"proxy pos at {frame}")
+            self.assertTrue(torch.equal(normal, interpolated_normal), f"proxy nrm at {frame}")
+            self.assertTrue(torch.equal(self.scene.cloth_target(frame),
+                                        self.scene.cloth_target_at(float(frame))))
+
+    def test_fractional_time_lands_between_the_two_frames(self) -> None:
+        before = self.scene.proxy_at(3.0)[0]
+        after = self.scene.proxy_at(4.0)[0]
+        middle = self.scene.proxy_at(3.5)[0]
+        torch.testing.assert_close(middle, 0.5 * (before + after), rtol=1e-6, atol=1e-7)
+
+    def test_time_past_the_last_frame_clamps(self) -> None:
+        last = self.scene.frame_count - 1
+        self.assertTrue(torch.equal(self.scene.proxy(last)[0], self.scene.proxy_at(last + 9.0)[0]))
+        self.assertTrue(torch.equal(self.scene.proxy(0)[0], self.scene.proxy_at(-3.0)[0]))
+
+    def test_search_reproduces_the_graph_pairing(self) -> None:
+        """The substep contact search has to agree with the network's own on the frame they share."""
+        from real_scene.fine15 import Fine15, Fine15Weights
+
+        vhood = POC_ROOT / ".work/hood_data/fine15.vhood"
+        if not vhood.is_file():
+            self.skipTest("fine15.vhood not present")
+        builder = Fine15(Fine15Weights.from_vhood(vhood, device=torch.device("cpu")))
+        position = self.scene.cloth_target(0)
+        proxy_position, normals = self.scene.proxy(0)
+        proxy_target, _ = self.scene.proxy(1)
+        graph = builder.prepare_graph(
+            position=position, previous=position.clone(), rest_position=self.scene.cloth_rest,
+            triangles=self.scene.cloth_triangles, mesh_senders=self.scene.cloth_senders,
+            mesh_receivers=self.scene.cloth_receivers, mass=self.scene.cloth_mass,
+            pin_mask=self.scene.cloth_pins, pin_target=self.scene.cloth_target(1),
+            obstacle_position=proxy_position, obstacle_target=proxy_target,
+            obstacle_normals=normals, timestep=1.0 / 30.0,
+        )
+        expected = contacts_from_graph(graph, proxy_target, normals)
+        actual = contacts_from_search(graph.effective_position, proxy_position, proxy_target, normals)
+        self.assertTrue(torch.equal(expected.vertex, actual.vertex))
+        torch.testing.assert_close(expected.point, actual.point, rtol=0, atol=0)
+        torch.testing.assert_close(expected.normal, actual.normal, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

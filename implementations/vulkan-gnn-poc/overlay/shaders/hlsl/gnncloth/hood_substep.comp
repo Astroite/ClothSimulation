@@ -1,0 +1,75 @@
+// Per-substep inertial prediction for the multirate XPBD path.
+//
+// hood_integrate.comp already produces the *first* substep's state: it runs the decoder, scales the
+// frame-length velocity down to one substep, and leaves clothPosition holding the inertial prediction
+// with the network's output parked in guidePrediction. This kernel produces every substep after that,
+// where there is no network to run and nothing to decode -- one Verlet step and one guide instalment.
+//
+// Why a separate dispatch rather than folding it into the sweep. The prediction has to happen once per
+// substep, between the last iteration of one substep and the first of the next, and every vertex must
+// read the same positions when it does (the same reason hood_xpbd.comp ping-pongs). A per-substep
+// dispatch of 1377 threads is a few microseconds against the 32-iteration sweep it precedes.
+//
+// The guide arrives in instalments, and that is the whole point of substepping a guided solve. Jumping
+// straight to the network's prediction and only then splitting the sweep into substeps would change
+// nothing that matters: the overshoot has already happened before the first substep starts, and the
+// remaining substeps would be cleaning up after it. Measured on sprint_start, delivering the guide in
+// eight instalments takes the peak edge p95 from 10.5 to 2.0 at the same total sweep count.
+//
+// Mirrors real_scene/xpbd.py::step_substepped's loop body for `index > 0`.
+
+struct Params {
+    uint clothCount;
+    uint guideMode;
+    // Where this substep ends, as a fraction of the visual frame: substep k of N uses (k + 1) / N.
+    float guideFraction;
+    uint pad0;
+    // h^2 * g with h = dt / substeps. Zero on the settle step, for the same reason
+    // gate_g0.py::BallisticGravity zeroes it there: at dt = 1/3 a full gravity step is 1.09 m.
+    float4 gravityDisplacement;
+};
+cbuffer ubo : register(b7) { Params params; };
+
+[[vk::binding(0)]] RWStructuredBuffer<float4> clothPosition;
+[[vk::binding(1)]] RWStructuredBuffer<float4> clothPrevious;
+[[vk::binding(2)]] StructuredBuffer<float4> pinTarget;
+[[vk::binding(3)]] StructuredBuffer<uint> pinMask;
+// The state at the start of the visual frame, and the network's prediction for the end of it. Both
+// written once by hood_integrate.comp; the instalment is interpolated between them.
+[[vk::binding(4)]] StructuredBuffer<float4> frameEntry;
+[[vk::binding(5)]] StructuredBuffer<float4> guidePrediction;
+[[vk::binding(6)]] RWStructuredBuffer<float4> guideTarget;
+
+[numthreads(128, 1, 1)]
+void main(uint3 dispatchId : SV_DispatchThreadID)
+{
+    const uint vertex = dispatchId.x;
+    if (vertex >= params.clothCount) return;
+
+    if (params.guideMode != 0) {
+        // Exact at the endpoint: `lerp(a, b, 1)` is `a + 1 * (b - a)`, which is not bit-identical to
+        // `b` once `a` is large and `b - a` small -- and on sprint_start the root reaches z = 10 m
+        // while a substep moves a vertex by millimetres. real_scene/xpbd.py::_blend guards the same way.
+        const float3 entry = frameEntry[vertex].xyz;
+        const float3 prediction = guidePrediction[vertex].xyz;
+        guideTarget[vertex] = float4(params.guideFraction >= 1.0
+            ? prediction : lerp(entry, prediction, params.guideFraction), 1.0);
+    }
+
+    const float3 position = clothPosition[vertex].xyz;
+    if (pinMask[vertex] != 0) {
+        // Pins are infinite-mass anchors on their skinned target, which the CPU has already re-skinned
+        // to this substep's fractional frame. Carrying the pin's own pair forward keeps its velocity
+        // consistent with the body rather than with the cloth.
+        clothPrevious[vertex] = float4(position, 1.0);
+        clothPosition[vertex] = pinTarget[vertex];
+        return;
+    }
+
+    // `previous` is one substep back from here, so the difference is already h * v and needs no
+    // rescaling -- only the first substep has to divide the frame-length velocity down, and
+    // hood_integrate.comp did that.
+    const float3 previous = clothPrevious[vertex].xyz;
+    clothPrevious[vertex] = float4(position, 1.0);
+    clothPosition[vertex] = float4(position + (position - previous) + params.gravityDisplacement.xyz, 1.0);
+}

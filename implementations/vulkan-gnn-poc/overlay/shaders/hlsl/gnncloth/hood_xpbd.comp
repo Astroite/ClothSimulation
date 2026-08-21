@@ -1,38 +1,64 @@
 // Unstructured Jacobi XPBD for the distilled (HOOD/TinyHOOD) cloth path.
 //
-// This is the port of real_scene/xpbd.py::_apply_fused, which gate G0 measured and which
-// tests/test_xpbd.py::FusedPortTests pins down against the two-pass Jacobi reference. Read that
-// function alongside this file; the arithmetic is deliberately line-for-line the same.
+// This is the port of real_scene/xpbd.py::_apply_fused plus the two passes that turn it into a
+// soft-guided multirate solver: `_apply_area` and `_resolve_guide`. Read those functions alongside
+// this file; the arithmetic is deliberately line-for-line the same, and tests/test_xpbd.py pins the
+// Python side down against its own two-pass Jacobi reference.
 //
-// Why one thread per VERTEX rather than one per constraint. The natural Jacobi sweep needs two
-// dispatches per iteration -- one over constraints to produce every delta lambda, then one over
-// vertices to gather them -- because a vertex cannot see a neighbouring constraint's result until
-// the constraint pass has finished writing. XPBD on this hardware is dispatch-bound, not
-// work-bound: results/RESULTS.md measures 0.0448 ms of the grid path's 0.0455 ms per iteration as
-// dispatch plus barrier overhead, about 2.8 us apiece. Two dispatches x 128 iterations is 0.72 ms,
-// roughly eleven GNN message-passing blocks at 0.0646 ms each, which is more than the entire
-// hybrid is worth. So each vertex here recomputes the multiplier update of every constraint it
-// touches. The arithmetic is duplicated exactly twice and totals about 450k flops per iteration on
-// CH10032, far below what a single dispatch costs.
+// Why one *subgroup* per vertex rather than one thread
+// ---------------------------------------------------
+// The natural Jacobi sweep needs two dispatches per iteration -- one over constraints to produce
+// every delta lambda, then one over vertices to gather them -- because a vertex cannot see a
+// neighbouring constraint's result until the constraint pass has finished writing. XPBD on this
+// hardware is dispatch-bound, not work-bound, so each vertex here recomputes the multiplier update
+// of every constraint it touches and the iteration stays a single dispatch.
 //
-// The price is that lambda is stored per (vertex, slot) instead of per constraint, so both
-// endpoints of a constraint keep their own copy. Those copies must not drift, and three things
-// guarantee they do not:
+// The first version of that ran one *thread* per vertex, which made CH10032's 1377 vertices into
+// (1377 + 127) / 128 = 11 workgroups on a 34-SM part. Measured cost was 9.44 us per iteration
+// against a 2.8 us estimate, and the diagnosis was clean: hood_grid64 has 2.31x the slot work and
+// runs 1.40x *faster* per iteration, which rules out both work and bandwidth and leaves occupancy.
 //
-//   * both threads form pairs[c].x minus pairs[c].y in that stored order, never "mine minus
-//     theirs", so the difference and its length are the same floats on both;
-//   * weightSum is read from the baked asset rather than recomputed, because w_a + w_b on one
-//     thread against w_b + w_a on the other is not guaranteed to give the same float (see
-//     real_scene/xpbd.py::SolverTables and tools/bake_xpbd_constraints.py);
-//   * the endpoint-dependent sign is applied to the correction after the multiplier update, never
-//     inside it.
+// So a vertex now gets 32 lanes and a workgroup carries four of them, which is about 345 workgroups
+// on CH10032. 32 rather than the whole 128: the slot width here is 18, so 32 lanes already cover a
+// vertex in one pass, and the remaining 96 lanes of a 128-wide-per-vertex layout would only add
+// reduction depth. hood_world_nearest.comp is the precedent for the shape ("The work was never the
+// problem; the occupancy was"), with the one-vertex-per-128-lane-group choice narrowed here because
+// its inner loop was 4096 proxies deep and this one is 18 slots deep.
+//
+// Consequences the reader has to know about
+// -----------------------------------------
+// * `lambda` is per (vertex, slot), so both endpoints of a constraint keep their own copy, and those
+//   copies must not drift. Three things guarantee they do not, and none of them is affected by the
+//   lane layout, because each lane owns whole slots and never splits one:
+//     - both threads form pairs[c].x minus pairs[c].y in that stored order, never "mine minus
+//       theirs", so the difference and its length are the same floats on both;
+//     - weightSum is read from the baked asset rather than recomputed, because w_a + w_b on one
+//       thread against w_b + w_a on the other is not guaranteed to give the same float (see
+//       real_scene/xpbd.py::SolverTables and tools/bake_xpbd_constraints.py);
+//     - the endpoint-dependent sign is applied to the correction after the multiplier update, never
+//       inside it.
+//   Lambda is therefore bit-identical to the one-thread-per-vertex version.
+// * The *correction sum* is not. A fixed-order groupshared tree over 32 lanes adds the same numbers
+//   in a different sequence than a serial loop over 18 slots, so the last bits of a position move.
+//   Measured, that shift is far smaller than expected and the Python-versus-Vulkan gate did not have
+//   to move: results/xpbd128_verify.json reports max 1.683965e-3 for this shape against 1.683891e-3
+//   for one-thread-per-vertex, a difference of 7e-8. The reason is that the 1.68e-3 is not a
+//   summation artifact at all -- it is the one-sided `max(residual, 0)` and the contact's
+//   `signed < 0` having their fixed point exactly on a branch boundary, with about 90 constraints and
+//   330 contacts per step sitting within 1e-7 of it, so a few vertices take different sides on CPU
+//   and GPU. Reordering an 18-term sum perturbs the result three to four orders below that.
+//   Steps 1-7 of that same run are 1.19e-7 to 9.02e-7, which is where the reordering actually shows.
+// * There is no early `return`. With four vertices per group the tail group has subgroups whose
+//   vertex is out of range, and a pinned vertex used to return before the reduction; either would
+//   leave a thread absent from a GroupMemoryBarrierWithGroupSync the others still execute. Inactive
+//   lanes contribute zero and fall through instead.
 //
 // Jacobi also means every vertex must read the SAME positions, so the runtime ping-pongs between
 // clothPosition and a scratch buffer rather than updating in place. Reading and writing one buffer
 // would silently turn this into a nondeterministic partial Gauss-Seidel.
 //
-// Constraint targets are baked calibrated lengths, NOT rest lengths. Skinning the authored rest
-// mesh into frame 0 already puts 7.7-8.2% of CH10032's edges past 1.5x rest (p95 1.890 on tpose,
+// Constraint targets are baked calibrated lengths, NOT rest lengths. Skinning the authored rest mesh
+// into frame 0 already puts 7.7-8.2% of CH10032's edges past 1.5x rest (p95 1.890 on tpose,
 // 2.025 on sprint), so aiming at cloth_rest would contract those edges by up to 12x. See
 // plans/gnn/gnn-xpbd-v2.md section 1.4.
 
@@ -40,18 +66,36 @@ struct Push {
     uint clothCount;
     uint constraintCount;
     uint slotWidth;
-    uint flags;              // bit 0 one-sided, bit 1 collision
+    uint flags;              // bit 0 one-sided, bit 1 collision, bit 2 guide, bit 3 area
     float timestep;
     float relaxation;
     float contactOffset;
     float stretchCompliance;
     float bendCompliance;
+    float guideCompliance;
+    float areaFloor;
+    float areaCompliance;
+    uint triangleCount;
+    // 0 = distance sweep, 1 = area floor. Uniform across the dispatch, so the barriers below stay
+    // group-synchronous. Two dispatches only when the area floor is on: the area pass has to read
+    // positions the distance sweep has finished writing everywhere, which is a barrier, while the
+    // guide and the contact are per-vertex and fold into whichever pass writes last.
+    uint pass;
 };
 [[vk::push_constant]] Push push;
 
 static const uint XPBD_ONE_SIDED = 1u;
 static const uint XPBD_COLLISION = 2u;
+static const uint XPBD_GUIDE = 4u;
+static const uint XPBD_AREA = 8u;
 static const uint XPBD_KIND_BEND = 1u;
+
+static const uint XPBD_PASS_DISTANCE = 0u;
+static const uint XPBD_PASS_AREA = 1u;
+
+// One vertex per 32 lanes, four vertices per 128-thread group. See the header.
+static const uint XPBD_LANES = 32u;
+static const uint XPBD_VERTICES_PER_GROUP = 4u;
 
 [[vk::binding(0)]] StructuredBuffer<uint2> xpbdPairs;
 [[vk::binding(1)]] StructuredBuffer<float> xpbdTargetLength;
@@ -67,60 +111,187 @@ static const uint XPBD_KIND_BEND = 1u;
 [[vk::binding(11)]] StructuredBuffer<uint> worldObstacle;
 [[vk::binding(12)]] StructuredBuffer<float4> proxyTarget;
 [[vk::binding(13)]] StructuredBuffer<float4> proxyNormal;
+// The network's prediction for this substep, and how far each vertex is trusted to follow it.
+[[vk::binding(14)]] StructuredBuffer<float4> guideTarget;
+[[vk::binding(15)]] StructuredBuffer<float> guideConfidence;
+[[vk::binding(16)]] RWStructuredBuffer<float> guideLambda;
+// Triangle topology for the area floor. `clothTriangles` is the flat uint3 list from .vcloth2 and
+// the offsets/indices are the per-vertex incident-triangle CSR hoodLoadAssets already derives from
+// it for hood_features.comp -- no new baked section, only `areaTarget`.
+[[vk::binding(17)]] StructuredBuffer<uint> clothTriangles;
+[[vk::binding(18)]] StructuredBuffer<uint> clothTriangleOffsets;
+[[vk::binding(19)]] StructuredBuffer<uint> clothTriangleIndices;
+[[vk::binding(20)]] StructuredBuffer<float> areaTarget;
+[[vk::binding(21)]] RWStructuredBuffer<float> areaLambda;
+
+groupshared float3 xpbdLaneCorrection[XPBD_LANES * XPBD_VERTICES_PER_GROUP];
+
+// Fixed-order tree reduction inside one vertex's 32 lanes. The order is a property of the lane
+// index, not of scheduling, so the result is reproducible on any vendor and needs no float atomic.
+// Every lane of the workgroup reaches every barrier, including the lanes whose vertex does not exist.
+float3 xpbdReduceLanes(uint base, uint lane)
+{
+    [unroll] for (uint stride = XPBD_LANES / 2u; stride > 0u; stride >>= 1) {
+        if (lane < stride) {
+            xpbdLaneCorrection[base + lane] += xpbdLaneCorrection[base + lane + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    return xpbdLaneCorrection[base];
+}
 
 [numthreads(128, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+void main(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
 {
-    const uint vertex = id.x;
-    if (vertex >= push.clothCount) return;
+    const uint subgroup = threadIndex / XPBD_LANES;
+    const uint lane = threadIndex % XPBD_LANES;
+    const uint vertex = groupId.x * XPBD_VERTICES_PER_GROUP + subgroup;
+    const uint base = subgroup * XPBD_LANES;
 
-    const float3 position = positionIn[vertex].xyz;
-    const float inverseMass = xpbdInverseMass[vertex];
-    if (inverseMass <= 0.0) {
-        // Pinned. Zero inverse mass already makes the correction zero, but returning early also
-        // skips the lambda writes, matching `torch.where(pinned, 0, correction)` in the reference
-        // and keeping the pin an exact infinite-mass anchor.
-        positionOut[vertex] = float4(position, 1.0);
-        return;
-    }
+    const bool exists = vertex < push.clothCount;
+    const float inverseMass = exists ? xpbdInverseMass[vertex] : 0.0;
+    // Pinned. Zero inverse mass already makes the correction zero, but skipping the lambda writes as
+    // well matches `torch.where(pinned, 0, correction)` in the reference and keeps the pin an exact
+    // infinite-mass anchor.
+    const bool movable = exists && inverseMass > 0.0;
+    const float3 position = exists ? positionIn[vertex].xyz : float3(0.0, 0.0, 0.0);
 
-    const bool oneSided = (push.flags & XPBD_ONE_SIDED) != 0u;
     const float inverseSquaredStep = 1.0 / max(push.timestep * push.timestep, 1.0e-12);
-
     float3 correction = float3(0.0, 0.0, 0.0);
-    for (uint slot = 0; slot < push.slotWidth; ++slot) {
-        const uint entry = vertex * push.slotWidth + slot;
-        const uint constraint = xpbdSlots[entry];
-        // Unused lanes hold the sentinel index `constraintCount`.
-        if (constraint >= push.constraintCount) continue;
 
-        const uint2 pair = xpbdPairs[constraint];
-        const float3 delta = positionIn[pair.x].xyz - positionIn[pair.y].xyz;
-        const float distance = length(delta);
-        if (!(distance > 1.0e-9)) continue;
+    if (push.pass == XPBD_PASS_DISTANCE && movable) {
+        const bool oneSided = (push.flags & XPBD_ONE_SIDED) != 0u;
+        // Lane `l` owns slots l, l + 32, l + 64, ... so 18 slots fit in one trip with 14 lanes idle.
+        for (uint slot = lane; slot < push.slotWidth; slot += XPBD_LANES) {
+            const uint entry = vertex * push.slotWidth + slot;
+            const uint constraint = xpbdSlots[entry];
+            // Unused lanes hold the sentinel index `constraintCount`.
+            if (constraint >= push.constraintCount) continue;
 
-        const float compliance = xpbdKind[constraint] == XPBD_KIND_BEND
-            ? push.bendCompliance : push.stretchCompliance;
-        const float alpha = compliance * inverseSquaredStep;
-        const float weightSum = xpbdWeightSum[constraint];
-        if (!(weightSum > 0.0)) continue;   // both endpoints pinned
+            const uint2 pair = xpbdPairs[constraint];
+            const float3 delta = positionIn[pair.x].xyz - positionIn[pair.y].xyz;
+            const float distance = length(delta);
+            if (!(distance > 1.0e-9)) continue;
 
-        float residual = distance - xpbdTargetLength[constraint];
-        if (oneSided) residual = max(residual, 0.0);
+            const float compliance = xpbdKind[constraint] == XPBD_KIND_BEND
+                ? push.bendCompliance : push.stretchCompliance;
+            const float alpha = compliance * inverseSquaredStep;
+            const float weightSum = xpbdWeightSum[constraint];
+            if (!(weightSum > 0.0)) continue;   // both endpoints pinned
 
-        const float lambda = xpbdLambda[entry];
-        const float step = (-residual - alpha * lambda) / max(weightSum + alpha, 1.0e-20);
-        xpbdLambda[entry] = lambda + step;
-        correction += xpbdSigns[entry] * (delta / distance) * step;
+            float residual = distance - xpbdTargetLength[constraint];
+            if (oneSided) residual = max(residual, 0.0);
+
+            const float lambda = xpbdLambda[entry];
+            const float step = (-residual - alpha * lambda) / max(weightSum + alpha, 1.0e-20);
+            xpbdLambda[entry] = lambda + step;
+            correction += xpbdSigns[entry] * (delta / distance) * step;
+        }
+    } else if (push.pass == XPBD_PASS_AREA && movable) {
+        // One-sided triangle area floor, `C = max(areaFloor * A_0 - A(x), 0)`. The existing structural
+        // set is mesh-edge distances plus a two-hop distance standing in for bending, run one-sided,
+        // and nothing in it objects to a triangle collapsing: a short edge is legal and zero area is
+        // legal. Measured on sprint_start step 120 the hybrid holds the best edge p95 of the three
+        // branches (1.291) together with the most collapsed edges (13.3%), the smallest triangles
+        // (area median 0.478) and the most flipped ones (0.435).
+        const float alpha = push.areaCompliance * inverseSquaredStep;
+        const uint begin = clothTriangleOffsets[vertex];
+        const uint end = clothTriangleOffsets[vertex + 1];
+        for (uint slot = begin + lane; slot < end; slot += XPBD_LANES) {
+            const uint face = clothTriangleIndices[slot];   // `triangle` is an HLSL keyword
+            if (face >= push.triangleCount) continue;
+            const uint3 corner = uint3(clothTriangles[face * 3 + 0],
+                                       clothTriangles[face * 3 + 1],
+                                       clothTriangles[face * 3 + 2]);
+            // Stored winding order, so all three vertices of the triangle form the same normal from
+            // the same floats -- the ternary analogue of "pairs[c].x minus pairs[c].y".
+            const float3 first = positionIn[corner.x].xyz;
+            const float3 second = positionIn[corner.y].xyz;
+            const float3 third = positionIn[corner.z].xyz;
+            const float3 normal = cross(second - first, third - first);
+            const float twiceArea = length(normal);
+            if (!(twiceArea > 1.0e-12)) continue;
+            const float3 unit = normal / twiceArea;
+
+            const float residual = max(push.areaFloor * areaTarget[face] - 0.5 * twiceArea, 0.0);
+            // grad_i A for corners 0, 1, 2. They sum to zero, as a constraint that cannot move the
+            // centre of mass must.
+            const float3 gradient0 = 0.5 * cross(second - third, unit);
+            const float3 gradient1 = 0.5 * cross(third - first, unit);
+            const float3 gradient2 = 0.5 * cross(first - second, unit);
+            // Unlike a distance constraint the gradients are not unit vectors, so the denominator is
+            // sum_i w_i |grad_i A|^2 and not sum_i w_i -- state-dependent, so there is nothing to
+            // bake. The three threads agree by summing in corner order 0, 1, 2, which is fixed by
+            // the mesh rather than by which vertex is asking.
+            const float denominator =
+                  xpbdInverseMass[corner.x] * dot(gradient0, gradient0)
+                + xpbdInverseMass[corner.y] * dot(gradient1, gradient1)
+                + xpbdInverseMass[corner.z] * dot(gradient2, gradient2);
+            if (!(denominator > 0.0)) continue;
+
+            const float lambda = areaLambda[slot];
+            const float step = (-residual - alpha * lambda) / max(denominator + alpha, 1.0e-20);
+            areaLambda[slot] = lambda + step;
+            // grad C = -grad A while the floor is violated, so this inflates the triangle. Each
+            // vertex applies only the gradient of the corner it occupies.
+            const float3 own = vertex == corner.x ? gradient0
+                : (vertex == corner.y ? gradient1 : gradient2);
+            correction -= own * step;
+        }
     }
 
-    float3 updated = position
-        + push.relaxation * inverseMass * correction / max(xpbdIncident[vertex], 1.0);
+    xpbdLaneCorrection[base + lane] = correction;
+    GroupMemoryBarrierWithGroupSync();
+    const float3 total = xpbdReduceLanes(base, lane);
+
+    if (lane != 0u || !exists) return;
+
+    const float averaging = push.pass == XPBD_PASS_DISTANCE
+        ? max(xpbdIncident[vertex], 1.0)
+        : max(float(clothTriangleOffsets[vertex + 1] - clothTriangleOffsets[vertex]), 1.0);
+    float3 updated = position + push.relaxation * inverseMass * total / averaging;
+
+    // Everything below is per-vertex: it reads only this vertex's own state, so it needs no barrier
+    // and folds into whichever pass writes the position out.
+    const bool lastPass = push.pass == XPBD_PASS_AREA || (push.flags & XPBD_AREA) == 0u;
+    if (lastPass && (push.flags & XPBD_GUIDE) != 0u && movable) {
+        // Compliant pull towards the network's prediction. `C = |x - g|` is one constraint on one
+        // vertex, so grad C is a unit vector and grad C M^-1 grad C^T is just w:
+        //
+        //     Delta lambda = (-C - alpha * lambda) / (w + alpha),   Delta x = w * n * Delta lambda
+        //
+        // `n` points from the guide towards the vertex and Delta lambda is negative, so the vertex
+        // moves towards the guide, closing w / (w + alpha) of the gap on the first iteration. That
+        // fraction is the dial the whole scheme exists for: alpha = 0 snaps onto the prediction,
+        // alpha -> infinity leaves the vertex wherever the physics put it. Accumulating lambda is what
+        // makes repeated application settle at the compliant equilibrium instead of stiffening into a
+        // hard guide -- see real_scene/xpbd.py::_resolve_guide, and note this is NOT the multiplier
+        // warm start gate G0 measured as worthless: that failed because a displacement in the null
+        // space of J^T cannot be written as J^T lambda, and this constraint's Jacobian is the identity.
+        //
+        // Applied outside the incident average above on purpose. Folding the guide into the
+        // structural slots would divide every constraint at this vertex by 19 instead of 18 and put a
+        // stiff guide in a tug of war with stiff edges under Jacobi averaging.
+        const float confidence = guideConfidence[vertex];
+        if (confidence > 0.0) {
+            const float3 delta = updated - guideTarget[vertex].xyz;
+            const float distance = length(delta);
+            if (distance > 1.0e-9) {
+                const float alpha = push.guideCompliance * inverseSquaredStep / confidence;
+                const float lambda = guideLambda[vertex];
+                const float step = (-distance - alpha * lambda) / max(inverseMass + alpha, 1.0e-20);
+                guideLambda[vertex] = lambda + step;
+                updated += inverseMass * (delta / distance) * step;
+            }
+        }
+    }
 
     // One-sided plane projection against the nearest body proxy, the same contact the network saw.
-    // Each cloth vertex has at most one, so this needs no accumulation and folds into this pass
-    // instead of costing a second dispatch per iteration.
-    if ((push.flags & XPBD_COLLISION) != 0u) {
+    // Each cloth vertex has at most one, so this needs no accumulation. It comes after the guide so
+    // non-penetration is never traded away for staying near the prediction. Pinned vertices are
+    // excluded, matching `movable` in real_scene/xpbd.py::_resolve_contacts and the early return the
+    // one-thread-per-vertex version used to take.
+    if (lastPass && (push.flags & XPBD_COLLISION) != 0u && movable) {
         const uint obstacle = worldObstacle[vertex];
         if (obstacle != 0xffffffffu) {
             const float3 normal = normalize(proxyNormal[obstacle].xyz);

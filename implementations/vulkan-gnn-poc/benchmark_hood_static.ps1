@@ -22,6 +22,14 @@ param(
     [ValidateRange(0, 1024)]
     [int]$XpbdIterations = 128,
     [string]$XpbdAsset = '',
+    # Substeps multiply the cost: -XpbdIterations is per substep, and each substep after the first
+    # also pays a re-skin, a nearest-proxy search and a prediction pass. Measure 4 x 32 against
+    # 1 x 128 to see what that fixed cost actually is rather than assuming it.
+    [ValidateRange(1, 8)]
+    [int]$Substeps = 1,
+    [switch]$Guide,
+    [double]$GuideCompliance = 10.0,
+    [double]$AreaFloor = 0.0,
     # Locked SM clock for reproducibility. The idle clock on this part is 735 MHz against
     # a 3105 MHz maximum, and a latency-bound step does not look like load to the clock
     # governor, so an unlocked device reports run-to-run means up to 2.2x apart on
@@ -97,7 +105,10 @@ if ($Xpbd) {
     $XpbdAsset = [System.IO.Path]::GetFullPath($XpbdAsset)
     if (-not (Test-Path -LiteralPath $XpbdAsset -PathType Leaf)) { throw "XPBD asset is missing: $XpbdAsset" }
     $Arguments += @('--hood-xpbd', '--hood-xpbd-iterations', $XpbdIterations,
-        '--hood-xpbd-asset', (Quote-ProcessArgument $XpbdAsset))
+        '--hood-xpbd-asset', (Quote-ProcessArgument $XpbdAsset),
+        '--hood-xpbd-substeps', $Substeps)
+    if ($Guide) { $Arguments += @('--hood-xpbd-guide', '--hood-xpbd-guide-compliance', $GuideCompliance) }
+    if ($AreaFloor -gt 0) { $Arguments += @('--hood-xpbd-area-floor', $AreaFloor) }
 }
 
 function Get-GpuState {

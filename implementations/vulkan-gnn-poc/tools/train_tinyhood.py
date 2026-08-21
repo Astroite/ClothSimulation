@@ -244,6 +244,9 @@ def structure_metrics(scene: RuntimeScene, position: torch.Tensor, pin_target: t
         "collapsed_fraction_lt_0_5": float((ratios < 0.5).float().mean().item()),
         "stretched_fraction_gt_1_5": float((ratios > 1.5).float().mean().item()),
         "area_ratio_mean": float(area_ratios.mean().item()),
+        # The mean is carried by the few large triangles; the median is what moves when the garment
+        # is squashed flat. Matches the renderer's `triangle_area_ratio.median`.
+        "area_ratio_median": float(area_ratios.median().item()),
         "degenerate_fraction_lt_0_1": float((area_ratios < 0.1).float().mean().item()),
         "flipped_fraction": float(((rest_normal * current_normal).sum(dim=-1) < 0.0).float().mean().item()),
         "bounds_min": safe.amin(dim=0).tolist(),

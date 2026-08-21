@@ -632,6 +632,16 @@ def structure_metrics(scene: RuntimeScene, position: torch.Tensor, pin_target: t
         "collapsed_fraction_lt_0_5": float((ratios < 0.5).float().mean().item()),
         "stretched_fraction_gt_1_5": float((ratios > 1.5).float().mean().item()),
         "area_ratio_mean": float(areas.mean().item()),
+        # The median and the degenerate fraction are the lower-tail columns. `edge_ratio_p95` is an
+        # upper-tail statistic and is completely immune to the cloth being squashed: on
+        # `sprint_start` step 120 the hybrid has the best p95 of the three branches (1.291) while
+        # simultaneously holding the most collapsed edges (13.3%), the smallest triangles (median
+        # 0.478) and the most flipped ones (0.435) -- the skirt is pressed into a patch at the hip.
+        # `area_ratio_mean` cannot see that either, because a few large triangles carry it. These
+        # two names match the renderer's `triangle_area_ratio.median` and
+        # `degenerate_fraction_lt_0_1` so the two instruments can be read side by side.
+        "area_ratio_median": float(areas.median().item()),
+        "degenerate_fraction_lt_0_1": float((areas < 0.1).float().mean().item()),
         "flipped_fraction": float(((rest_normal * current_normal).sum(dim=-1) < 0.0).float().mean().item()),
     }
 
@@ -643,6 +653,34 @@ def curve_point(scene: RuntimeScene, position: torch.Tensor) -> tuple[float, flo
     current_normal = triangle_normals(scene, position)
     flipped = ((rest_normal * current_normal).sum(dim=-1) < 0.0).float().mean()
     return float(torch.quantile(ratios, 0.95).item()), float(flipped.item())
+
+
+def curve_point_full(scene: RuntimeScene, position: torch.Tensor) -> tuple[float, float, float, float]:
+    """`curve_point` plus the two lower-tail columns, for probes that record a whole curve.
+
+    `curve_point`'s p95 is an upper-tail statistic, so a run that squashes the garment instead of
+    exploding it reads as the *best* of a comparison: on `sprint_start` step 120 the hybrid holds
+    the lowest p95 of the three branches while also holding the most collapsed edges and the
+    smallest triangles. Reporting only an end-state `structure_metrics` hides *when* that started,
+    which is the same mistake `rollout_curve` exists to avoid for the upper tail. Returning all
+    four here lets a caller keep a per-step curve for both tails at one triangle pass.
+
+    The extra cost over `curve_point` is one norm and one median over the triangles, so this is
+    still far cheaper than `structure_metrics` (no bounds, no pin error, no nan_to_num pass).
+    """
+    ratios = edge_ratios(scene, position)
+    rest_normal = triangle_normals(scene, scene.cloth_rest)
+    current_normal = triangle_normals(scene, position)
+    areas = torch.linalg.vector_norm(current_normal, dim=-1) / torch.linalg.vector_norm(
+        rest_normal, dim=-1
+    ).clamp_min(1.0e-12)
+    flipped = ((rest_normal * current_normal).sum(dim=-1) < 0.0).float().mean()
+    return (
+        float(torch.quantile(ratios, 0.95).item()),
+        float(flipped.item()),
+        float((ratios < 0.5).float().mean().item()),
+        float(areas.median().item()),
+    )
 
 
 def rollout_curve(

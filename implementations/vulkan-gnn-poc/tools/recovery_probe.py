@@ -63,14 +63,15 @@ from real_scene.fine15 import Fine15, Fine15Weights  # noqa: E402
 from real_scene.tinyhood import load_tinyhood  # noqa: E402
 from real_scene.xpbd import (  # noqa: E402
     SolverConfig,
+    build_area_constraints,
     build_constraints,
+    calibrate_area_from_trajectory,
     calibrate_from_trajectory,
     contacts_from_graph,
-    inertial_prediction,
-    project,
+    step_substepped,
 )
 from gate_g0 import BallisticGravity, load_scene  # noqa: E402
-from train_student import advance, curve_point, frame_of  # noqa: E402
+from train_student import advance, curve_point_full, frame_of  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,6 +108,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--one-sided", type=int, default=1, choices=(0, 1))
     parser.add_argument("--relaxation", type=float, default=1.0)
     parser.add_argument("--gravity", nargs=3, type=float, default=[0.0, -9.81, 0.0])
+    # Soft-guided multirate options. All default to the historical behaviour, so an invocation that
+    # does not mention them reproduces the numbers already in results/.
+    parser.add_argument("--substeps", type=int, default=1,
+                        help="physics substeps per visual frame. --iterations is PER SUBSTEP, so "
+                             "--substeps 4 --iterations 32 is the equal-budget partner of "
+                             "--substeps 1 --iterations 128.")
+    parser.add_argument("--mode", default="standard",
+                        choices=("standard", "warmstart", "nowarm", "guide"),
+                        help="how the network's prediction enters the solve. `standard` is today's "
+                             "hard initial value; `guide` makes it a compliant per-vertex target.")
+    parser.add_argument("--guide-compliance", type=float, default=0.0,
+                        help="m^2/N for the guide constraint. The useful band is around 1-100; "
+                             "below ~0.5 the guide is hard in all but name.")
+    parser.add_argument("--guide-trust-ratio", type=float, default=0.0,
+                        help="distrust a vertex whose guide is further than this many of its own "
+                             "shortest constraints away. 0 disables the gate.")
+    parser.add_argument("--area-floor", type=float, default=0.0,
+                        help="minimum triangle area as a fraction of the CALIBRATED area. 0 is off.")
+    parser.add_argument("--area-compliance", type=float, default=0.0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output", type=Path, default=POC_ROOT / "results/recovery_probe.json")
     return parser.parse_args()
@@ -285,6 +305,8 @@ def rollout(predictor, builder, scene, args, *, frame_scale, hook, damage=None):
     positions: list[torch.Tensor] = []
     edge: list[float] = []
     flipped: list[float] = []
+    collapsed: list[float] = []
+    area_median: list[float] = []
     pierced: list[int] = []
     depth: list[float] = []
     injected = None
@@ -306,33 +328,61 @@ def rollout(predictor, builder, scene, args, *, frame_scale, hook, damage=None):
             if not torch.isfinite(position).all():
                 edge.append(float("inf"))
                 break
-            point = curve_point(scene, position)
+            point = curve_point_full(scene, position)
             edge.append(point[0])
             flipped.append(point[1])
+            # The lower tail needs a curve of its own, not just an end state: `edge` is a p95 and
+            # goes *down* when the garment is squashed rather than stretched, so a branch can look
+            # like it is recovering on `edge` while it is being pressed flat. See
+            # train_student.curve_point_full.
+            collapsed.append(point[2])
+            area_median.append(point[3])
             count, deepest = penetration(scene, graph, position, step, frame_scale, args.contact_offset)
             pierced.append(count)
             depth.append(deepest)
             positions.append(position.clone())
     return {"positions": positions, "edge": edge, "flipped": flipped,
+            "collapsed": collapsed, "area_median": area_median,
             "pierced": pierced, "depth": depth, "injected_rms": injected}
 
 
-def make_hook(scene, constraints, config, *, network, frame_scale):
-    """The `(position, graph, step) -> position` projection, matching tools/gate_g0.py's."""
+def make_hook(scene, constraints, config, *, network, frame_scale,
+              substeps=1, area=None, min_edge=None, gravity=None):
+    """The `(position, graph, step) -> position` projection, matching tools/gate_g0.py's.
+
+    Both hooks now delegate to `real_scene/xpbd.py::step_substepped`, so "matching" is enforced by
+    sharing the arithmetic rather than by keeping two copies in step. What stays different here is
+    the frame rule: this probe scales the clip (`frame_scale`) to test fast motion, so the animation
+    frames a step spans come from `frame_of`, and the substep loop interpolates between them.
+    """
 
     def hook(position, graph, step):
-        contacts = None
-        if config.collision and graph.world_cloth.numel() > 0:
-            _, normals = scene.proxy(min(frame_of(step, frame_scale), scene.frame_count - 1))
-            target, _ = scene.proxy(min(frame_of(step + 1, frame_scale), scene.frame_count - 1))
-            contacts = contacts_from_graph(graph, target, normals)
-        return project(
+        obstacle_frame = min(frame_of(step, frame_scale), scene.frame_count - 1)
+        target_frame = min(frame_of(step + 1, frame_scale), scene.frame_count - 1)
+        # Who supplies gravity depends on where the solve starts.
+        #
+        # `standard` starts *from* the predictor's output, so that output is the guide and it already
+        # carries whatever acceleration produced it -- the network's for a hybrid arm, `dt^2 g` for
+        # the ballistic arm. Passing gravity again would double it.
+        #
+        # `guide` and `nowarm` start from the inertial prediction, so gravity has to be applied
+        # explicitly, as `h^2 g` per substep. For the ballistic arm that also means dropping the
+        # guide entirely: a pure-XPBD row wants ballistic-plus-constraints, not a soft pull towards a
+        # ballistic target. For a hybrid arm the guide stays, and the analytic gravity is what makes a
+        # distrusted vertex fall back to ballistic motion rather than to inertial coasting.
+        analytic_gravity = config.mode != "standard"
+        return step_substepped(
             constraints, config,
-            position=position,
-            inertial=inertial_prediction(graph) if network else position,
-            pin_mask=graph.pin_mask, pin_target=graph.pin_target,
+            scene=scene,
+            graph=graph,
+            guide=position if (network or not analytic_gravity) else None,
             timestep=1.0 / 3.0 if step == 0 else 1.0 / 30.0,
-            contacts=contacts,
+            frame=float(obstacle_frame),
+            frame_advance=float(target_frame - obstacle_frame),
+            substeps=substeps,
+            area=area,
+            min_edge=min_edge,
+            gravity=gravity if analytic_gravity else None,
         )
 
     return hook
@@ -397,6 +447,10 @@ def main() -> int:
     report = {"student": args.student.name, "steps": args.steps, "warmup": args.warmup,
               "frame_scales": args.frame_scales, "iterations": args.iterations,
               "b_iterations": args.b_iterations, "patch": args.patch,
+              "substeps": args.substeps, "mode": args.mode,
+              "guide_compliance": args.guide_compliance, "guide_trust_ratio": args.guide_trust_ratio,
+              "area_floor": args.area_floor, "area_compliance": args.area_compliance,
+              "total_sweeps_per_frame": args.iterations * args.substeps,
               "stretch_amount": args.stretch_amount, "penetrate_depth": args.penetrate_depth,
               "scenes": {}}
 
@@ -412,9 +466,25 @@ def main() -> int:
                                            skip=min(5, args.steps - 1)).clamp_min(1.0e-9)
         base = dataclasses.replace(base, target_length=lengths)
 
+        # Both extras are calibrated off the same teacher rollout the lengths are, so they inherit
+        # its definition of "unstretched" rather than the authored rest mesh's -- see
+        # real_scene/xpbd.py::calibrate_area_from_trajectory for why that matters here.
+        area = None
+        if args.area_floor > 0.0:
+            area = build_area_constraints(scene, calibrate_area_from_trajectory(
+                scene.cloth_triangles, reference["positions"], skip=min(5, args.steps - 1)))
+        min_edge = None
+        if args.guide_trust_ratio > 0.0:
+            min_edge = torch.full((base.vertex_count,), float("inf"), device=device)
+            for column in (0, 1):
+                min_edge = min_edge.scatter_reduce(
+                    0, base.pairs[:, column], base.target_length, reduce="amin")
+            min_edge = torch.where(torch.isfinite(min_edge), min_edge, torch.zeros_like(min_edge))
+
         entry: dict = {"constraints": base.count, "speeds": {}}
         for frame_scale in args.frame_scales:
-            probe = position_probe(scene, base, student, teacher, args, frame_scale)
+            probe = position_probe(scene, base, student, teacher, args, frame_scale,
+                                   area=area, min_edge=min_edge)
             entry["speeds"][f"{frame_scale:g}x"] = probe
         report["scenes"][scene_name] = entry
         print()
@@ -434,6 +504,12 @@ def window_metrics(run: dict, warmup: int) -> dict:
     `hml_001962`, branch C's end-of-run edge P95 *improves* from 1.344 at 1x to 1.181 at 2x purely
     because more of the window is settle. The max over the window is not fooled by that, because a
     blow-up does not heal -- branch A reads 16.664 at 2x at both the peak and the end.
+
+    The `collapsed_*` and `area_median_*` columns are the lower tail, and they aggregate in the
+    opposite direction: collapse is worst at its *max* and area at its *min*. A summary that only
+    carried the edge p95 would rank the branch that squashes the garment above the two that do not
+    -- measured on `sprint_start` step 120, the hybrid's p95 is the best of the three (1.291) while
+    its collapsed fraction is the worst (0.133) and its area median the smallest (0.478).
     """
     window = slice(warmup, len(run["edge"]))
     edge = run["edge"][window]
@@ -443,13 +519,18 @@ def window_metrics(run: dict, warmup: int) -> dict:
         "edge_p95_at": {str(at): (run["edge"][at - 1] if at <= len(run["edge"]) else None)
                         for at in (30, 60, 90, 120)},
         "flipped_max": max(run["flipped"][window], default=0.0),
+        "collapsed_end": run["collapsed"][-1] if run["collapsed"] else None,
+        "collapsed_max": max(run["collapsed"][window], default=0.0),
+        "area_median_end": run["area_median"][-1] if run["area_median"] else None,
+        "area_median_min": min(run["area_median"][window], default=None),
         "pierced_max": max(run["pierced"][window], default=0),
         "depth_max": max(run["depth"][window], default=0.0),
         "completed_steps": len(run["positions"]),
     }
 
 
-def position_probe(scene, constraints, student, teacher, args, frame_scale: float) -> dict:
+def position_probe(scene, constraints, student, teacher, args, frame_scale: float,
+                   *, area=None, min_edge=None) -> dict:
     """Every branch x corruption at one playback speed."""
     proxy = scene.proxy(min(frame_of(args.warmup, frame_scale), scene.frame_count - 1))
     # After this step the clip is exhausted and make_graph clamps to the last frame, so the remainder
@@ -464,13 +545,19 @@ def position_probe(scene, constraints, student, teacher, args, frame_scale: floa
     print(f"\n  speed={frame_scale:g}x (clip ends step {exhausted})  {'arm':3s} {'corruption':10s} "
           f"{'inject':>8s} {'xs0':>8s} {'xsEnd':>8s} {'xsRatio':>7s} {'half':>4s} {'back':>4s} "
           f"{'iso':>7s} {'edgeMAX':>8s} {'(clean)':>8s} {'edgeEnd':>8s} {'flip':>6s} {'(clean)':>7s} "
-          f"{'pierce':>6s} {'(clean)':>7s}")
+          f"{'collMAX':>7s} {'areaMIN':>7s} {'pierce':>6s} {'(clean)':>7s}")
     for branch in args.branches:
         config = SolverConfig(
             iterations=args.b_iterations if branch == "B" else args.iterations,
-            mode="standard", sweep=args.sweep,
+            # Branch B has no network output to initialise from, so `standard` and `guide` differ
+            # there only in where gravity is applied: `standard` takes one dt^2 g jump before the
+            # solve, `guide` folds h^2 g into each substep's own prediction. Substepping B honestly
+            # needs the latter, which is why the mode follows --mode for every branch.
+            mode=args.mode, sweep=args.sweep,
             stretch_compliance=args.stretch_compliance, bend_compliance=args.bend_compliance,
             one_sided=bool(args.one_sided), relaxation=args.relaxation, collision=True,
+            guide_compliance=args.guide_compliance, guide_trust_ratio=args.guide_trust_ratio,
+            area_floor=args.area_floor, area_compliance=args.area_compliance,
         )
         gravity = torch.tensor(args.gravity, dtype=torch.float32,
                                device=scene.cloth_rest.device).reshape(1, 3)
@@ -479,7 +566,8 @@ def position_probe(scene, constraints, student, teacher, args, frame_scale: floa
             # A fresh BallisticGravity per rollout: it carries a step counter that must not leak.
             predictor = BallisticGravity(gravity, args.mean, args.std) if branch == "B" else student
             hook = None if branch == "A" else make_hook(
-                scene, constraints, config, network=branch != "B", frame_scale=frame_scale)
+                scene, constraints, config, network=branch != "B", frame_scale=frame_scale,
+                substeps=args.substeps, area=area, min_edge=min_edge, gravity=gravity)
             return predictor, hook
 
         predictor, hook = arm()
@@ -512,6 +600,7 @@ def position_probe(scene, constraints, student, teacher, args, frame_scale: floa
                   f"{_fmt(forget['edge_p95_max'], 8, 3)} {_fmt(reference['edge_p95_max'], 8, 3)} "
                   f"{_fmt(forget['edge_p95_end'], 8, 3)} "
                   f"{_fmt(forget['flipped_max'], 6, 3)} {_fmt(reference['flipped_max'], 7, 3)} "
+                  f"{_fmt(forget['collapsed_max'], 7, 3)} {_fmt(forget['area_median_min'], 7, 3)} "
                   f"{forget['pierced_max']:6d} {reference['pierced_max']:7d}", flush=True)
         result[branch] = branch_result
     return result

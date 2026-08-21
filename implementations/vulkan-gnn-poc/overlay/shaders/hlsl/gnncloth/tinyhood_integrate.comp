@@ -12,10 +12,20 @@
 // reusing the predictor interface; taking the displacement directly is the same quantity minus one
 // float32 round trip (about 1e-7 m, four orders below the established cross-process noise -- see
 // results/GATE_G0_RESULTS.md section 8).
+//
+// `guideMode` is the soft-guide switch. See hood_integrate.comp for the full reasoning; the two
+// shaders differ only in latent width and have to stay behaviourally identical, because the shipping
+// student runs through this one.
 struct Params {
     uint clothCount, firstStep, collisionProjection, decoderMlp;
-    uint predictor, pad0, pad1, pad2;
+    uint predictor, guideMode, pad1, pad2;
     float4 gravityDisplacement;
+    // `substepScale` is 1 / substeps and `substepGravity` is h^2 g with h = dt / substeps. Together
+    // they turn this pass into the *first* substep's prediction; hood_substep.comp produces the rest.
+    // At one substep the scale is 1 and the gravity is zero, and the arithmetic below is written so
+    // that case is bit-identical to the pre-substep shader.
+    float guideTrustRatio, substepScale, pad4, pad5;
+    float4 substepGravity;
 };
 cbuffer ubo : register(b13) { Params params; };
 [[vk::binding(0)]] StructuredBuffer<float> weights;
@@ -31,6 +41,14 @@ cbuffer ubo : register(b13) { Params params; };
 [[vk::binding(10)]] StructuredBuffer<uint> worldObstacle;
 [[vk::binding(11)]] StructuredBuffer<float4> proxyTarget;
 [[vk::binding(12)]] StructuredBuffer<float4> proxyNormal;
+// 13 is the uniform buffer above.
+[[vk::binding(14)]] RWStructuredBuffer<float4> guideTarget;
+[[vk::binding(15)]] RWStructuredBuffer<float> guideConfidence;
+[[vk::binding(16)]] StructuredBuffer<float> xpbdMinEdge;
+// The frame's endpoints, for hood_substep.comp to interpolate the guide between. Written every step so
+// neither can be stale, and unused when substeps == 1.
+[[vk::binding(17)]] RWStructuredBuffer<float4> frameEntry;
+[[vk::binding(18)]] RWStructuredBuffer<float4> guidePrediction;
 
 [numthreads(HOOD_TINY_LATENT, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
@@ -57,7 +75,8 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
         const float3 effective = effectivePosition[vertex].xyz;
         const float3 oldPosition = clothPosition[vertex].xyz;
         const float3 oldPrevious = clothPrevious[vertex].xyz;
-        float3 predicted = effective + (effective - (pinMask[vertex] != 0 ? oldPosition : oldPrevious) + acceleration);
+        const float3 velocity = effective - (pinMask[vertex] != 0 ? oldPosition : oldPrevious);
+        float3 predicted = effective + (velocity + acceleration);
         const uint obstacle = worldObstacle[vertex];
         if (params.collisionProjection != 0 && pinMask[vertex] == 0 && obstacle != 0xffffffffu) {
             const float3 normal = normalize(proxyNormal[obstacle].xyz);
@@ -65,6 +84,40 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
             if (signedDistance < 0.0) predicted -= signedDistance * normal;
         }
         if (pinMask[vertex] != 0) predicted = pinTarget[vertex].xyz;
+
+        // Soft-guided mode: hand the prediction to hood_xpbd.comp as a compliant target and start the
+        // solve from the inertial prediction instead, so the constraints keep the final say. Written
+        // unconditionally so the guide buffer can never be stale; confidence defaults to 1.
+        //
+        // This is the FIRST substep's instalment. `substepScale` is 1 / substeps, which is also substep
+        // 0's fraction; the guide has to arrive in equal parts or splitting the sweep achieves nothing.
+        // The endpoint guard is there because `lerp(a, b, 1)` is not bit-identical to `b`, and the
+        // one-substep path has to stay exactly what every existing golden recorded.
+        guideTarget[vertex] = float4(params.substepScale >= 1.0 ? predicted
+            : lerp(effective, predicted, params.substepScale), 1.0);
+        float confidence = 1.0;
+        if (params.guideTrustRatio > 0.0) {
+            // `acceleration` *is* the prediction minus the inertial prediction, so the trust region
+            // needs no extra state. Per-vertex radius, because a global one lets the single shortest
+            // edge in the mesh dictate the clamp everywhere.
+            const float allowed = max(params.guideTrustRatio * xpbdMinEdge[vertex], 1.0e-12);
+            confidence = clamp(2.0 - length(acceleration) / allowed, 0.0, 1.0);
+        }
+        guideConfidence[vertex] = confidence;
+        frameEntry[vertex] = float4(effective, 1.0);
+        guidePrediction[vertex] = float4(predicted, 1.0);
+
+        if (params.guideMode != 0 && pinMask[vertex] == 0) {
+            // Start the solve at physics instead of at the prediction. `substepScale == 1` keeps the
+            // expression `effective + velocity` exactly; a smaller scale is the first of `substeps`
+            // Verlet steps, so the frame-length velocity has to be divided down or the substep would
+            // predict a whole frame of motion in a fraction of the time -- N times the real velocity,
+            // every substep, which diverges rather than merely drifting.
+            predicted = params.substepScale == 1.0
+                ? effective + velocity
+                : effective + velocity * params.substepScale + params.substepGravity.xyz;
+        }
+
         clothPrevious[vertex] = float4(params.firstStep != 0 ? predicted : effective, 1.0);
         clothPosition[vertex] = float4(predicted, 1.0);
         accelerationOut[vertex] = float4(acceleration, 0.0);

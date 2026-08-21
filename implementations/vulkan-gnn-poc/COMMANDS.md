@@ -254,6 +254,8 @@ overlay 里可以逐支勾掉、拖间距/相机距离/B 迭代数、从下拉�
 ```powershell
 .\tools\compare_probe.ps1 -Motion sprint_start -Steps 60 -Branches ABC
 .\tools\compare_probe.ps1 -Motion ch10032_sprint -Steps 60 -Branches C -Single   # 回归对照
+# 当前最佳等预算配置（4 子步 x 32 迭代 + 软引导），见 results/SUBSTEP_GUIDE_RESULTS.md
+.\tools\compare_probe.ps1 -Motion sprint_start -Steps 120 -Branches C -Single -Substeps 4 -XpbdIterations 32 -Guide
 ```
 
 | 参数 | 默认 | 说明 |
@@ -286,6 +288,25 @@ overlay 里可以逐支勾掉、拖间距/相机距离/B 迭代数、从下拉�
 > advanced function —— 未绑定的实参落进 `$args` 而**不报错**。给 `capture_screenshot.ps1` 传一个它
 > 当时还没有的 `-HoldLastFrame` 时，脚本照常成功、截图却是循环播放的。**加了新开关就要确认
 > 它真的在 `param()` 里。**
+
+#### 等预算 substep / 软引导矩阵
+
+`tools/substep_matrix.py` 跑 7 行 x 动作 x 权重 x **独立进程**，落
+`results/substep_guide_matrix.json`。每格必须是自己的进程：`--repeats` 在同一进程内平均，而
+`index_add_` 的原子累加顺序恰好在进程内复现，实测低估噪声 10-30 倍
+（`GATE_G0_RESULTS.md` §8）。
+
+```powershell
+.venv\Scripts\python.exe tools\substep_matrix.py                    # 默认 3 条动作 x 2 权重 x 3 进程
+.venv\Scripts\python.exe tools\substep_matrix.py --dry-run          # 只打印每格的命令行
+.venv\Scripts\python.exe tools\substep_matrix.py --rows D_hybrid_guide_4x32 --motions sprint_start
+```
+
+已完成的格会被缓存（`results/.substep_matrix/`），所以中断后重跑只补缺的；`--first-process`
+可以在不重跑已有格的前提下增加进程数。
+
+> **行 0（纯 XPBD 4x32）不能省。** 它是唯一能取消"要不要网络前驱"这个前提的对照，
+> 也是最便宜的一格（无 GNN）。跑 D 而不跑行 0 只会得到一个更好的混合，而 S10c 依然没有答案。
 
 ---
 

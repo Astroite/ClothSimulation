@@ -31,6 +31,16 @@ param(
     # Loop the clip instead of stopping on its last frame. Off by default because the Python probe
     # clamps, so holding is what makes the two comparable past clip_exhausted_at.
     [switch]$Loop,
+    # Soft-guided multirate options, matching tools/recovery_probe.py's. -XpbdIterations is PER
+    # SUBSTEP, so -Substeps 4 -XpbdIterations 32 is the equal-budget partner of the default 1 x 128.
+    # All default to the historical behaviour.
+    [ValidateRange(1, 8)]
+    [int]$Substeps = 1,
+    [switch]$Guide,
+    [double]$GuideCompliance = 10.0,
+    [double]$GuideTrustRatio = 0.0,
+    [double]$AreaFloor = 0.0,
+    [double]$AreaCompliance = 0.0,
     [string]$Output = ''
 )
 
@@ -58,6 +68,11 @@ $Arguments = @(
     '--hood-stability-output', ('"{0}"' -f [System.IO.Path]::GetFullPath($Output))
 )
 if (-not $Loop) { $Arguments += '--hood-hold-last-frame' }
+$Arguments += @('--hood-xpbd-substeps', $Substeps)
+if ($Guide) { $Arguments += @('--hood-xpbd-guide', '--hood-xpbd-guide-compliance', $GuideCompliance) }
+if ($GuideTrustRatio -gt 0) { $Arguments += @('--hood-xpbd-guide-trust-ratio', $GuideTrustRatio) }
+if ($AreaFloor -gt 0) { $Arguments += @('--hood-xpbd-area-floor', $AreaFloor,
+    '--hood-xpbd-area-compliance', $AreaCompliance) }
 $Arguments += $Single ? @('--hood-xpbd') : @('--hood-compare', '--hood-compare-branches', $Branches,
     '--hood-xpbd-iterations-b', $XpbdIterationsB)
 

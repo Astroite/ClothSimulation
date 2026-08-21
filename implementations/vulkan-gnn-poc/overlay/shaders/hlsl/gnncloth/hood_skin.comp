@@ -1,6 +1,13 @@
+// `frameBlend` / `nextBlend` put the body *between* two animation frames, which is what a
+// substepped solve needs: the cloth should not spend a whole 1/30 s step chasing a pose it was
+// already 1/30 s behind (on sprint_start the root covers 0.32 m per frame). A blend of 0 reproduces
+// the integer-frame pose exactly -- see `blendedMatrix` -- so a one-substep run is untouched.
 struct Params {
     uint frameIndex, nextFrameIndex, boneCount, characterCount;
     uint proxyCount, clothCount, resetState, renderFrameIndex;
+    // Blend from frameIndex towards frameIndex+1, and from nextFrameIndex towards nextFrameIndex+1.
+    // The CPU has already clamped the indices, so the shader never needs the frame count.
+    float frameBlend, nextBlend, skinPad0, skinPad1;
 };
 cbuffer ubo : register(b21) { Params params; };
 
@@ -26,43 +33,62 @@ cbuffer ubo : register(b21) { Params params; };
 [[vk::binding(19)]] RWStructuredBuffer<float4> clothPrevious;
 [[vk::binding(20)]] StructuredBuffer<uint> pinMask;
 
-float3 transformPosition(uint frame, uint bone, float3 position)
+// One row of the blended skin matrix. `.vanim` stores matrices that are already composed (bone times
+// bind-inverse) rather than per-bone translate/rotate/scale, so there is nothing to slerp and a
+// linear blend is the only interpolation the asset supports. It shrinks a fast-rotating limb slightly
+// mid-blend, which is worth knowing on exactly the sprint clips this is for. What matters more is that
+// real_scene/runtime_scene.py::matrices_at does the *same* linear blend, because the Python reference
+// and this runtime are compared bit for bit and a different sub-frame pose would read as a solver bug.
+//
+// `blend == 0` returns the stored row untouched rather than lerping with weight 0: `a + 0 * (b - a)`
+// is only equal to `a` up to rounding, and every existing golden depends on the integer-frame path
+// being exact.
+float4 blendedMatrix(uint frame, uint nextFrame, float blend, uint bone, uint row)
 {
-    const uint base = (frame * params.boneCount + bone) * 3;
+    const float4 current = skinMatrices[(frame * params.boneCount + bone) * 3 + row];
+    if (blend == 0.0) return current;
+    return lerp(current, skinMatrices[(nextFrame * params.boneCount + bone) * 3 + row], blend);
+}
+
+float3 transformPosition(uint frame, uint nextFrame, float blend, uint bone, float3 position)
+{
     const float4 p = float4(position, 1.0);
-    return float3(dot(skinMatrices[base + 0], p), dot(skinMatrices[base + 1], p), dot(skinMatrices[base + 2], p));
+    return float3(dot(blendedMatrix(frame, nextFrame, blend, bone, 0), p),
+                  dot(blendedMatrix(frame, nextFrame, blend, bone, 1), p),
+                  dot(blendedMatrix(frame, nextFrame, blend, bone, 2), p));
 }
 
-float3 transformNormal(uint frame, uint bone, float3 normal)
+float3 transformNormal(uint frame, uint nextFrame, float blend, uint bone, float3 normal)
 {
-    const uint base = (frame * params.boneCount + bone) * 3;
-    return float3(dot(skinMatrices[base + 0].xyz, normal), dot(skinMatrices[base + 1].xyz, normal), dot(skinMatrices[base + 2].xyz, normal));
+    return float3(dot(blendedMatrix(frame, nextFrame, blend, bone, 0).xyz, normal),
+                  dot(blendedMatrix(frame, nextFrame, blend, bone, 1).xyz, normal),
+                  dot(blendedMatrix(frame, nextFrame, blend, bone, 2).xyz, normal));
 }
 
-float3 skinPosition(uint frame, float3 position, StructuredBuffer<uint4> indices, StructuredBuffer<float4> weights, uint vertex)
+float3 skinPosition(uint frame, uint nextFrame, float blend, float3 position, StructuredBuffer<uint4> indices, StructuredBuffer<float4> weights, uint vertex)
 {
     float3 result = 0.0;
     [unroll] for (uint block = 0; block < 3; ++block) {
         const uint4 bone = indices[vertex * 3 + block];
         const float4 weight = weights[vertex * 3 + block];
-        result += transformPosition(frame, bone.x, position) * weight.x;
-        result += transformPosition(frame, bone.y, position) * weight.y;
-        result += transformPosition(frame, bone.z, position) * weight.z;
-        result += transformPosition(frame, bone.w, position) * weight.w;
+        result += transformPosition(frame, nextFrame, blend, bone.x, position) * weight.x;
+        result += transformPosition(frame, nextFrame, blend, bone.y, position) * weight.y;
+        result += transformPosition(frame, nextFrame, blend, bone.z, position) * weight.z;
+        result += transformPosition(frame, nextFrame, blend, bone.w, position) * weight.w;
     }
     return result;
 }
 
-float3 skinNormal(uint frame, float3 normal, StructuredBuffer<uint4> indices, StructuredBuffer<float4> weights, uint vertex)
+float3 skinNormal(uint frame, uint nextFrame, float blend, float3 normal, StructuredBuffer<uint4> indices, StructuredBuffer<float4> weights, uint vertex)
 {
     float3 result = 0.0;
     [unroll] for (uint block = 0; block < 3; ++block) {
         const uint4 bone = indices[vertex * 3 + block];
         const float4 weight = weights[vertex * 3 + block];
-        result += transformNormal(frame, bone.x, normal) * weight.x;
-        result += transformNormal(frame, bone.y, normal) * weight.y;
-        result += transformNormal(frame, bone.z, normal) * weight.z;
-        result += transformNormal(frame, bone.w, normal) * weight.w;
+        result += transformNormal(frame, nextFrame, blend, bone.x, normal) * weight.x;
+        result += transformNormal(frame, nextFrame, blend, bone.y, normal) * weight.y;
+        result += transformNormal(frame, nextFrame, blend, bone.z, normal) * weight.z;
+        result += transformNormal(frame, nextFrame, blend, bone.w, normal) * weight.w;
     }
     return normalize(result);
 }
@@ -71,18 +97,20 @@ float3 skinNormal(uint frame, float3 normal, StructuredBuffer<uint4> indices, St
 void main(uint3 dispatchId : SV_DispatchThreadID)
 {
     const uint index = dispatchId.x;
+    // The rendered character always sits on the whole frame -- the sub-frame poses exist for the
+    // solver, and drawing the body at a substep pose would make the visible body stutter within a step.
     if (index < params.characterCount) {
-        characterPosition[index] = float4(skinPosition(params.renderFrameIndex, characterRestPosition[index].xyz, characterBoneIndices, characterBoneWeights, index), 1.0);
-        characterNormal[index] = float4(skinNormal(params.renderFrameIndex, characterRestNormal[index].xyz, characterBoneIndices, characterBoneWeights, index), 0.0);
+        characterPosition[index] = float4(skinPosition(params.renderFrameIndex, params.renderFrameIndex, 0.0, characterRestPosition[index].xyz, characterBoneIndices, characterBoneWeights, index), 1.0);
+        characterNormal[index] = float4(skinNormal(params.renderFrameIndex, params.renderFrameIndex, 0.0, characterRestNormal[index].xyz, characterBoneIndices, characterBoneWeights, index), 0.0);
     }
     if (index < params.proxyCount) {
-        proxyPosition[index] = float4(skinPosition(params.frameIndex, proxyRestPosition[index].xyz, proxyBoneIndices, proxyBoneWeights, index), 1.0);
-        proxyNormal[index] = float4(skinNormal(params.frameIndex, proxyRestNormal[index].xyz, proxyBoneIndices, proxyBoneWeights, index), 0.0);
-        proxyTarget[index] = float4(skinPosition(params.nextFrameIndex, proxyRestPosition[index].xyz, proxyBoneIndices, proxyBoneWeights, index), 1.0);
+        proxyPosition[index] = float4(skinPosition(params.frameIndex, params.frameIndex + 1, params.frameBlend, proxyRestPosition[index].xyz, proxyBoneIndices, proxyBoneWeights, index), 1.0);
+        proxyNormal[index] = float4(skinNormal(params.frameIndex, params.frameIndex + 1, params.frameBlend, proxyRestNormal[index].xyz, proxyBoneIndices, proxyBoneWeights, index), 0.0);
+        proxyTarget[index] = float4(skinPosition(params.nextFrameIndex, params.nextFrameIndex + 1, params.nextBlend, proxyRestPosition[index].xyz, proxyBoneIndices, proxyBoneWeights, index), 1.0);
     }
     if (index < params.clothCount) {
-        const float3 currentTarget = skinPosition(params.frameIndex, clothRestPosition[index].xyz, clothBoneIndices, clothBoneWeights, index);
-        const float3 nextTarget = skinPosition(params.nextFrameIndex, clothRestPosition[index].xyz, clothBoneIndices, clothBoneWeights, index);
+        const float3 currentTarget = skinPosition(params.frameIndex, params.frameIndex + 1, params.frameBlend, clothRestPosition[index].xyz, clothBoneIndices, clothBoneWeights, index);
+        const float3 nextTarget = skinPosition(params.nextFrameIndex, params.nextFrameIndex + 1, params.nextBlend, clothRestPosition[index].xyz, clothBoneIndices, clothBoneWeights, index);
         pinTarget[index] = float4(nextTarget, 1.0);
         if (params.resetState != 0) {
             clothPosition[index] = float4(currentTarget, 1.0);

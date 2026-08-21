@@ -51,11 +51,11 @@ from real_scene.tinyhood import load_tinyhood  # noqa: E402
 from real_scene.xpbd import (  # noqa: E402
     STRETCH,
     SolverConfig,
+    build_area_constraints,
     build_constraints,
+    calibrate_area_from_trajectory,
     calibrate_from_trajectory,
-    contacts_from_graph,
-    inertial_prediction,
-    project,
+    step_substepped,
 )
 from compare_student_stability import crossings, decompose, trace  # noqa: E402
 
@@ -80,14 +80,29 @@ def parse_args() -> argparse.Namespace:
              "baked calibration can serve a garment across motions, which decides whether the "
              "Vulkan .vxpbd asset is per-garment or per-motion.",
     )
-    parser.add_argument("--iterations", nargs="+", type=int, default=[2, 4, 8, 16])
+    parser.add_argument("--iterations", nargs="+", type=int, default=[2, 4, 8, 16],
+                        help="sweeps per SUBSTEP, so the total per visual frame is this x --substeps")
     parser.add_argument("--modes", nargs="+", default=["standard", "warmstart", "nowarm"],
-                        choices=("standard", "warmstart", "nowarm"))
-    parser.add_argument("--sweep", default="coloured", choices=("coloured", "jacobi"))
+                        choices=("standard", "warmstart", "nowarm", "guide"))
+    parser.add_argument("--sweep", default="coloured", choices=("coloured", "jacobi", "fused"))
     parser.add_argument("--stretch-compliance", nargs="+", type=float, default=[0.0])
     parser.add_argument("--bend-compliance", nargs="+", type=float, default=[1.0e-5])
     parser.add_argument("--one-sided", nargs="+", type=int, default=[0], choices=(0, 1))
     parser.add_argument("--relaxation", type=float, default=1.0)
+    parser.add_argument("--substeps", type=int, default=1,
+                        help="physics substeps per visual frame. The network still runs once per "
+                             "frame; its guide arrives in equal instalments. Compare at equal "
+                             "--substeps x --iterations, not at equal --iterations.")
+    parser.add_argument("--guide-compliance", nargs="+", type=float, default=[0.0],
+                        help="mode=guide only. m^2/N. Gate G0 measured 0..1e-1 as inert for the "
+                             "two-endpoint constraints; the one-vertex guide crosses over near 1.")
+    parser.add_argument("--guide-trust-ratio", type=float, default=0.0,
+                        help="mode=guide only. Distrust a vertex whose guide sits further than this "
+                             "many of its own shortest constraints away. 0 disables the gate.")
+    parser.add_argument("--area-floor", nargs="+", type=float, default=[0.0],
+                        help="minimum triangle area as a fraction of the CALIBRATED area (not the "
+                             "rest area). 0 disables the constraint.")
+    parser.add_argument("--area-compliance", type=float, default=0.0)
     parser.add_argument("--gravity", nargs=3, type=float, default=[0.0, -9.81, 0.0])
     parser.add_argument("--no-collision", action="store_true")
     parser.add_argument("--branches", nargs="+", default=["A", "B", "C"], choices=("A", "B", "C"))
@@ -128,31 +143,43 @@ class BallisticGravity:
         return ((displacement - self.mean) / self.std).expand(graph.effective_position.shape[0], 3)
 
 
-def make_projector(scene, constraints, config: SolverConfig, *, network: bool, collision: bool):
-    """Build the `(position, graph, step) -> position` hook `trace` applies after each step."""
+def make_projector(scene, constraints, config: SolverConfig, *, network: bool,
+                   substeps: int = 1, area=None, min_edge=None, gravity: torch.Tensor | None = None):
+    """Build the `(position, graph, step) -> position` hook `trace` applies after each step.
+
+    `position` is whatever the predictor produced for the whole visual frame, so under
+    `mode="guide"` it is the guide target rather than the state the solve starts from. The substep
+    loop itself lives in `real_scene/xpbd.py::step_substepped` -- it is solver logic, and
+    `tools/recovery_probe.py::make_hook` has to reach exactly the same arithmetic.
+
+    Contacts are gated by `config.collision` alone. The old signature also took a `collision` flag,
+    but the only call site passed `not args.no_collision`, which is the same value `solver_configs`
+    already put into the config.
+    """
 
     def hook(position: torch.Tensor, graph, step: int) -> torch.Tensor:
-        contacts = None
-        if collision and graph.world_cloth.numel() > 0:
-            obstacle_frame = min(step, scene.frame_count - 1)
-            target_frame = min(step + 1, scene.frame_count - 1)
-            _, normals = scene.proxy(obstacle_frame)
-            target, _ = scene.proxy(target_frame)
-            contacts = contacts_from_graph(graph, target, normals)
-        # Branch B's displacement from the Verlet prediction *is* gravity -- real dynamics, not a
-        # network artifact -- so the inertial reference has to include it. With `inertial = position`
-        # there is nothing for `warmstart`/`nowarm` to discard and all three initialisers coincide,
-        # which is the correct reading of a branch that has no network.
-        inertial = inertial_prediction(graph) if network else position
-        return project(
+        # See tools/recovery_probe.py::make_hook for why gravity and the guide are keyed off the mode:
+        # `standard` starts from the predictor's output so that output already carries its own
+        # acceleration, while `guide`/`nowarm` start from the inertial prediction and need `h^2 g` per
+        # substep. Branch B in a x_tilde-starting mode drops the guide, which is what makes a
+        # substepped pure-XPBD row ballistic-plus-constraints rather than a pull towards a ballistic
+        # target.
+        analytic_gravity = config.mode != "standard"
+        obstacle_frame = min(step, scene.frame_count - 1)
+        target_frame = min(step + 1, scene.frame_count - 1)
+        return step_substepped(
             constraints,
             config,
-            position=position,
-            inertial=inertial,
-            pin_mask=graph.pin_mask,
-            pin_target=graph.pin_target,
+            scene=scene,
+            graph=graph,
+            guide=position if (network or not analytic_gravity) else None,
             timestep=1.0 / 3.0 if step == 0 else 1.0 / 30.0,
-            contacts=contacts,
+            frame=float(obstacle_frame),
+            frame_advance=float(target_frame - obstacle_frame),
+            substeps=substeps,
+            area=area,
+            min_edge=min_edge,
+            gravity=gravity if analytic_gravity else None,
         )
 
     return hook
@@ -161,30 +188,50 @@ def make_projector(scene, constraints, config: SolverConfig, *, network: bool, c
 def solver_configs(args: argparse.Namespace, branch: str) -> list[SolverConfig]:
     if branch == "A":
         return [SolverConfig(iterations=0)]
-    # Branch B has no network displacement, so every mode initialiser coincides there.
-    modes = ["standard"] if branch == "B" else args.modes
+    # Branch B has no network displacement, so every mode initialiser coincides there -- except
+    # `guide`, which is how branch B gets substepped honestly: it starts from x_tilde and takes its
+    # gravity as h^2 g per substep instead of one dt^2 g jump. Row 0 of the substep matrix is exactly
+    # that, so `guide` has to survive this filter even for B, where it carries no guide target.
+    modes = ["standard"] if branch == "B" and "guide" not in args.modes else \
+        (["guide"] if branch == "B" else args.modes)
     configs = []
     for iterations in args.iterations:
         for mode in modes:
             for stretch in args.stretch_compliance:
                 for bend in args.bend_compliance:
                     for one_sided in args.one_sided:
-                        configs.append(SolverConfig(
-                            iterations=iterations, mode=mode, sweep=args.sweep,
-                            stretch_compliance=stretch, bend_compliance=bend,
-                            one_sided=bool(one_sided), relaxation=args.relaxation,
-                            collision=not args.no_collision,
-                        ))
+                        for guide_compliance in (args.guide_compliance if mode == "guide" else [0.0]):
+                            for area_floor in args.area_floor:
+                                configs.append(SolverConfig(
+                                    iterations=iterations, mode=mode, sweep=args.sweep,
+                                    stretch_compliance=stretch, bend_compliance=bend,
+                                    one_sided=bool(one_sided), relaxation=args.relaxation,
+                                    collision=not args.no_collision,
+                                    guide_compliance=guide_compliance,
+                                    guide_trust_ratio=args.guide_trust_ratio,
+                                    area_floor=area_floor,
+                                    area_compliance=args.area_compliance,
+                                ))
     return configs
 
 
-def label_for(branch: str, config: SolverConfig, calibration: str) -> str:
+def label_for(branch: str, config: SolverConfig, calibration: str, substeps: int = 1) -> str:
     if branch == "A":
         return "A_gnn_only"
     stem = f"{branch}_{'xpbd' if branch == 'B' else 'hybrid'}_k{config.iterations}"
-    if branch == "C":
+    if substeps > 1:
+        # `k` is per substep, so a label without this would collide across the substep matrix rows
+        # that are deliberately equal-budget (4x32 and 8x16 both total 128).
+        stem += f"x{substeps}"
+    if branch == "C" or config.mode != "standard":
         stem += f"_{config.mode}"
     stem += f"_{calibration}_sc{config.stretch_compliance:g}_bc{config.bend_compliance:g}"
+    if config.mode == "guide":
+        stem += f"_gc{config.guide_compliance:g}"
+        if config.guide_trust_ratio > 0.0:
+            stem += f"_tr{config.guide_trust_ratio:g}"
+    if config.area_floor > 0.0:
+        stem += f"_area{config.area_floor:g}"
     if config.one_sided:
         stem += "_onesided"
     return stem
@@ -253,6 +300,33 @@ def run_scene(
                     )
             base = dataclasses.replace(base, target_length=lengths)
         stretch_mask = base.kind == STRETCH
+        # The area floor's reference is calibrated from the same trajectory the lengths are, for the
+        # same reason: rest areas on these scenes are wrong by up to the square of the 1.890-2.025
+        # edge ratio skinning already introduces, and one global rho cannot absorb that. Built per
+        # calibration block so a `rest`-calibrated run gets a rest-calibrated floor and the control
+        # stays a real control.
+        area = None
+        if any(config.area_floor > 0.0 for config in solver_configs(args, "C")):
+            area_source = reference["positions"] if calibration == "teacher" else None
+            target_area = (
+                calibrate_area_from_trajectory(scene.cloth_triangles, area_source, skip=min(5, steps - 1))
+                if area_source is not None else None
+            )
+            area = build_area_constraints(
+                scene, target_area,
+                reference_position=references.get(calibration, scene.cloth_target(0)),
+            )
+        # Shortest constraint at each vertex, the trust radius `guide_confidence` measures against.
+        # Same quantity `tools/bake_xpbd_constraints.py::per_vertex_min_edge` bakes into every .vxpbd
+        # and that no kernel has read yet.
+        min_edge = None
+        if args.guide_trust_ratio > 0.0:
+            min_edge = torch.full((base.vertex_count,), float("inf"), device=device)
+            for column in (0, 1):
+                min_edge = min_edge.scatter_reduce(
+                    0, base.pairs[:, column], base.target_length, reduce="amin"
+                )
+            min_edge = torch.where(torch.isfinite(min_edge), min_edge, torch.zeros_like(min_edge))
         entry.setdefault("calibration", {})[calibration] = {
             "source": (args.calibration_source if calibration == "teacher" and donor is not None else scene_name),
             "suspect_constraints": int(base.suspect.sum()),
@@ -267,7 +341,7 @@ def run_scene(
             if branch == "A" and calibration != args.calibrations[0]:
                 continue  # branch A has no constraints, so it does not vary with calibration
             for config in solver_configs(args, branch):
-                label = label_for(branch, config, calibration)
+                label = label_for(branch, config, calibration, args.substeps)
                 scores, curves = [], None
                 for _ in range(args.repeats):
                     if branch == "B":
@@ -275,7 +349,8 @@ def run_scene(
                     else:
                         predictor = student
                     hook = None if branch == "A" else make_projector(
-                        scene, base, config, network=branch != "B", collision=not args.no_collision
+                        scene, base, config, network=branch != "B",
+                        substeps=args.substeps, area=area, min_edge=min_edge, gravity=gravity,
                     )
                     current = trace(predictor, teacher, scene, steps, mean, std, reference["positions"], hook)
                     summary = summarise(current, reference, args, steps)

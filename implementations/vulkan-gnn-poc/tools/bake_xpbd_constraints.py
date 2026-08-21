@@ -54,7 +54,9 @@ from real_scene.xpbd import (  # noqa: E402
     SolverConfig,
     bake_tables,
     build_constraints,
+    calibrate_area_from_trajectory,
     calibrate_from_trajectory,
+    triangle_areas,
 )
 
 sys.path.insert(0, str(POC_ROOT / "tools"))
@@ -101,8 +103,18 @@ def load_scene(name: str, args: argparse.Namespace) -> RuntimeScene:
     )
 
 
-def teacher_lengths(name: str, args: argparse.Namespace, pairs: torch.Tensor) -> torch.Tensor:
-    """Median edge length over `name`'s teacher rollout, measured on `pairs`."""
+def teacher_calibration(
+    name: str, args: argparse.Namespace, pairs: torch.Tensor, triangles: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Median edge length AND median triangle area over `name`'s teacher rollout.
+
+    Both come out of one rollout on purpose. A teacher rollout is not reproducible -- `index_add_`
+    has no deterministic CUDA float kernel, and the measured spread in the stretch target p95 across
+    rollouts is about 1e-5 m -- so taking a second rollout for the areas would calibrate the lengths
+    and the areas against slightly different trajectories. The area floor is compared against the
+    edge targets constantly (a triangle can only shrink so far before its edges must too), so those
+    two references have to describe the same configuration.
+    """
     weights = Fine15Weights.from_vhood(args.fine15.resolve(), device=torch.device(args.device))
     teacher = Fine15(weights)
     mean, std = weights.normalizer("output")
@@ -110,8 +122,14 @@ def teacher_lengths(name: str, args: argparse.Namespace, pairs: torch.Tensor) ->
     steps = args.steps or max(scene.frame_count, 120)
     if not torch.equal(build_constraints(scene, scene.cloth_target(0)).pairs, pairs):
         raise SystemExit(f"{name} does not share a constraint topology with the scene being baked")
+    if not torch.equal(scene.cloth_triangles, triangles):
+        raise SystemExit(f"{name} does not share a triangle list with the scene being baked")
     reference = trace(teacher.predict_graph, teacher, scene, steps, mean, std)
-    return calibrate_from_trajectory(pairs, reference["positions"], skip=min(5, steps - 1)).clamp_min(1.0e-9)
+    skip = min(5, steps - 1)
+    return (
+        calibrate_from_trajectory(pairs, reference["positions"], skip=skip).clamp_min(1.0e-9),
+        calibrate_area_from_trajectory(triangles, reference["positions"], skip=skip).clamp_min(1.0e-12),
+    )
 
 
 def per_vertex_min_edge(pairs: torch.Tensor, lengths: torch.Tensor, vertex_count: int) -> torch.Tensor:
@@ -142,19 +160,25 @@ def main() -> int:
 
     calibration_scene = args.calibration_scene or args.scene
     if args.calibration == "teacher":
-        target = teacher_lengths(calibration_scene, args, constraints.pairs)
+        target, area_target = teacher_calibration(
+            calibration_scene, args, constraints.pairs, scene.cloth_triangles
+        )
     elif args.calibration == "bind":
         target = constraints.target_length
+        area_target = triangle_areas(scene.cloth_target(0), scene.cloth_triangles)
     else:
         target = build_constraints(
             scene, scene.cloth_rest, include_bend=not args.no_bend
         ).target_length
+        area_target = triangle_areas(scene.cloth_rest, scene.cloth_triangles)
 
     # `bake_tables` needs a config only for the compliance, and compliance is a runtime uniform
     # here, so the timestep and compliance passed in do not reach the asset -- only `weight_sum`
     # does, and that depends on neither.
     tables = bake_tables(constraints, SolverConfig(), 1.0 / 30.0)
     stretch = int((constraints.kind == STRETCH).sum())
+    triangles = scene.cloth_triangles
+    triangle_count = int(triangles.shape[0])
 
     sections = [
         Section("info", 4, 4, little(torch.tensor([count, vertices, width, stretch]), "<u4")),
@@ -169,6 +193,17 @@ def main() -> int:
         Section("min_edge", vertices, 4, little(
             per_vertex_min_edge(constraints.pairs, target, vertices), "<f4"
         )),
+        # Reference area per triangle for the one-sided area floor, calibrated the same way the
+        # lengths are. `area_floor` itself is a runtime uniform, like the compliances, so a rho sweep
+        # needs no rebake. Only the target is baked because it is the only part of the area
+        # constraint that is state-independent -- unlike a distance constraint, its denominator is
+        # `sum_i w_i |grad_i A|^2`, which changes every iteration and cannot be precomputed. The
+        # three vertices of a triangle stay in agreement by summing in corner order instead. See
+        # real_scene/xpbd.py::_apply_area.
+        #
+        # No `area_triangles` section: the triangle list is already in `.vcloth2`, and the runtime
+        # derives the per-vertex incident-triangle CSR from it at load time for hood_features.comp.
+        Section("area_target", triangle_count, 4, little(area_target, "<f4")),
     ]
     output = args.output or (args.scene_root / args.scene / f"{args.scene}.vxpbd")
     written = write_sectioned(output.resolve(), MAGIC, VERSION, sections,
@@ -191,6 +226,14 @@ def main() -> int:
         "dead_constraints": int((~tables.alive).sum()),
         "target_length_p50": round(float(stretch_target.median()), 6),
         "target_length_p95": round(float(torch.quantile(stretch_target, 0.95)), 6),
+        "triangles": triangle_count,
+        "area_target_p50": round(float(area_target.median()), 9),
+        # How far the calibrated reference is from the authored rest area. This is the number that
+        # says whether a rest-area floor would have been usable: on CH10032 the edge ratio p95 is
+        # already 1.89-2.03 after skinning alone, and areas carry roughly the square of that.
+        "area_target_over_rest_p50": round(float(
+            (area_target / triangle_areas(scene.cloth_rest, triangles).clamp_min(1.0e-12)).median()
+        ), 6),
         "payload_sha256": written["payload_sha256"],
         "file_bytes": written["file_bytes"],
     }

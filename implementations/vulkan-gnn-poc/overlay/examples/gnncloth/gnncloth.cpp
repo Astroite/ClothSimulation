@@ -248,6 +248,30 @@ public:
 		hoodXpbdStretchCompliance = std::strtof(argumentValue("--hood-xpbd-stretch-compliance", "0").c_str(), nullptr);
 		hoodXpbdBendCompliance = std::strtof(argumentValue("--hood-xpbd-bend-compliance", "0").c_str(), nullptr);
 		if (hoodXpbdIterations < 0) throw std::runtime_error("--hood-xpbd-iterations must not be negative");
+		// Soft-guided multirate options. Every default reproduces the historical behaviour, so a
+		// command line that does not mention them still produces the numbers already in results/.
+		//
+		// --hood-xpbd-iterations is PER SUBSTEP. `--hood-xpbd-substeps 4 --hood-xpbd-iterations 32`
+		// is the equal-budget partner of the default `1 x 128`; raising substeps alone quadruples the
+		// cost and stops being a comparison.
+		hoodXpbdSubsteps = static_cast<int32_t>(std::strtol(argumentValue("--hood-xpbd-substeps", "1").c_str(), nullptr, 10));
+		hoodXpbdGuide = hasArgument("--hood-xpbd-guide");
+		hoodXpbdGuideCompliance = std::strtof(argumentValue("--hood-xpbd-guide-compliance", "10").c_str(), nullptr);
+		hoodXpbdGuideTrustRatio = std::strtof(argumentValue("--hood-xpbd-guide-trust-ratio", "0").c_str(), nullptr);
+		hoodXpbdAreaFloor = std::strtof(argumentValue("--hood-xpbd-area-floor", "0").c_str(), nullptr);
+		hoodXpbdAreaCompliance = std::strtof(argumentValue("--hood-xpbd-area-compliance", "0").c_str(), nullptr);
+		if (hoodXpbdSubsteps < 1) throw std::runtime_error("--hood-xpbd-substeps must be at least 1");
+		// Rejected rather than clamped. The per-substep descriptor sets are a fixed-size array bounded
+		// by hoodMaxSubsteps, and silently running 8 when the caller asked for 16 is the same class of
+		// bug as `-Solver TinyHood` without `-HoodModel` silently loading the diverging first student
+		// -- COMMANDS.md records how much trouble that one caused.
+		if (hoodXpbdSubsteps > static_cast<int32_t>(hoodMaxSubsteps))
+			throw std::runtime_error("--hood-xpbd-substeps is limited to " + std::to_string(hoodMaxSubsteps)
+				+ "; past that the per-substep re-skin, contact search and prediction pass cost more than "
+				  "the sweeps they buy, and 8x16 already starves the Jacobi sweep (see "
+				  "results/SUBSTEP_GUIDE_RESULTS.md section 2.2)");
+		if (hoodXpbdGuideCompliance < 0.0f) throw std::runtime_error("--hood-xpbd-guide-compliance must not be negative");
+		if (hoodXpbdAreaFloor < 0.0f) throw std::runtime_error("--hood-xpbd-area-floor must not be negative");
 		// Side-by-side A/B/C comparison. Needs the garment-level .vxpbd, and errors out without one
 		// rather than silently degrading into three copies of A -- COMMANDS.md already records how
 		// much trouble one silent fallback (-Solver TinyHood without -HoodModel) caused.

@@ -67,6 +67,13 @@ import torch
 # graph's neighbour-search radius are conceptually different knobs that happen to agree today.
 DEFAULT_CONTACT_OFFSET = 0.005
 
+# The radius `contacts_from_search` accepts a proxy within. This has to stay equal to
+# real_scene/fine15.py::COLLISION_RADIUS -- a substepped solve searches for its own contacts instead
+# of reading the network's graph, and if the two radii diverged the first substep would see a
+# different contact set than the network did. Duplicated rather than imported so this module keeps
+# taking its graph duck-typed; tests/test_xpbd.py asserts the two agree.
+DEFAULT_SEARCH_RADIUS = 0.03
+
 STRETCH = 0
 BEND = 1
 
@@ -284,12 +291,147 @@ def calibrate_from_trajectory(pairs: torch.Tensor, positions: list[torch.Tensor]
     return lengths.median(dim=0).values
 
 
+def triangle_areas(position: torch.Tensor, triangles: torch.Tensor) -> torch.Tensor:
+    """Area of each triangle, formed in the mesh's stored winding order.
+
+    The winding order is load-bearing, not cosmetic. In the fused sweep all three vertices of a
+    triangle recompute the same multiplier update, and they only agree bit for bit if they all form
+    `cross(b - a, c - a)` with a, b, c in the stored order rather than "mine first". Same rule as the
+    pair sweep's `pairs[c, 0] - pairs[c, 1]`.
+    """
+    corners = position[triangles]
+    normal = torch.linalg.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    return 0.5 * torch.linalg.vector_norm(normal, dim=-1)
+
+
+def calibrate_area_from_trajectory(
+    triangles: torch.Tensor, positions: list[torch.Tensor], skip: int = 0
+) -> torch.Tensor:
+    """Median triangle area over a trajectory. The area analogue of `calibrate_from_trajectory`.
+
+    Measured, and it is worth recording because the obvious prediction was wrong. Reference *lengths*
+    cannot come from `cloth_rest` -- skinning the authored mesh into frame 0 puts the CH10032 edge
+    ratio p95 at 1.890 / 2.025 -- so the expectation was that reference *areas* would be off by
+    roughly the square of that. They are not. On `ch10032_lower` the calibrated area over the rest
+    area runs 0.744 to 1.171, p5 to p95 of 0.929 to 1.051, with nothing outside [0.5, 2.0].
+
+    The reason is that skinning stretches a triangle anisotropically: one edge goes long while
+    another goes short, and the area barely moves. A per-edge upper tail of 1.89 is compatible with an
+    area within 5%.
+
+    So a rest-area floor would in fact have been usable on this garment, and the honest statement is
+    that this function is the right default for two weaker reasons rather than one strong one: it
+    costs nothing on top of the length calibration (same rollout -- see
+    `tools/bake_xpbd_constraints.py::teacher_calibration`), and it does not assume the anisotropic
+    cancellation holds on the next garment, which is untested at N=1. `build_area_constraints` keeps
+    `reference_position` available so the rest-area version stays a one-line control.
+    """
+    if not positions:
+        raise ValueError("calibrate_area_from_trajectory needs at least one position frame")
+    frames = positions[skip:] or positions
+    areas = torch.stack([triangle_areas(frame, triangles) for frame in frames])
+    return areas.median(dim=0).values
+
+
+@dataclass(frozen=True)
+class AreaConstraints:
+    """Per-triangle area floors plus the per-vertex gather tables needed to apply them.
+
+    Separate from `ConstraintSet` rather than folded into it because an area constraint is ternary and
+    the pair tables are binary: `signs` picks an endpoint, `corner` picks one of three gradients. Also
+    separate so that `area_floor = 0` leaves the pair sweep untouched -- with the area pass skipped the
+    solve is byte-for-byte the one gate G0 measured.
+
+    There is deliberately no baked `weight_sum` here, unlike `SolverTables`. That trick exists because
+    `w_a + w_b` and `w_b + w_a` are not guaranteed to give the same float on two different threads, and
+    for a distance constraint the sum is state-independent so it can be baked once. An area
+    constraint's denominator is `sum_i w_i |grad_i A|^2`, which changes every iteration and cannot be
+    baked at all. Agreement between the three threads is bought a different way: they sum the three
+    terms in corner order 0, 1, 2 -- an order fixed by the mesh, not by which vertex is asking.
+    """
+
+    triangles: torch.Tensor     # [T, 3] long -- stored winding order
+    target_area: torch.Tensor   # [T] float -- calibrated; see calibrate_area_from_trajectory
+    slots: torch.Tensor         # [V, K] long -- incident triangle index, padded with `count`
+    corner: torch.Tensor        # [V, K] long -- 0/1/2, which corner this vertex is; 0 in the padding
+    incident: torch.Tensor      # [V, 1] float -- real incident triangles, for Jacobi averaging
+
+    @property
+    def count(self) -> int:
+        return int(self.triangles.shape[0])
+
+    @property
+    def vertex_count(self) -> int:
+        return int(self.slots.shape[0])
+
+
+def _gather_triangle_tables(
+    triangles: torch.Tensor, vertex_count: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`_gather_tables` for triangles: three columns, and the corner index replaces the sign."""
+    device = triangles.device
+    count = int(triangles.shape[0])
+    if count == 0:
+        empty_slot = torch.zeros((vertex_count, 1), dtype=torch.long, device=device)
+        return empty_slot, empty_slot.clone(), torch.zeros((vertex_count, 1), device=device)
+
+    flat_vertex = torch.cat((triangles[:, 0], triangles[:, 1], triangles[:, 2]))
+    index = torch.arange(count, device=device)
+    flat_triangle = torch.cat((index, index, index))
+    flat_corner = torch.cat((
+        torch.zeros(count, dtype=torch.long, device=device),
+        torch.ones(count, dtype=torch.long, device=device),
+        torch.full((count,), 2, dtype=torch.long, device=device),
+    ))
+
+    order = torch.argsort(flat_vertex, stable=True)
+    sorted_vertex = flat_vertex[order]
+    incident = torch.bincount(sorted_vertex, minlength=vertex_count)
+    width = max(int(incident.max().item()), 1)
+
+    offsets = torch.zeros(vertex_count + 1, dtype=torch.long, device=device)
+    offsets[1:] = torch.cumsum(incident, dim=0)
+    rank = torch.arange(sorted_vertex.shape[0], device=device) - offsets[sorted_vertex]
+
+    slots = torch.full((vertex_count, width), count, dtype=torch.long, device=device)
+    corner = torch.zeros((vertex_count, width), dtype=torch.long, device=device)
+    slots[sorted_vertex, rank] = flat_triangle[order]
+    corner[sorted_vertex, rank] = flat_corner[order]
+    return slots, corner, incident.to(torch.float32).reshape(-1, 1)
+
+
+def build_area_constraints(
+    scene, target_area: torch.Tensor | None = None, *, reference_position: torch.Tensor | None = None
+) -> AreaConstraints:
+    """Assemble the area floor tables. Supply `target_area` from `calibrate_area_from_trajectory`.
+
+    `reference_position` is the control path: passing `scene.cloth_rest` gives a textbook rest-area
+    floor, which on `ch10032_lower` turns out to be within 5% of the calibrated one at the median (see
+    `calibrate_area_from_trajectory` for the measurement and why it is still not the default). One of
+    the two arguments must be given.
+    """
+    triangles = scene.cloth_triangles
+    if target_area is None:
+        if reference_position is None:
+            raise ValueError("build_area_constraints needs either target_area or reference_position")
+        target_area = triangle_areas(reference_position.to(dtype=torch.float32), triangles)
+    vertex_count = int(scene.cloth_rest.shape[0])
+    slots, corner, incident = _gather_triangle_tables(triangles, vertex_count)
+    return AreaConstraints(
+        triangles=triangles,
+        target_area=target_area.to(dtype=torch.float32).clamp_min(0.0),
+        slots=slots,
+        corner=corner,
+        incident=incident,
+    )
+
+
 @dataclass
 class SolverConfig:
     """One point in the gate's configuration matrix."""
 
     iterations: int = 4
-    mode: str = "standard"                 # "standard" | "warmstart" | "nowarm"
+    mode: str = "standard"                 # "standard" | "warmstart" | "nowarm" | "guide"
     sweep: str = "coloured"                # "coloured" (Gauss-Seidel) | "jacobi" | "fused"
     stretch_compliance: float = 0.0        # metres^2 / newton; 0 = rigid
     bend_compliance: float = 1.0e-5
@@ -298,6 +440,22 @@ class SolverConfig:
     warmstart_scale: float = 1.0           # scales lambda_0 in "warmstart" mode
     collision: bool = True
     contact_offset: float = DEFAULT_CONTACT_OFFSET
+    # `mode="guide"` only. Compliance of the per-vertex pull towards the network's prediction, in the
+    # same metres^2/newton as the structural compliances. Magnitude matters more than it looks: gate
+    # G0 swept stretch compliance over 0..1e-1 and found the entire range inert, because alpha-tilde
+    # = compliance / dt^2 only reaches the inverse-mass sum at compliance around 15 for a two-endpoint
+    # constraint. The guide is a *one*-vertex constraint, so its denominator is w rather than
+    # w_a + w_b and the crossover sits near half that. Anything below ~0.5 is a hard guide in
+    # disguise; the useful band is measured, not assumed. See `_resolve_guide`.
+    guide_compliance: float = 0.0
+    # Trust region on the guide, as a multiple of the vertex's shortest constraint. 0 disables it.
+    # A vertex whose guide sits further away than `guide_trust_ratio * min_edge` has its confidence
+    # scaled down, which raises its alpha-tilde and lets XPBD win locally. See `guide_confidence`.
+    guide_trust_ratio: float = 0.0
+    # Triangle area floor, as a fraction of the *calibrated* area. 0 disables it. The calibrated area
+    # is not the rest area -- see `calibrate_area_from_trajectory`.
+    area_floor: float = 0.0
+    area_compliance: float = 0.0
 
     def compliance_per_constraint(self, kind: torch.Tensor) -> torch.Tensor:
         return torch.where(
@@ -323,6 +481,10 @@ def load_vxpbd(path, *, device=None) -> ConstraintSet:
     * `colour` -- the runtime sweeps Jacobi, so no colouring is baked. It is filled with one colour
       per constraint, which makes `sweep="coloured"` degrade to fully sequential Gauss-Seidel:
       slow, but correct. A single shared colour would have been silently wrong.
+
+    The area floor's `area_target` section lives in the same file but is not part of a
+    `ConstraintSet` -- see `load_vxpbd_area_target`, which is optional so assets baked before the
+    area constraint existed still load.
     """
     from .formats import load_sectioned
 
@@ -344,6 +506,22 @@ def load_vxpbd(path, *, device=None) -> ConstraintSet:
         inverse_mass=read("inverse_mass", torch.float32).reshape(vertices, 1),
         colour=torch.arange(count, dtype=torch.long, device=device),
     )
+
+
+def load_vxpbd_section(path, name: str, *, device=None) -> torch.Tensor | None:
+    """Read one optional float section out of a `.vxpbd`, or `None` if the asset predates it.
+
+    `area_target` and `min_edge` are both in this category: the sectioned format looks sections up by
+    name, so adding one does not invalidate an older reader, but a newer reader must not require one
+    from an older file. Returning `None` lets the caller fall back rather than fail on an asset that
+    is otherwise perfectly current.
+    """
+    from .formats import load_sectioned
+
+    asset = load_sectioned(path, expected_magic=b"VXPBD001", expected_version=1)
+    if name not in asset.sections:
+        return None
+    return torch.frombuffer(bytearray(asset.require(name).data), dtype=torch.float32).to(device=device)
 
 
 @dataclass(frozen=True)
@@ -397,6 +575,45 @@ def contacts_from_graph(graph, obstacle_target: torch.Tensor, obstacle_normals: 
     return Contacts(vertex=graph.world_cloth, point=obstacle_target[proxy], normal=normal)
 
 
+def contacts_from_search(
+    position: torch.Tensor,
+    proxy_position: torch.Tensor,
+    proxy_target: torch.Tensor,
+    proxy_normals: torch.Tensor,
+    *,
+    radius: float = DEFAULT_SEARCH_RADIUS,
+) -> Contacts:
+    """Nearest-proxy contact set searched fresh, for substeps that have no graph of their own.
+
+    `contacts_from_graph` reuses the pairing the network's graph already made, which is exactly right
+    when the solver runs once per network step -- the constraints then see the contacts the network
+    saw. A substepped solve cannot use it. The network runs once per visual frame, so after a substep
+    has moved a vertex the nearest body surface may be a different proxy entirely, and every
+    remaining substep would be converging accurately against an expired half-plane. That is the
+    concrete form of "the collision constraint is stale for the whole solve": adding iterations
+    cannot fix a plane that is in the wrong place.
+
+    The search is `real_scene/fine15.py::_world_edges` verbatim -- `cdist`, `min` over dim 1, strict
+    `< radius`, lowest index winning ties through `min`'s own tie rule -- so at one substep this
+    reproduces the pairing that function produced.
+
+    `proxy_position` is the body at the start of the substep (what the vertex is near) and
+    `proxy_target` the body at its end (where the plane goes). That lead is not an accident: it is the
+    same asymmetry `make_hook` and `hood_world_nearest.comp` already use, and it is what stops the
+    contact set from lagging the motion by a frame.
+    """
+    distance = torch.cdist(position, proxy_position)
+    minimum, nearest = distance.min(dim=1)
+    valid = minimum < radius
+    vertex = torch.arange(position.shape[0], device=position.device, dtype=torch.long)[valid]
+    proxy = nearest[valid]
+    return Contacts(
+        vertex=vertex,
+        point=proxy_target[proxy],
+        normal=torch.nn.functional.normalize(proxy_normals[proxy], dim=-1),
+    )
+
+
 def inertial_prediction(graph) -> torch.Tensor:
     """x_tilde, the prediction the network's output is a displacement from.
 
@@ -419,6 +636,9 @@ def project(
     pin_target: torch.Tensor,
     timestep: float,
     contacts: Contacts | None = None,
+    guide: torch.Tensor | None = None,
+    confidence: torch.Tensor | None = None,
+    area: AreaConstraints | None = None,
 ) -> torch.Tensor:
     """Run `config.iterations` deterministic XPBD sweeps and return the corrected position.
 
@@ -444,6 +664,16 @@ def project(
       touches instead of reading a per-constraint result another pass produced. See
       `_apply_fused`. It exists so the port target can be validated in Python before any HLSL is
       written, and `--sweep fused` must reproduce `--sweep jacobi`'s scores.
+
+    Each iteration runs up to four passes, in this order:
+
+        structural sweep -> area floor -> guide -> contacts
+
+    The last three are skipped unless enabled, so with `area=None`, `guide=None` and the historical
+    modes the loop is byte-for-byte the one gate G0 measured. The order encodes who gets the last
+    word: the guide is a soft target and sits *after* the structural sweep so it can shape the
+    result, but *before* the contacts, so non-penetration is never traded away for staying near the
+    network's prediction.
     """
     if config.iterations <= 0:
         return position
@@ -469,6 +699,13 @@ def project(
             raise ValueError("sweep='fused' does not implement mode='warmstart'")
         multiplier = torch.zeros_like(constraints.slots, dtype=current.dtype)
 
+    # Auxiliary multipliers, fresh per call exactly as the structural ones are. `project` is one
+    # substep, so "per call" and "per substep" are the same rule.
+    guide_multiplier = torch.zeros_like(constraints.inverse_mass)
+    area_multiplier = (
+        None if area is None else torch.zeros_like(area.slots, dtype=current.dtype)
+    )
+
     for _ in range(config.iterations):
         if groups is not None:
             for group in groups:
@@ -482,6 +719,17 @@ def project(
         else:
             current, multiplier = _apply_jacobi(
                 current, multiplier, constraints, config, denominator, alpha, alive, averaging, pinned
+            )
+
+        if area is not None and config.area_floor > 0.0:
+            current, area_multiplier = _apply_area(
+                current, area_multiplier, area, config, constraints.inverse_mass, pinned, timestep
+            )
+
+        if guide is not None:
+            current, guide_multiplier = _resolve_guide(
+                current, guide, guide_multiplier, constraints.inverse_mass, pinned,
+                confidence, config.guide_compliance, timestep,
             )
 
         if config.collision and contacts is not None and contacts.vertex.numel() > 0:
@@ -526,6 +774,18 @@ def _initialise(
       solve, which is the cheap approximation a GPU kernel could afford.
     * `nowarm` -- discard the displacement entirely and start from `x_tilde`. The network still
       shapes nothing but its own graph inputs, so this bounds what the position prediction is worth.
+    * `guide` -- start from `x_tilde`, same as `nowarm`, and let the network back in through
+      `_resolve_guide` as a compliant per-vertex target instead of as the starting state. This is the
+      one mode that also changes the *sweep* and not only the initialiser, which is worth saying out
+      loud because the paragraph above is otherwise a promise this module keeps. It is spelled that way
+      because the network's authority has to be a dial rather than a switch, and the initialiser alone
+      only has two settings.
+
+      Note what `guide` does *not* reduce to. There is no compliance that makes it reproduce
+      `standard`: `standard` applies the network once with infinite stiffness and then never again,
+      while `guide` applies it every iteration with finite stiffness. What it does reduce to exactly is
+      pure XPBD -- confidence 0 everywhere leaves the guide masked off and the solve is `nowarm` with
+      whatever external displacement the caller folded into `x_tilde`.
 
     Writing it this way is the point of the exercise: the schemes differ by their initialiser, not
     by their solver, so a difference in the result cannot be blamed on a different solve.
@@ -536,7 +796,7 @@ def _initialise(
         return torch.where(pinned, pin_target, position), zero
 
     base = torch.where(pinned, pin_target, inertial)
-    if config.mode == "nowarm":
+    if config.mode in ("nowarm", "guide"):
         return base, zero
     if config.mode != "warmstart":
         raise ValueError(f"unknown solver mode {config.mode!r}")
@@ -720,6 +980,374 @@ def _resolve_contacts(
     correction = (-signed).clamp_min(0.0).unsqueeze(-1) * contacts.normal
     updated[vertex[penetrating]] = position[vertex[penetrating]] + correction[penetrating]
     return updated
+
+
+def guide_confidence(
+    guide: torch.Tensor,
+    position: torch.Tensor,
+    min_edge: torch.Tensor | None,
+    ratio: float,
+) -> torch.Tensor | None:
+    """Per-vertex trust in the network's prediction, from how far it wants to move the vertex.
+
+    Returns `None` when the gate is off, which the caller reads as "confidence 1 everywhere".
+
+    The one signal used here is displacement against the vertex's own shortest constraint. That is
+    deliberately the only gate wired up, for two reasons.
+
+    First, its input already exists: `min_edge` has been baked into every `.vxpbd` since
+    `tools/bake_xpbd_constraints.py::per_vertex_min_edge`, and no kernel has ever read it. A per-vertex
+    shortest edge is also the right scale -- the plan this came from originally clamped against the
+    global minimum edge, which on a real garment lets the single shortest edge in the mesh dictate the
+    clamp everywhere.
+
+    Second, the obvious alternative gate is unusable. Keying confidence on post-prediction penetration
+    depth looks natural and is backwards: the nearest-proxy half-plane is blind to tunnelling, and
+    measured, pushing the hem 0.12 m into the body reports 28.5% penetration while pushing it 0.25 m
+    reports 1%. A gate on that column would trust the network *more* the further through the body it
+    threw a vertex. Until there is an inside-outside test, penetration cannot drive this.
+
+    The ramp is linear in the excess and clamped to [0, 1], so a vertex the network wants to move one
+    trust radius stays fully trusted and one it wants to move twice that is fully distrusted.
+    """
+    if ratio <= 0.0 or min_edge is None:
+        return None
+    displacement = torch.linalg.vector_norm(guide - position, dim=-1, keepdim=True)
+    allowed = (ratio * min_edge.reshape(-1, 1)).clamp_min(1.0e-12)
+    return (2.0 - displacement / allowed).clamp(0.0, 1.0)
+
+
+def _resolve_guide(
+    position: torch.Tensor,
+    guide: torch.Tensor,
+    multiplier: torch.Tensor,
+    inverse_mass: torch.Tensor,
+    pinned: torch.Tensor,
+    confidence: torch.Tensor | None,
+    compliance: float,
+    timestep: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compliant per-vertex pull towards the network's prediction.
+
+    This is the whole point of `mode="guide"`. In `mode="standard"` the network's output *is* the state
+    the solve starts from, so the network decides the entire step and XPBD can only project afterwards
+    from whatever initial value it was handed. Measured on `sprint_start`, that lets one prediction
+    throw the hem far out of the feasible set: the hybrid peaks at edge p95 10.4 at step 60 where pure
+    XPBD sits at 2.5, and only comes back (1.2) once the animation stops. Here the network instead
+    contributes a force-like term the constraints can outvote.
+
+    `C(x) = |x - g|`, one constraint per vertex, so `grad C` is a unit vector and
+    `grad C M^-1 grad C^T` is just `w`. With `alpha-tilde = compliance / h^2`:
+
+        Delta lambda = (-C - alpha-tilde * lambda) / (w + alpha-tilde)
+        Delta x      = w * n * Delta lambda,     n = (x - g) / |x - g|
+
+    `n` points from the guide towards the vertex and `Delta lambda` is negative, so the correction
+    moves the vertex towards the guide. On the first iteration (`lambda = 0`) it closes the fraction
+    `w / (w + alpha-tilde)` of the gap, which is the dial: `alpha-tilde = 0` snaps onto the guide,
+    `alpha-tilde -> infinity` leaves the vertex where the physics put it. Accumulating `lambda` across
+    iterations is what stops repeated application from stiffening into a hard constraint -- the
+    `-alpha-tilde * lambda` term is exactly the correction that makes the converged state the compliant
+    equilibrium rather than `x = g`.
+
+    Two things this is NOT:
+
+    * It is not the multiplier warm start gate G0 measured as worthless. That failed structurally: a
+      displacement in the null space of `J^T` -- a rigid translation, any deformation that leaves every
+      edge length alone -- cannot be written as `J^T lambda` and was discarded by construction, which
+      `test_warmstart_discards_a_null_space_displacement` pins down. This constraint's Jacobian is the
+      identity, so it spans that null space and can carry the skirt swing and the low-frequency fold
+      placement the network is actually good at.
+    * It is not applied inside the incident-averaged structural correction. `_apply_fused` divides a
+      vertex's accumulated correction by the number of constraints touching it (~18 on CH10032), so
+      adding the guide there would both dilute every structural constraint at that vertex by ~5% and
+      put a stiff guide in a tug of war with stiff edges under Jacobi averaging, which converges badly.
+      It goes here, next to the contacts, outside that average.
+
+    Pinned vertices are untouched: they carry zero inverse mass, and the caller overwrites them with
+    their target anyway.
+    """
+    delta = position - guide
+    distance = torch.linalg.vector_norm(delta, dim=-1, keepdim=True)
+    safe = distance > 1.0e-9
+    normal = torch.where(safe, delta / distance.clamp_min(1.0e-9), torch.zeros_like(delta))
+
+    alpha = compliance / max(timestep * timestep, 1.0e-12)
+    if confidence is not None:
+        # Zero confidence has to mean "no guide at all", so it maps to an infinite alpha-tilde rather
+        # than a large one. Dividing would produce inf and then nan through 0 * inf, so the step is
+        # masked instead.
+        trusted = confidence > 0.0
+        alpha_tilde = torch.where(
+            trusted, alpha / confidence.clamp_min(1.0e-6), torch.zeros_like(confidence)
+        )
+    else:
+        trusted = torch.ones_like(distance, dtype=torch.bool)
+        alpha_tilde = torch.full_like(distance, alpha)
+
+    movable = inverse_mass > 0.0
+    numerator = -distance - alpha_tilde * multiplier
+    step = torch.where(
+        safe & movable & trusted,
+        numerator / (inverse_mass + alpha_tilde).clamp_min(1.0e-20),
+        torch.zeros_like(numerator),
+    )
+    correction = inverse_mass * normal * step
+    return (
+        position + torch.where(pinned, torch.zeros_like(correction), correction),
+        multiplier + step,
+    )
+
+
+def _apply_area(
+    current: torch.Tensor,
+    multiplier: torch.Tensor,
+    area: AreaConstraints,
+    config: SolverConfig,
+    inverse_mass: torch.Tensor,
+    pinned: torch.Tensor,
+    timestep: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One-sided triangle area floor, `C = max(rho * A_0 - A(x), 0)`.
+
+    This is the constraint the existing set is missing. Today's structural constraints are mesh-edge
+    distances plus a two-hop distance standing in for bending, run one-sided so only stretch is
+    resisted. Nothing in that set objects to a triangle whose area goes to zero: an edge that is too
+    short is legal, and a triangle squashed flat against the body can make the headline metric
+    *improve*, because `edge_ratio_p95` is an upper-tail statistic. Measured on `sprint_start` step
+    120, the hybrid holds the best p95 of the three branches (1.291) together with the most collapsed
+    edges (13.3%), the smallest triangles (area median 0.478) and the most flipped ones (0.435).
+
+    A floor rather than an equality on purpose: it forbids a triangle approaching zero area without
+    requiring it to keep any particular size or orientation, so normal folding is still free.
+
+    The gradients, with `n` the unit normal of `cross(b - a, c - a)`:
+
+        grad_a A = 0.5 * (b - c) x n        grad_b A = 0.5 * (c - a) x n
+        grad_c A = 0.5 * (a - b) x n
+
+    which sum to zero, as a constraint that cannot move the centre of mass must. `grad C = -grad A`
+    while the floor is violated, so the correction inflates the triangle.
+
+    Unlike a distance constraint the gradients are not unit vectors, so the denominator is
+    `sum_i w_i |grad_i A|^2` and not `sum_i w_i`. It is summed in corner order 0, 1, 2 -- fixed by the
+    mesh -- so all three vertices of a triangle produce the same multiplier update, the same guarantee
+    `SolverTables` buys for the pair sweep by baking `weight_sum`.
+    """
+    count = area.count
+    if count == 0 or config.area_floor <= 0.0:
+        return current, multiplier
+
+    slots = area.slots
+    padded = torch.cat((area.triangles, torch.zeros_like(area.triangles[:1])), dim=0)[slots]
+    corners = current[padded]                                   # [V, K, 3, 3]
+    first, second, third = corners[..., 0, :], corners[..., 1, :], corners[..., 2, :]
+    normal = torch.linalg.cross(second - first, third - first)
+    twice_area = torch.linalg.vector_norm(normal, dim=-1, keepdim=True)
+    safe = twice_area > 1.0e-12
+    unit = torch.where(safe, normal / twice_area.clamp_min(1.0e-12), torch.zeros_like(normal))
+
+    def gather(values: torch.Tensor) -> torch.Tensor:
+        return torch.cat((values, torch.zeros_like(values[:1])), dim=0)[slots]
+
+    target = config.area_floor * gather(area.target_area).unsqueeze(-1)
+    residual = (target - 0.5 * twice_area).clamp_min(0.0)
+
+    gradient = torch.stack((
+        0.5 * torch.linalg.cross(second - third, unit),
+        0.5 * torch.linalg.cross(third - first, unit),
+        0.5 * torch.linalg.cross(first - second, unit),
+    ), dim=-2)                                                  # [V, K, 3, 3]
+    weight = inverse_mass.reshape(-1)[padded].unsqueeze(-1)      # [V, K, 3, 1]
+    # Corner order 0, 1, 2 -- a property of the mesh, so every vertex of the triangle sums the same
+    # three floats in the same sequence.
+    denominator = (weight * gradient.square().sum(dim=-1, keepdim=True)).squeeze(-1)
+    denominator = denominator[..., 0] + denominator[..., 1] + denominator[..., 2]
+
+    alpha = config.area_compliance / max(timestep * timestep, 1.0e-12)
+    live = (slots < count) & safe.squeeze(-1) & (denominator > 0.0)
+    numerator = -residual.squeeze(-1) - alpha * multiplier
+    step = torch.where(live, numerator / (denominator + alpha).clamp_min(1.0e-20),
+                       torch.zeros_like(numerator))
+
+    # Each vertex applies only the gradient of the corner it occupies.
+    own = torch.gather(
+        gradient, -2, area.corner[..., None, None].expand(-1, -1, 1, 3)
+    ).squeeze(-2)                                               # [V, K, 3]
+    correction = (-own * step.unsqueeze(-1)).sum(dim=1)
+    correction = config.relaxation * inverse_mass * correction / area.incident.clamp_min(1.0)
+    return (
+        current + torch.where(pinned, torch.zeros_like(correction), correction),
+        multiplier + step,
+    )
+
+
+def _blend(start: torch.Tensor, end: torch.Tensor, fraction: float) -> torch.Tensor:
+    """Linear blend that is *exact* at the endpoints.
+
+    `torch.lerp(a, b, 1.0)` computes `a + 1.0 * (b - a)`, which is not bit-identical to `b` -- when
+    `a` is large and `b - a` small the subtraction loses the low bits and the addition does not put
+    them back. On `sprint_start` the root travels to z = 10 m while a substep moves a vertex by
+    millimetres, which is exactly that regime. Returning the endpoint itself is what lets
+    `substeps=1` reproduce the un-substepped path bit for bit, and that equality is the regression
+    anchor for this whole change.
+    """
+    if fraction >= 1.0:
+        return end
+    if fraction <= 0.0:
+        return start
+    return torch.lerp(start, end, fraction)
+
+
+def step_substepped(
+    constraints: ConstraintSet,
+    config: SolverConfig,
+    *,
+    scene,
+    graph,
+    guide: torch.Tensor | None,
+    timestep: float,
+    frame: float,
+    frame_advance: float,
+    substeps: int = 1,
+    area: AreaConstraints | None = None,
+    min_edge: torch.Tensor | None = None,
+    gravity: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """One visual frame, solved as `substeps` physics substeps. The network runs once, outside.
+
+    Why this exists. Every XPBD iteration in this repository has so far happened inside a single
+    `dt = 1/30` step, after one prediction: 128 sweeps all linearising around the same predicted
+    state, with the same body pose, the same contact set and no velocity update in between. Small
+    Steps' result is that at equal solver cost, `N` steps of one iteration usually beats one step of
+    `N` iterations, because each small step re-forms the inertial prediction, the constraint
+    gradients, the contacts and the velocity instead of polishing one bad linearisation. The
+    repository's own numbers say the same thing from the other side: branch B's score is 81-86%
+    `over` -- edges stretched and never pulled back, a pure convergence failure -- and it was
+    measured at one step by 128 Jacobi sweeps. `plans/gnn/gnn-xpbd-v2.md` section 8.3 asked for this
+    comparison and it was never run.
+
+    What each substep re-does, and why every item is load-bearing:
+
+    1. the body pose is re-skinned at a fractional frame, so the cloth is not chasing a pose 1/30 s
+       stale (on `sprint_start` the root covers 0.32 m per frame);
+    2. the inertial prediction is re-formed from the substep's own state;
+    3. the contact set is searched fresh, because a vertex that moved may be nearest a different
+       proxy -- see `contacts_from_search`;
+    4. `alpha-tilde = compliance / h^2` is recomputed with `h = dt / substeps`;
+    5. the guide target advances only `1/substeps` of the way towards the network's prediction.
+
+    Item 5 is the one that is easy to get wrong and worth being explicit about. Substepping the
+    solver while still jumping straight to `x_gnn` first would change nothing that matters: the
+    overshoot has already happened by the time the first substep starts, and the remaining substeps
+    only clean up after it. The guide has to arrive in `substeps` instalments for the split to mean
+    anything.
+
+    `gravity` is a per-second-squared acceleration folded into the inertial prediction as `h^2 * g`
+    each substep, and it is only used by the modes that start from `x_tilde` (`nowarm`, `guide`).
+    `standard` takes its start from the guide, which already carries whatever acceleration produced
+    it. Two consequences worth stating: a `guide` arm with confidence driven to zero degrades to
+    *ballistic plus constraints* rather than to inertial coasting, which is the meaningful pure-XPBD
+    fallback; and a substepped ballistic arm accumulates less gravity displacement over the frame
+    than a single step does (`dt^2 g (N+1) / 2N` against `dt^2 g`), which is the ordinary Verlet
+    small-step correction and not a bug -- the substepped figure is the more accurate one.
+
+    `frame` is the animation frame the step starts on and `frame_advance` how many frames it covers,
+    both as floats so a scaled clip works: `frame_of` gives integers only because the un-substepped
+    path has nowhere to put a fraction.
+
+    The first substep reads its inertial prediction, pin target and contacts from `graph`, which the
+    network already built at the frame boundary; later substeps have no graph and recompute them.
+    That is not a shortcut, it is what keeps `substeps=1` exactly equal to the previous behaviour.
+    """
+    if substeps < 1:
+        raise ValueError("substeps must be at least 1")
+
+    step_size = timestep / substeps
+    external = None if gravity is None else (step_size * step_size) * gravity.reshape(1, 3)
+
+    position = graph.effective_position
+    previous = graph.effective_previous
+    entry = position
+
+    # Confidence is decided once for the whole frame, not per substep. The question the trust region
+    # asks is "does the network want to move this vertex further than its own geometry can absorb
+    # *this frame*", and the quantity that answers it is the network's displacement away from physics
+    # -- `guide - x_tilde`, which is exactly the decoder's output. Recomputing it per substep against
+    # the instalment would measure 1/N of the same displacement and, at a fixed radius, would quietly
+    # stop firing as the substep count rose: the gate would appear to work at N=1 and be inert at N=8.
+    # hood_integrate.comp computes the same thing from `acceleration`, which IS that difference.
+    confidence = None
+    if guide is not None:
+        confidence = guide_confidence(guide, inertial_prediction(graph), min_edge, config.guide_trust_ratio)
+
+    for index in range(substeps):
+        fraction = float(index + 1) / substeps
+        search_time = frame + frame_advance * (float(index) / substeps)
+        target_time = frame + frame_advance * fraction
+
+        if index == 0:
+            # The state entering the frame is a full visual frame old, so `position - previous` is
+            # `dt * v`, not `h * v`. Handing that to a substep of length `h = dt / N` would predict a
+            # whole frame of motion in a fraction of the time -- N times the real velocity, every
+            # substep, which diverges immediately rather than subtly (measured: `sprint_start` goes
+            # non-finite inside a few steps at N=4).
+            #
+            # At N=1 the scale is 1 and `inertial_prediction`'s own expression is used verbatim
+            # instead: it forms `2a - b` where the general branch forms `a + (a - b) / N`, and those
+            # two are not the same float. Keeping the exact expression is what makes `substeps=1`
+            # bit-identical to the un-substepped path.
+            if substeps == 1:
+                inertial = inertial_prediction(graph)
+            else:
+                inertial = position + (position - previous) / substeps
+            pin_target = graph.pin_target
+        else:
+            # From here on `previous` is one substep back, so the difference is already `h * v`.
+            inertial = position + (position - previous)
+            pin_target = scene.cloth_target_at(target_time)
+        if external is not None and config.mode != "standard":
+            inertial = inertial + external
+
+        contacts = None
+        if config.collision:
+            if index == 0 and substeps == 1:
+                # The graph's own pairing, so a single substep is the historical path exactly.
+                proxy_next, _ = scene.proxy_at(target_time)
+                _, normals = scene.proxy_at(search_time)
+                contacts = contacts_from_graph(graph, proxy_next, normals)
+            else:
+                proxy_now, normals = scene.proxy_at(search_time)
+                proxy_next, _ = scene.proxy_at(target_time)
+                contacts = contacts_from_search(position, proxy_now, proxy_next, normals)
+
+        target = None if guide is None else _blend(entry, guide, fraction)
+        start = inertial
+        if config.mode == "standard":
+            # `standard` *is* "start from the network", so the instalment becomes the starting state
+            # rather than a constraint, and there is no guide pass.
+            if target is not None:
+                start = target
+            target = None
+
+        corrected = project(
+            constraints, config,
+            position=start,
+            inertial=inertial,
+            pin_mask=graph.pin_mask,
+            pin_target=pin_target,
+            timestep=step_size,
+            contacts=contacts,
+            guide=target,
+            confidence=confidence if target is not None else None,
+            area=area,
+        )
+        # Velocity is implicit in (position, previous), so carrying the pre-solve state forward as
+        # `previous` is the position-based velocity update: the solver's correction becomes part of
+        # the velocity the next substep predicts from.
+        previous, position = position, corrected
+
+    return position
 
 
 def stretch_residual(constraints: ConstraintSet, position: torch.Tensor) -> torch.Tensor:

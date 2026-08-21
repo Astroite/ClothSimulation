@@ -5,6 +5,10 @@
 	struct HoodSkinParams {
 		uint32_t frameIndex{}, nextFrameIndex{}, boneCount{}, characterCount{};
 		uint32_t proxyCount{}, clothCount{}, resetState{}, renderFrameIndex{};
+		// Blend each index towards index + 1, so a substep can put the body between two animation
+		// frames. Both must be 0 whenever the index is the last frame, because the shader reads
+		// index + 1 unconditionally once the blend is non-zero. `hoodSkinAt` enforces that.
+		float frameBlend{}, nextBlend{}, skinPad0{}, skinPad1{};
 	};
 	struct HoodFeatureParams {
 		uint32_t clothCount{}, proxyCount{}, triangleCount{}, meshEdgeCount{};
@@ -27,10 +31,18 @@
 		// Non-zero `predictor` makes the integrate shader skip the decoder and use
 		// `gravityDisplacement` instead -- comparison branch B. The three padding words keep
 		// `gravityDisplacement` on a 16-byte boundary so the HLSL cbuffer layout is unambiguous.
-		uint32_t predictor{}, integratePad0{}, integratePad1{}, integratePad2{};
+		// `guideMode` switches the shader from writing the prediction into clothPosition to writing
+		// the *inertial* prediction there and leaving the network's output in guideTarget, which turns
+		// the network from the step itself into a compliant target hood_xpbd.comp pulls towards.
+		uint32_t predictor{}, guideMode{}, integratePad1{}, integratePad2{};
 		glm::vec4 gravityDisplacement{};
+		// Trust radius as a multiple of the vertex's shortest baked constraint; 0 disables the gate.
+		// `substepScale` is 1 / substeps: it scales the frame-length velocity down to one substep and
+		// is also substep 0's guide fraction. 1 reproduces the pre-substep shader exactly.
+		float guideTrustRatio{}, substepScale{ 1.0f }, integratePad4{}, integratePad5{};
+		glm::vec4 substepGravity{};
 	};
-	static_assert(sizeof(HoodIntegrateParams) == 48);
+	static_assert(sizeof(HoodIntegrateParams) == 80);
 	// Side-by-side comparison of the three architectures gate G0 defined (tools/gate_g0.py):
 	// A network only, B constraints only (ballistic gravity, no network at all), C both. Everything
 	// else -- garment, calibration, animation, frame, camera -- is shared, so the only difference on
@@ -54,10 +66,27 @@
 	struct HoodXpbdPush {
 		uint32_t clothCount{}, constraintCount{}, slotWidth{}, flags{};
 		float timestep{}, relaxation{}, contactOffset{}, stretchCompliance{}, bendCompliance{};
+		float guideCompliance{}, areaFloor{}, areaCompliance{};
+		uint32_t triangleCount{}, pass{};
 	};
-	static_assert(sizeof(HoodXpbdPush) == 36);
+	static_assert(sizeof(HoodXpbdPush) == 56);
 	static constexpr uint32_t hoodXpbdOneSidedFlag = 1u;
 	static constexpr uint32_t hoodXpbdCollisionFlag = 2u;
+	static constexpr uint32_t hoodXpbdGuideFlag = 4u;
+	static constexpr uint32_t hoodXpbdAreaFlag = 8u;
+	static constexpr uint32_t hoodXpbdPassDistance = 0u;
+	static constexpr uint32_t hoodXpbdPassArea = 1u;
+	// hood_xpbd.comp gives each vertex 32 lanes and packs four vertices into a 128-thread group, so
+	// the dispatch is over vertices/4 rather than vertices/128. See that file's header for why the
+	// one-thread-per-vertex shape was occupancy-bound at 11 workgroups on a 34-SM part.
+	static constexpr uint32_t hoodXpbdVerticesPerGroup = 4u;
+	struct HoodSubstepParams {
+		uint32_t clothCount{}, guideMode{};
+		float guideFraction{ 1.0f };
+		uint32_t substepPad0{};
+		glm::vec4 gravityDisplacement{};
+	};
+	static_assert(sizeof(HoodSubstepParams) == 32);
 	struct HoodToyParams {
 		uint32_t clothCount{};
 		float timestep{ 1.0f / 30.0f }, maxSpeed{ 8.0f }, maxAcceleration{ 30.0f };
@@ -97,6 +126,28 @@
 	float hoodXpbdBendCompliance{ 0.0f };
 	float hoodXpbdRelaxation{ 1.0f };
 	float hoodXpbdContactOffset{ 0.005f };
+	// Soft-guided multirate knobs. All default to the historical behaviour: one substep, the network
+	// as a hard initial value, no area floor. See real_scene/xpbd.py::step_substepped.
+	//
+	// `hoodXpbdIterations` is PER SUBSTEP, so 4 substeps x 32 iterations is the equal-budget partner
+	// of 1 x 128 and not four times the work.
+	int32_t hoodXpbdSubsteps{ 1 };
+	// Bounded so the per-substep descriptor sets and uniform buffers can be a fixed-size array. 8 is
+	// the highest row in the equal-budget matrix (8 x 16 = 128 sweeps); past that the per-substep fixed
+	// cost -- a re-skin, a nearest-proxy search and a prediction pass each time -- starts to dominate
+	// the 16 sweeps it buys.
+	static constexpr uint32_t hoodMaxSubsteps = 8u;
+	bool hoodXpbdGuide{ false };
+	// m^2/N. Measured useful band is roughly 1-100: gate G0 found compliance 0..1e-1 entirely inert
+	// for the two-endpoint structural constraints because alpha-tilde = compliance / dt^2 only
+	// reaches their inverse-mass sum around 15, and the guide is a one-vertex constraint whose
+	// denominator is w rather than w_a + w_b, so it crosses over near 1. The slider range below is
+	// [0, 100] for that reason -- the old 0..0.1 stretch-compliance slider could only select "off".
+	float hoodXpbdGuideCompliance{ 10.0f };
+	float hoodXpbdGuideTrustRatio{ 0.0f };
+	float hoodXpbdAreaFloor{ 0.0f };
+	float hoodXpbdAreaCompliance{ 0.0f };
+	bool hoodAreaTargetAvailable{ false };
 	uint32_t hoodXpbdConstraintCount{};
 	uint32_t hoodXpbdSlotWidth{};
 	uint32_t hoodXpbdStretchCount{};
@@ -217,6 +268,18 @@
 		vks::Buffer xpbdPairs, xpbdTargetLength, xpbdWeightSum, xpbdKind;
 		vks::Buffer xpbdSlots, xpbdSigns, xpbdIncident, xpbdInverseMass, xpbdMinEdge;
 		vks::Buffer xpbdLambda, xpbdScratch;
+		// Soft-guided multirate additions. `guideTarget` is the network's prediction for the current
+		// substep -- hood_integrate.comp writes it and leaves clothPosition holding the inertial
+		// prediction, so the solve starts from physics and the network arrives as a constraint.
+		// `guideConfidence` is per vertex and 1.0 unless the trust region is on. `guideLambda` and
+		// `areaLambda` accumulate within a substep exactly as `xpbdLambda` does; `areaLambda` is
+		// indexed by the incident-triangle CSR slot, so it is one float per (vertex, incident
+		// triangle) = 3 * triangleCount. `areaTarget` is the only new baked section: the area
+		// constraint's denominator is state-dependent and cannot be precomputed.
+		vks::Buffer guideTarget, guideConfidence, guideLambda, areaTarget, areaLambda;
+		// The visual frame's two endpoints, so hood_substep.comp can interpolate the guide between them
+		// without re-running the network. `guideTarget` then holds only the current substep's instalment.
+		vks::Buffer frameEntry, guidePrediction;
 		std::array<vks::Buffer, 2> nodeLatent, meshLatent, worldDirectLatent, worldInverseLatent;
 		std::array<std::array<vks::Buffer, 2>, 2> coarseLatent;
 	} hoodBuffers;
@@ -233,6 +296,15 @@
 		std::array<VkDescriptorSet, hoodBranchCount> worldNearestSets{};
 		VkDescriptorSet worldReverseSet{};
 		VkDescriptorSetLayout xpbdLayout{};
+		// Per-substep Verlet prediction. Per branch because it writes that branch's position pair, and
+		// per substep index because `guideFraction` differs -- a descriptor set cannot be rewritten
+		// while a recorded command buffer still references it, and all the substeps of all the branches
+		// are recorded into one buffer.
+		VkDescriptorSetLayout substepLayout{};
+		VkPipelineLayout substepPipeline{};
+		VkPipeline substep{};
+		std::array<std::array<VkDescriptorSet, hoodMaxSubsteps>, hoodBranchCount> substepSets{};
+		std::array<std::array<vks::Buffer, hoodMaxSubsteps>, hoodBranchCount> substepUniforms;
 		VkPipelineLayout xpbdPipeline{};
 		// Per branch, two sets: [0] reads that branch's clothPosition and writes the shared scratch
 		// buffer, [1] the other way round.
@@ -661,12 +733,38 @@
 			uploadView(hoodBuffers.xpbdSigns, storage, xpbd.require("signs", 4, slotCount));
 			uploadView(hoodBuffers.xpbdIncident, storage, xpbd.require("incident", 4, hoodClothCount));
 			uploadView(hoodBuffers.xpbdInverseMass, storage, xpbd.require("inverse_mass", 4, hoodClothCount));
-			// Baked for the per-vertex trust region in gnn-xpbd-v2.md section 7.1, which the first
-			// kernel does not implement. Uploaded anyway so enabling it later needs no re-bake.
+			// Baked for the per-vertex trust region in gnn-xpbd-v2.md section 7.1, which
+			// `guideConfidence` now consumes when --hood-guide-trust-ratio is set.
 			uploadView(hoodBuffers.xpbdMinEdge, storage, xpbd.require("min_edge", 4, hoodClothCount));
 			hoodEmpty(hoodBuffers.xpbdLambda, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, slotCount * sizeof(float));
 			hoodEmpty(hoodBuffers.xpbdScratch, storage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hoodClothCount * sizeof(glm::vec4));
+			hoodEmpty(hoodBuffers.guideLambda, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, hoodClothCount * sizeof(float));
+			hoodEmpty(hoodBuffers.areaLambda, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				std::max<uint32_t>(hoodTriangleCount * 3u, 1u) * sizeof(float));
+			// `area_target` postdates the first .vxpbd assets, and the sectioned format looks sections
+			// up by name, so an older file is still perfectly current for everything else. Fall back
+			// to zeros -- with a zero target the one-sided floor `max(rho * A_0 - A, 0)` can never
+			// fire, so the constraint disables itself on an asset that cannot describe it rather than
+			// refusing to load a scene that never asked for it.
+			if (xpbd.sections.contains("area_target") && hoodTriangleCount > 0) {
+				uploadView(hoodBuffers.areaTarget, storage, xpbd.require("area_target", 4, hoodTriangleCount));
+				hoodAreaTargetAvailable = true;
+			} else {
+				hoodEmpty(hoodBuffers.areaTarget, storage, std::max<uint32_t>(hoodTriangleCount, 1u) * sizeof(float));
+				hoodAreaTargetAvailable = false;
+			}
+		} else {
+			// hood_integrate.comp binds guideTarget / guideConfidence / xpbdMinEdge whether or not
+			// XPBD is available -- it writes the first two on every step so nothing downstream can
+			// read a stale guide, and a descriptor set cannot bind a buffer that was never created.
+			// min_edge has no meaning without a constraint set, and zeros are the safe value: they
+			// make `guideTrustRatio > 0` distrust everything rather than trust everything.
+			hoodEmpty(hoodBuffers.xpbdMinEdge, storage, hoodClothCount * sizeof(float));
 		}
+		hoodEmpty(hoodBuffers.guideTarget, storage, hoodClothCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.guideConfidence, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, hoodClothCount * sizeof(float));
+		hoodEmpty(hoodBuffers.frameEntry, storage, hoodClothCount * sizeof(glm::vec4));
+		hoodEmpty(hoodBuffers.guidePrediction, storage, hoodClothCount * sizeof(glm::vec4));
 
 		hoodEmpty(hoodBuffers.characterPosition, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, hoodCharacterCount * sizeof(glm::vec4));
 		hoodEmpty(hoodBuffers.characterNormal, storage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, hoodCharacterCount * sizeof(glm::vec4));
@@ -717,13 +815,16 @@
 	{
 		// Comparison mode multiplies the sets that bind a branch's position pair by three: measured
 		// worst case is 33 sets / 448 storage / 14 uniform descriptors, against 19 / 236 / 8 for a
-		// single branch. Sized with headroom; overflow is not silent, vkAllocateDescriptorSets
-		// returns VK_ERROR_OUT_OF_POOL_MEMORY and VK_CHECK_RESULT aborts.
+		// single branch. The substep prediction pass adds one set per (branch, substep) -- 3 x 8 = 24
+		// sets carrying 7 storage and 1 uniform each -- which is what pushed the uniform count past the
+		// old budget of 32 and the set count towards the old 64. Recomputed worst case: 57 sets,
+		// about 700 storage, 38 uniform. Sized with headroom; overflow is not silent,
+		// vkAllocateDescriptorSets returns VK_ERROR_OUT_OF_POOL_MEMORY and VK_CHECK_RESULT aborts.
 		const std::vector<VkDescriptorPoolSize> sizes = {
-			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024),
-			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32),
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2048),
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 96),
 		};
-		auto poolInfo = vks::initializers::descriptorPoolCreateInfo(sizes, 64);
+		auto poolInfo = vks::initializers::descriptorPoolCreateInfo(sizes, 128);
 		VK_CHECK_RESULT(vkCreateDescriptorPool(device, &poolInfo, nullptr, &hood.pool));
 		auto storageTypes = [](uint32_t count) { return std::vector<VkDescriptorType>(count, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); };
 		auto skinTypes = storageTypes(22); skinTypes[21] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -731,7 +832,7 @@
 		// index in the feature shaders keeps its number.
 		auto featureTypes = storageTypes(hoodSolver == HoodPostCvpr ? 31u : 24u);
 		featureTypes[hoodSolver == HoodPostCvpr ? 28u : 20u] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		auto integrateTypes = storageTypes(14); integrateTypes[13] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		auto integrateTypes = storageTypes(19); integrateTypes[13] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		auto toyTypes = storageTypes(10); toyTypes[9] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		hood.skinLayout = hoodMakeLayout(skinTypes); hood.featuresLayout = hoodMakeLayout(featureTypes);
 		hood.encodeLayout = hoodMakeLayout(storageTypes(hoodSolver == HoodPostCvpr ? 14u : 10u));
@@ -746,7 +847,11 @@
 		// All fourteen XPBD bindings are storage buffers; its scalars are push constants so the
 		// per-iteration state (nothing) and the per-step state (timestep, compliance) do not need a
 		// per-frame uniform buffer.
-		if (hoodXpbdAvailable) hood.xpbdLayout = hoodMakeLayout(storageTypes(14));
+		if (hoodXpbdAvailable) hood.xpbdLayout = hoodMakeLayout(storageTypes(22));
+		if (hoodXpbdAvailable) {
+			auto substepTypes = storageTypes(8); substepTypes[7] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			hood.substepLayout = hoodMakeLayout(substepTypes);
+		}
 		hood.graphicsLayout = hoodMakeLayout({ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER });
 		hood.skinPipeline = hoodMakePipelineLayout(hood.skinLayout); hood.featuresPipeline = hoodMakePipelineLayout(hood.featuresLayout);
 		hood.encodePipeline = hoodMakePipelineLayout(hood.encodeLayout, 16); hood.edgePipeline = hoodMakePipelineLayout(hood.edgeLayout, hoodSolver == HoodPostCvpr ? 20u : 16u);
@@ -755,6 +860,7 @@
 		hood.worldNearestPipeline = hoodMakePipelineLayout(hood.worldNearestLayout, 12);
 		hood.worldReversePipeline = hoodMakePipelineLayout(hood.worldReverseLayout, 4);
 		if (hoodXpbdAvailable) hood.xpbdPipeline = hoodMakePipelineLayout(hood.xpbdLayout, sizeof(HoodXpbdPush));
+		if (hoodXpbdAvailable) hood.substepPipeline = hoodMakePipelineLayout(hood.substepLayout, 0);
 		hood.graphicsPipeline = hoodMakePipelineLayout(hood.graphicsLayout, sizeof(HoodInstancePush),
 			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 
@@ -834,7 +940,11 @@
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.effectivePosition},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.acceleration},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyTarget},
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.integrateUniforms[frame][branch]} });
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.integrateUniforms[frame][branch]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.guideTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.guideConfidence},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdMinEdge},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.frameEntry},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.guidePrediction} });
 			}
 			hood.toySets[frame] = hoodAllocateSet(hood.toyLayout);
 			hoodWriteSet(hood.toySets[frame], {
@@ -874,7 +984,35 @@
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdIncident},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdInverseMass},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.xpbdLambda},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,read},
 				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,write},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.worldObstacle},
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal} });
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.proxyNormal},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.guideTarget},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.guideConfidence},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.guideLambda},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangles},
+				// The incident-triangle CSR is the one hoodLoadAssets already derives for
+				// hood_features.comp, so the area constraint needs no topology of its own.
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangleOffsets},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothTriangleIndices},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.areaTarget},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.areaLambda} });
+		}
+		// One prediction pass per (branch, substep). The uniform differs only in `guideFraction`, but a
+		// descriptor set cannot be rewritten while a recorded command buffer still references it and all
+		// the substeps of all the branches are recorded into one buffer, so each gets its own.
+		if (hoodXpbdAvailable) for (uint32_t branch = 0; branch < hoodBranchCount; ++branch)
+		for (uint32_t substep = 0; substep < hoodMaxSubsteps; ++substep) {
+			VK_CHECK_RESULT(vulkanDevice->createBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				&hood.substepUniforms[branch][substep], sizeof(HoodSubstepParams)));
+			VK_CHECK_RESULT(hood.substepUniforms[branch][substep].map());
+			hood.substepSets[branch][substep] = hoodAllocateSet(hood.substepLayout);
+			hoodWriteSet(hood.substepSets[branch][substep], {
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPosition[branch]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.clothPrevious[branch]},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinTarget},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.pinMask},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.frameEntry},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.guidePrediction},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.guideTarget},
+				{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,&hood.substepUniforms[branch][substep]} });
 		}
 		if (hoodSolver == HoodPostCvpr) hoodWriteSet(hood.encodeSet, {
 			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.weights},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,&hoodBuffers.mlpTable},
@@ -951,6 +1089,7 @@
 		computePipeline("hood_world_nearest.comp.spv", hood.worldNearestPipeline, hood.worldNearest);
 		computePipeline("hood_world_reverse.comp.spv", hood.worldReversePipeline, hood.worldReverse);
 		if (hoodXpbdAvailable) computePipeline("hood_xpbd.comp.spv", hood.xpbdPipeline, hood.xpbd);
+		if (hoodXpbdAvailable) computePipeline("hood_substep.comp.spv", hood.substepPipeline, hood.substep);
 		computePipeline(hoodSolver == HoodPostCvpr ? "postcvpr_features.comp.spv" : "hood_features.comp.spv", hood.featuresPipeline, hood.features);
 		// A student's latent width is its workgroup size, so each width is a separate SPIR-V
 		// module built by tools/compile_shaders.py. 64 keeps the unprefixed names it has always
@@ -1106,6 +1245,16 @@
 		for (uint32_t branch = 0; branch < hoodBranchCount; ++branch) {
 			HoodIntegrateParams integrate{ hoodClothCount, hoodFirstStep ? 1u : 0u,
 				(hoodCollisionProjection && !hoodBranchUsesXpbd(branch)) ? 1u : 0u, hoodDecoderMlpId };
+			// Guide mode only makes sense where there is both a network to guide and a solver to
+			// outvote it. On branch A there is no XPBD, so leaving the network as the whole step is
+			// the definition of that branch; on branch B there is no network.
+			integrate.guideMode = (hoodXpbdGuide && hoodBranchUsesXpbd(branch) && hoodBranchUsesNetwork(branch)) ? 1u : 0u;
+			integrate.guideTrustRatio = hoodXpbdGuideTrustRatio;
+			// Substep 0's share of the frame. 1 when not substepping, which keeps this pass exactly the
+			// shader every existing golden was recorded against.
+			const uint32_t substeps = std::min<uint32_t>(std::max(hoodXpbdSubsteps, 1), hoodMaxSubsteps);
+			integrate.substepScale = 1.0f / static_cast<float>(substeps);
+			integrate.substepGravity = hoodSubstepGravity(branch, substeps);
 			if (hoodBranchUsesNetwork(branch)) {
 				integrate.predictor = 0u;
 			} else {
@@ -1139,55 +1288,187 @@
 		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 	}
 
+	// Where substep `index` of `count` sits inside the visual frame, as a blend weight towards the
+	// next animation frame. Clamped to 0 on the last frame, because hood_skin.comp reads frame + 1
+	// unconditionally once the blend is non-zero and the clip may have no frame after this one.
+	float hoodSubstepBlend(uint32_t index, uint32_t count) const
+	{
+		if (hoodComputeFrame + 1 >= hoodFrameCount) return 0.0f;
+		return static_cast<float>(index) / static_cast<float>(count);
+	}
+
+	// h^2 * g for one substep, or zero on the settle step. Only the modes that start from the inertial
+	// prediction need it: `guideMode` off means the prediction the solve starts from already carries
+	// whatever acceleration produced it (the network's, or gate_g0.py's dt^2 g for a ballistic arm),
+	// and adding gravity again would double it. Mirrors the `external` term in
+	// real_scene/xpbd.py::step_substepped.
+	//
+	// The settle step is zeroed for the reason gate_g0.py::BallisticGravity records: at dt = 1/3 a full
+	// gravity step is 1.09 m, about a hundred times the garment's per-step motion.
+	glm::vec4 hoodSubstepGravity(uint32_t branch, uint32_t substeps) const
+	{
+		const bool inertialStart = hoodXpbdGuide && hoodBranchUsesXpbd(branch);
+		if (!inertialStart || hoodFirstStep) return glm::vec4(0.0f);
+		const float step = (1.0f / 30.0f) / static_cast<float>(substeps);
+		return glm::vec4(hoodGravity[0] * step * step, hoodGravity[1] * step * step,
+			hoodGravity[2] * step * step, 0.0f);
+	}
+
+	// Re-skin the body between two animation frames. Only the proxies and the pin targets move; the
+	// drawn character stays on the whole frame (see hood_skin.comp). Used by the substep loop, which
+	// has to put the body where the substep ends rather than where the frame does -- on sprint_start
+	// the root covers 0.32 m per frame, so a substep against a whole-frame pose is chasing a body it
+	// is already a substep behind.
+	void hoodRecordSkinAt(VkCommandBuffer command, float frameBlend, float nextBlend)
+	{
+		HoodSkinParams skin{ hoodComputeFrame, hoodNextFrame, hoodBoneCount, hoodCharacterCount,
+			hoodProxyCount, hoodClothCount, 0u, hoodRenderFrame };
+		skin.frameBlend = frameBlend;
+		// `hoodNextFrame` may already be the last frame, in which case there is nothing to blend
+		// towards and the target simply stays there.
+		skin.nextBlend = hoodNextFrame + 1 >= hoodFrameCount ? 0.0f : nextBlend;
+		// A push of the uniform would race the recorded commands that still read it, so the substep
+		// poses ride in the per-substep uniform this writes into instead of the shared skin uniform.
+		std::memcpy(hood.skinUniforms[currentBuffer].mapped, &skin, sizeof(skin));
+		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.skin);
+		vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.skinPipeline, 0, 1,
+			&hood.skinSets[currentBuffer], 0, nullptr);
+		vkCmdDispatch(command, (std::max({ hoodCharacterCount, hoodProxyCount, hoodClothCount }) + 127) / 128, 1, 1);
+		hoodComputeBarrier(command);
+	}
+
+	// Re-run the nearest-proxy search for one branch. Factored out of hoodRecord so the substep loop
+	// can refresh contacts without duplicating the push-constant block.
+	void hoodRecordWorldNearest(VkCommandBuffer command, uint32_t branch)
+	{
+		vkCmdFillBuffer(command, hoodBuffers.activeProxy.buffer, 0, VK_WHOLE_SIZE, 0);
+		VkMemoryBarrier clearBarrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+			.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clearBarrier, 0, nullptr, 0, nullptr);
+		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.worldNearest);
+		vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.worldNearestPipeline, 0, 1,
+			&hood.worldNearestSets[branch], 0, nullptr);
+		const struct { uint32_t clothCount, proxyCount; float collisionRadius; } nearestPush{
+			hoodClothCount, hoodProxyCount, hoodCollisionRadius };
+		vkCmdPushConstants(command, hood.worldNearestPipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(nearestPush), &nearestPush);
+		vkCmdDispatch(command, hoodClothCount, 1, 1);
+		hoodComputeBarrier(command);
+	}
+
 	// Jacobi XPBD after the network's integrate pass. See hood_xpbd.comp for why one dispatch per
 	// iteration is the whole point, and plans/gnn/gnn-xpbd-v2.md section 3.3 for what it buys.
 	void hoodRecordXpbd(VkCommandBuffer command, uint32_t branch)
 	{
 		if (!hoodXpbdAvailable || !hoodBranchUsesXpbd(branch) || hoodBranchIterations(branch) <= 0) return;
 		const uint32_t iterations = static_cast<uint32_t>(hoodBranchIterations(branch));
-
-		// lambda accumulates within a step and must start at zero in every step, exactly as
-		// real_scene/xpbd.py::project builds a fresh multiplier vector per call. This barrier also
-		// has to cover hood_integrate.comp's write to clothPosition, which the first iteration
-		// reads -- the fill is a transfer but the position the sweep starts from is a shader write.
-		vkCmdFillBuffer(command, hoodBuffers.xpbdLambda.buffer, 0, VK_WHOLE_SIZE, 0);
-		VkMemoryBarrier clearBarrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-			.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
-		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clearBarrier, 0, nullptr, 0, nullptr);
+		// The guide only means anything on a branch that has a network to be guided by; branch B's
+		// prediction *is* the ballistic one, so guiding towards it would be a no-op wrapped in a
+		// constraint. The area floor is independent of the network and applies to every branch, but it
+		// needs a target the asset may not carry -- see the `area_target` fallback in hoodLoadAssets.
+		const bool guideActive = hoodXpbdGuide && hoodBranchUsesNetwork(branch);
+		const bool areaActive = hoodXpbdAreaFloor > 0.0f && hoodAreaTargetAvailable && hoodTriangleCount > 0;
 
 		HoodXpbdPush push{};
 		push.clothCount = hoodClothCount;
 		push.constraintCount = hoodXpbdConstraintCount;
 		push.slotWidth = hoodXpbdSlotWidth;
 		push.flags = (hoodXpbdOneSided ? hoodXpbdOneSidedFlag : 0u)
-			| (hoodXpbdCollision ? hoodXpbdCollisionFlag : 0u);
+			| (hoodXpbdCollision ? hoodXpbdCollisionFlag : 0u)
+			| (guideActive ? hoodXpbdGuideFlag : 0u)
+			| (areaActive ? hoodXpbdAreaFlag : 0u);
 		// The reference pipeline's first step is a 1/3 s settle rather than a physical substep,
-		// and alpha = compliance / dt^2 has to use the same value make_graph did.
-		push.timestep = hoodFirstStep ? 1.0f / 3.0f : 1.0f / 30.0f;
+		// and alpha = compliance / dt^2 has to use the same value make_graph did. Divided by the
+		// substep count below, because alpha is formed from h and not from the visual frame's dt.
+		push.timestep = (hoodFirstStep ? 1.0f / 3.0f : 1.0f / 30.0f)
+			/ static_cast<float>(std::min<uint32_t>(std::max(hoodXpbdSubsteps, 1), hoodMaxSubsteps));
 		push.relaxation = hoodXpbdRelaxation;
 		push.contactOffset = hoodXpbdContactOffset;
 		push.stretchCompliance = hoodXpbdStretchCompliance;
 		push.bendCompliance = hoodXpbdBendCompliance;
+		push.guideCompliance = hoodXpbdGuideCompliance;
+		push.areaFloor = areaActive ? hoodXpbdAreaFloor : 0.0f;
+		push.areaCompliance = hoodXpbdAreaCompliance;
+		push.triangleCount = hoodTriangleCount;
 
-		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.xpbd);
-		vkCmdPushConstants(command, hood.xpbdPipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-		for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
-			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.xpbdPipeline, 0, 1,
-				&hood.xpbdSets[branch][iteration & 1u], 0, nullptr);
-			vkCmdDispatch(command, (hoodClothCount + 127) / 128, 1, 1);
-			hoodComputeBarrier(command);
+		// One vertex per 32 lanes, four per group -- not one vertex per thread. See
+		// hood_xpbd.comp's header: the old shape put CH10032's 1377 vertices into 11 workgroups on a
+		// 34-SM part and measured 9.44 us per iteration against a 2.8 us estimate.
+		const uint32_t groups = (hoodClothCount + hoodXpbdVerticesPerGroup - 1) / hoodXpbdVerticesPerGroup;
+		const uint32_t substeps = std::min<uint32_t>(std::max(hoodXpbdSubsteps, 1), hoodMaxSubsteps);
+		const uint32_t passes = areaActive ? 2u : 1u;
+
+		for (uint32_t substep = 0; substep < substeps; ++substep) {
+			// Substeps after the first need their own body pose, contact set and inertial prediction.
+			// Substep 0 already has all three: hoodRecord skinned the frame, ran the nearest-proxy
+			// search, and hood_integrate.comp produced the prediction (scaled to one substep), so
+			// redoing any of it here would cost time and break the one-substep path's bit-exactness.
+			if (substep > 0) {
+				// Re-skin between the two animation frames, then re-search. After a substep has moved a
+				// vertex, its nearest body surface may be a different proxy, and every remaining sweep
+				// would otherwise be converging accurately against an expired half-plane -- which is the
+				// concrete form of "more iterations cannot fix a plane in the wrong place".
+				hoodRecordSkinAt(command, hoodSubstepBlend(substep, substeps), hoodSubstepBlend(substep + 1, substeps));
+				hoodRecordWorldNearest(command, branch);
+				HoodSubstepParams params{ hoodClothCount, guideActive ? 1u : 0u,
+					static_cast<float>(substep + 1) / static_cast<float>(substeps), 0u };
+				params.gravityDisplacement = hoodSubstepGravity(branch, substeps);
+				std::memcpy(hood.substepUniforms[branch][substep].mapped, &params, sizeof(params));
+				vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.substep);
+				vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.substepPipeline, 0, 1,
+					&hood.substepSets[branch][substep], 0, nullptr);
+				vkCmdDispatch(command, (hoodClothCount + 127) / 128, 1, 1);
+				hoodComputeBarrier(command);
+			}
+
+			// lambda accumulates within a substep and must start at zero in every one, exactly as
+			// real_scene/xpbd.py::project builds a fresh multiplier vector per call -- `project` *is*
+			// one substep, so "fresh per call" and "fresh per substep" are the same statement. This
+			// barrier also has to cover the shader write to clothPosition that the first iteration
+			// reads: the fill is a transfer, but the position the sweep starts from is not.
+			vkCmdFillBuffer(command, hoodBuffers.xpbdLambda.buffer, 0, VK_WHOLE_SIZE, 0);
+			if (guideActive) vkCmdFillBuffer(command, hoodBuffers.guideLambda.buffer, 0, VK_WHOLE_SIZE, 0);
+			if (areaActive) vkCmdFillBuffer(command, hoodBuffers.areaLambda.buffer, 0, VK_WHOLE_SIZE, 0);
+			VkMemoryBarrier clearBarrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+				.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+				.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clearBarrier, 0, nullptr, 0, nullptr);
+
+			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.xpbd);
+			for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
+				// The area floor needs positions the distance sweep has finished writing *everywhere*,
+				// which is a barrier and therefore a second dispatch. The guide and the contact read
+				// only the vertex's own state, so they ride along in whichever pass writes the position
+				// out -- which is why an iteration is still one dispatch in the default configuration.
+				for (uint32_t pass = 0; pass < passes; ++pass) {
+					push.pass = (areaActive && pass == 1u) ? hoodXpbdPassArea : hoodXpbdPassDistance;
+					vkCmdPushConstants(command, hood.xpbdPipeline, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+					const uint32_t ping = (iteration * passes + pass) & 1u;
+					vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, hood.xpbdPipeline, 0, 1,
+						&hood.xpbdSets[branch][ping], 0, nullptr);
+					vkCmdDispatch(command, groups, 1, 1);
+					hoodComputeBarrier(command);
+				}
+			}
+
+			// An odd number of ping-pong writes leaves the result in the scratch buffer. k is 128 by
+			// default and the area pass doubles the count, so this never fires there, but silently
+			// rounding the count would be worse than one transfer. Branch B's equal-budget 228 is even
+			// too. This has to happen per substep rather than once at the end, because the next
+			// substep's prediction pass reads clothPosition.
+			if ((passes * iterations) & 1u) {
+				VkBufferCopy copy{ .size = hoodClothCount * sizeof(glm::vec4) };
+				vkCmdCopyBuffer(command, hoodBuffers.xpbdScratch.buffer, hoodBuffers.clothPosition[branch].buffer, 1, &copy);
+				hoodTransferThenComputeBarrier(command);
+			}
 		}
 
-		// An odd iteration count leaves the result in the scratch buffer. k is 128 by default so
-		// this never fires, but silently rounding the count would be worse than one transfer.
-		// Branch B's equal-budget 228 is even too.
-		if (iterations & 1u) {
-			VkBufferCopy copy{ .size = hoodClothCount * sizeof(glm::vec4) };
-			vkCmdCopyBuffer(command, hoodBuffers.xpbdScratch.buffer, hoodBuffers.clothPosition[branch].buffer, 1, &copy);
-			hoodTransferThenComputeBarrier(command);
-		}
+		// Leave the body on the whole frame. The proxies and pin targets are shared across branches and
+		// the branches are recorded in sequence, so a substepped branch that walked them to a sub-frame
+		// pose would hand the next branch -- and the character draw -- the wrong body.
+		if (substeps > 1) hoodRecordSkinAt(command, 0.0f, 0.0f);
 
 		// hood_integrate.comp sets clothPrevious to the *uncorrected* prediction on the settle step
 		// (every later step gets `effective`, which XPBD does not touch). tools/gate_g0.py does the
@@ -1512,8 +1793,8 @@
 	// directly comparable to the Python probe's `edge_p95` -- that cross-language agreement is what
 	// makes the comparison view trustworthy rather than merely plausible.
 	struct HoodStructure {
-		uint32_t invalidVertices{}, activeWorldEdges{};
-		double maximumDisplacement{}, maximumPinnedError{};
+		uint32_t invalidVertices{}, activeWorldEdges{}, piercedVertices{};
+		double maximumDisplacement{}, maximumPinnedError{}, deepestPenetration{};
 		double edgeMean{}, edgeP95{}, edgeMaximum{}, collapsedFraction{}, stretchedFraction{};
 		double areaMean{}, areaMedian{}, degenerateFraction{}, flippedFraction{};
 		glm::dvec3 minimum{}, maximum{};
@@ -1525,6 +1806,22 @@
 		const auto positions = hoodReadback<glm::vec4>(hoodBuffers.clothPosition[branch].buffer, hoodClothCount);
 		const auto pinTargets = hoodReadback<glm::vec4>(hoodBuffers.pinTarget.buffer, hoodClothCount);
 		const auto world = hoodReadback<uint32_t>(hoodBuffers.worldObstacle.buffer, hoodClothCount);
+		// The penetration columns use the same half-plane test hood_xpbd.comp resolves against, so
+		// they answer "did it fix what it could see". Two undercounts have to be read with them, and
+		// they are the same two tools/recovery_probe.py::penetration documents:
+		//
+		//   * only vertices carrying a world edge are covered, because those are the ones the solver
+		//     itself can see;
+		//   * a single nearest-proxy half-plane cannot detect a vertex that has passed all the way
+		//     through a thin limb -- once it is out the far side its nearest proxy is the far surface
+		//     and the signed distance is positive again. Measured while calibrating the Python
+		//     probe's `corrupt_penetrate`, translating the hem patch 0.25 m inward reports 1%
+		//     penetration where 0.12 m reports 28.5%.
+		//
+		// So this is a relative column for comparing branches, not an absolute penetration claim. A
+		// figure that survives both caveats needs the self-collision and inside-outside work.
+		const auto proxyTargets = hoodReadback<glm::vec4>(hoodBuffers.proxyTarget.buffer, hoodProxyCount);
+		const auto proxyNormals = hoodReadback<glm::vec4>(hoodBuffers.proxyNormal.buffer, hoodProxyCount);
 		HoodStructure result;
 		uint32_t collapsedEdges = 0, stretchedEdges = 0, degenerateTriangles = 0, flippedTriangles = 0;
 		glm::dvec3 minimum(std::numeric_limits<double>::max()), maximum(-std::numeric_limits<double>::max());
@@ -1544,6 +1841,19 @@
 			if (hoodPinMaskCpu[vertex] && finite3(pinTargets[vertex])) {
 				result.maximumPinnedError = std::max(result.maximumPinnedError,
 					glm::length(position - glm::dvec3(pinTargets[vertex])));
+			}
+			// Same arithmetic as hood_xpbd.comp's contact block and _resolve_contacts in
+			// real_scene/xpbd.py: plane at the proxy's *target* position, offset subtracted, negative
+			// signed distance is a violation.
+			const uint32_t obstacle = world[vertex];
+			if (obstacle < hoodProxyCount && !hoodPinMaskCpu[vertex]) {
+				const glm::dvec3 normal = glm::normalize(glm::dvec3(proxyNormals[obstacle]));
+				const double signedDistance =
+					glm::dot(position - glm::dvec3(proxyTargets[obstacle]), normal) - hoodXpbdContactOffset;
+				if (signedDistance < 0.0) {
+					++result.piercedVertices;
+					result.deepestPenetration = std::max(result.deepestPenetration, -signedDistance);
+				}
 			}
 		}
 		if (result.invalidVertices == hoodClothCount) {
@@ -1621,6 +1931,10 @@
 				<< ", \"collapsed_fraction_lt_0_5\": " << m.collapsedFraction << ", \"stretched_fraction_gt_1_5\": " << m.stretchedFraction << "},"
 				<< "\n" << indent << "\"triangle_area_ratio\": {\"mean\": " << m.areaMean << ", \"median\": " << m.areaMedian
 				<< ", \"degenerate_fraction_lt_0_1\": " << m.degenerateFraction << ", \"flipped_fraction\": " << m.flippedFraction << "},"
+				// Relative between branches only -- the nearest-proxy criterion is blind to tunnelling.
+				// See the comment in hoodMeasureStructure.
+				<< "\n" << indent << "\"penetration\": {\"pierced_vertices\": " << m.piercedVertices
+				<< ", \"deepest_m\": " << m.deepestPenetration << "},"
 				<< "\n" << indent << "\"bounds_min_m\": [" << m.minimum.x << ", " << m.minimum.y << ", " << m.minimum.z << "],"
 				<< "\n" << indent << "\"bounds_max_m\": [" << m.maximum.x << ", " << m.maximum.y << ", " << m.maximum.z << "]";
 		};
@@ -1816,12 +2130,36 @@
 			if (!hoodCompareMode) overlay->checkBox("XPBD (Jacobi)", &hoodXpbdEnabled);
 			if (hoodXpbdEnabled) {
 				overlay->sliderInt(hoodCompareMode ? "C iterations" : "XPBD iterations", &hoodXpbdIterations, 0, 256);
+				// Iterations are PER SUBSTEP, so this multiplies the total cost. 4 x 32 is the
+				// equal-budget partner of 1 x 128, not four times the work -- drop the iteration
+				// count when raising this or the comparison stops being equal-budget.
+				overlay->sliderInt("XPBD substeps", &hoodXpbdSubsteps, 1, 8);
+				overlay->text("total %d sweeps/frame", hoodXpbdIterations * hoodXpbdSubsteps);
 				overlay->checkBox("XPBD one-sided", &hoodXpbdOneSided);
 				overlay->checkBox("XPBD contacts", &hoodXpbdCollision);
 				// Gate G0 measured 0..1e-6 as completely inert: alpha = compliance / dt^2 is then
 				// seven orders below the inverse-mass sum. The usable range starts near 1e-2.
 				overlay->sliderFloat("XPBD stretch compliance", &hoodXpbdStretchCompliance, 0.0f, 0.1f);
 				overlay->sliderFloat("XPBD bend compliance", &hoodXpbdBendCompliance, 0.0f, 0.1f);
+				overlay->checkBox("Soft GNN guide", &hoodXpbdGuide);
+				if (hoodXpbdGuide) {
+					// [0, 100] rather than the structural sliders' [0, 0.1]. The guide is a
+					// one-vertex constraint, so alpha-tilde = compliance / dt^2 crosses its inverse
+					// mass near 1 instead of near 15 -- and a 0..0.1 range on it could only ever
+					// select "hard guide", which is the behaviour this checkbox exists to leave.
+					overlay->sliderFloat("Guide compliance", &hoodXpbdGuideCompliance, 0.0f, 100.0f);
+					// 0 trusts the network everywhere. Above 0, a vertex whose predicted displacement
+					// exceeds this many of its own shortest constraints is progressively distrusted.
+					overlay->sliderFloat("Guide trust radius", &hoodXpbdGuideTrustRatio, 0.0f, 4.0f);
+				}
+				if (hoodAreaTargetAvailable) {
+					// Fraction of the CALIBRATED triangle area, not the rest area.
+					overlay->sliderFloat("Area floor (rho)", &hoodXpbdAreaFloor, 0.0f, 0.8f);
+					if (hoodXpbdAreaFloor > 0.0f) {
+						overlay->sliderFloat("Area compliance", &hoodXpbdAreaCompliance, 0.0f, 100.0f);
+						overlay->text("area pass doubles the dispatch count");
+					}
+				}
 				overlay->text("%u constraints (%u stretch), %u slots/vertex",
 					hoodXpbdConstraintCount, hoodXpbdStretchCount, hoodXpbdSlotWidth);
 			}
@@ -1879,10 +2217,15 @@
 			if (hoodBuffers.coarseFeatures[level].buffer != VK_NULL_HANDLE) hoodBuffers.coarseFeatures[level].destroy();
 		}
 		HOOD_DESTROY_BUFFER(weights); HOOD_DESTROY_BUFFER(mlpTable); HOOD_DESTROY_BUFFER(normalizers); HOOD_DESTROY_BUFFER(toyWeights); HOOD_DESTROY_BUFFER(toyHidden);
-		// Only created when a .vxpbd asset was present, so these have to be guarded.
+		// Only created when a .vxpbd asset was present, so these have to be guarded. `xpbdMinEdge`,
+		// `guideTarget` and `guideConfidence` are created either way -- hood_integrate.comp binds
+		// them unconditionally -- but the same guard covers that harmlessly.
 		for (auto* buffer : { &hoodBuffers.xpbdPairs, &hoodBuffers.xpbdTargetLength, &hoodBuffers.xpbdWeightSum,
 				&hoodBuffers.xpbdKind, &hoodBuffers.xpbdSlots, &hoodBuffers.xpbdSigns, &hoodBuffers.xpbdIncident,
-				&hoodBuffers.xpbdInverseMass, &hoodBuffers.xpbdMinEdge, &hoodBuffers.xpbdLambda, &hoodBuffers.xpbdScratch })
+				&hoodBuffers.xpbdInverseMass, &hoodBuffers.xpbdMinEdge, &hoodBuffers.xpbdLambda, &hoodBuffers.xpbdScratch,
+				&hoodBuffers.guideTarget, &hoodBuffers.guideConfidence, &hoodBuffers.guideLambda,
+				&hoodBuffers.areaTarget, &hoodBuffers.areaLambda,
+				&hoodBuffers.frameEntry, &hoodBuffers.guidePrediction })
 			if (buffer->buffer != VK_NULL_HANDLE) buffer->destroy();
 		for (uint32_t i=0;i<2;++i) {
 			hoodBuffers.nodeLatent[i].destroy(); hoodBuffers.meshLatent[i].destroy(); hoodBuffers.worldDirectLatent[i].destroy(); hoodBuffers.worldInverseLatent[i].destroy();
@@ -1897,5 +2240,12 @@
 		if (hood.xpbd != VK_NULL_HANDLE) vkDestroyPipeline(device, hood.xpbd, nullptr);
 		if (hood.xpbdPipeline != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, hood.xpbdPipeline, nullptr);
 		if (hood.xpbdLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, hood.xpbdLayout, nullptr);
+		// Same guard: the substep prediction pass only exists alongside a constraint set.
+		if (hood.substep != VK_NULL_HANDLE) vkDestroyPipeline(device, hood.substep, nullptr);
+		if (hood.substepPipeline != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, hood.substepPipeline, nullptr);
+		if (hood.substepLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, hood.substepLayout, nullptr);
+		for (auto& perBranch : hood.substepUniforms)
+			for (auto& uniform : perBranch)
+				if (uniform.buffer != VK_NULL_HANDLE) uniform.destroy();
 		vkDestroyDescriptorPool(device,hood.pool,nullptr);
 	}
