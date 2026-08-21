@@ -30,6 +30,30 @@ param(
     # Stop on the final frame instead of looping, so the post-motion settle is observable -- that is
     # where C's overshoot resolves and A's does not. Also toggleable live in the overlay.
     [switch]$HoldLastFrame,
+    # Soft-guided multirate options. All of these are also live in the overlay, which is the better way
+    # to look at them -- toggling the guide on the same frame shows what it changes far more clearly
+    # than two separate launches. They exist here so a particular configuration can be reproduced.
+    #
+    # -XpbdIterations is PER SUBSTEP, so -Substeps 4 -XpbdIterations 32 is the equal-budget partner of
+    # the default 1 x 128; raising substeps alone quadruples the cost.
+    #
+    # NOT the default, deliberately: results/SUBSTEP_GUIDE_RESULTS.md section 2 measures the guide as a
+    # trade, winning 4.6x on sprint_start and losing 1.2-1.5x on the two hand-tuned skirt clips.
+    [ValidateRange(1, 8)]
+    [int]$Substeps = 1,
+    [switch]$Guide,
+    # m^2/N. Useful band is about [1, 100]; below 0.5 the guide is hard in all but name.
+    [ValidateRange(0.0, 100.0)]
+    [double]$GuideCompliance = 10.0,
+    # Distrust a vertex whose predicted displacement exceeds this many of its own shortest constraints.
+    # 0 trusts the network everywhere. Never swept -- see the write-up's section 6.
+    [ValidateRange(0.0, 8.0)]
+    [double]$GuideTrustRatio = 0.0,
+    # Minimum triangle area as a fraction of the CALIBRATED area, not the rest area.
+    [ValidateRange(0.0, 0.9)]
+    [double]$AreaFloor = 0.0,
+    [ValidateRange(0.0, 100.0)]
+    [double]$AreaCompliance = 0.0,
     [switch]$StaticPose
 )
 
@@ -93,6 +117,15 @@ if ($Scene -in @('CH10032', 'HoodGrid64') -or $Solver -in @('Fine15', 'PostCvpr'
         }
         $Arguments += @('--hood-xpbd', '--hood-xpbd-iterations', $XpbdIterations,
             '--hood-xpbd-asset', (Quote-ProcessArgument $XpbdAsset))
+    }
+    # Shared by both solver paths, because the substep loop and the guide apply to a single branch
+    # exactly as they do to C in comparison mode. Inert without a constraint set.
+    if ($Compare -or $Xpbd) {
+        $Arguments += @('--hood-xpbd-substeps', $Substeps)
+        if ($Guide) { $Arguments += @('--hood-xpbd-guide', '--hood-xpbd-guide-compliance', $GuideCompliance) }
+        if ($GuideTrustRatio -gt 0) { $Arguments += @('--hood-xpbd-guide-trust-ratio', $GuideTrustRatio) }
+        if ($AreaFloor -gt 0) { $Arguments += @('--hood-xpbd-area-floor', $AreaFloor,
+            '--hood-xpbd-area-compliance', $AreaCompliance) }
     }
 } else {
     $Arguments += @('--gnn-grid', $Grid)
