@@ -1,4 +1,8 @@
 .work/
+# MLCloth training exports: proprietary Z2Game character and garment data (a few
+# hundred MB per dataset). The PoC's license does not relicense them, so they stay
+# local, exactly like .work/.
+data/
 tests/build/
 build/
 out/

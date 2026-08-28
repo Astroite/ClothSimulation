@@ -40,6 +40,26 @@ static int g_fail = 0;
     if (g_fail == failuresBefore) { std::cerr << "ok\n"; ++g_pass; } \
 } while(0)
 
+// Assert that a mesh is rejected AND that it is rejected by the intended check.
+// Without the message assertion a negative test can quietly start passing for an
+// earlier reason -- a patched triangle index also breaks edge coverage, a patched
+// count also breaks a bounds check -- and stop covering what it was written for.
+#define CHECK_MESH_REJECTS(bytes, hash, needle) do { \
+    MeshInfo rejected{}; \
+    std::string reason; \
+    if (parse_mesh((bytes).data(), (bytes).size(), hash, rejected, reason)) { \
+        std::cerr << "  FAIL: expected rejection containing \"" << (needle) << "\"  (" \
+                  << __FILE__ << ":" << __LINE__ << ")\n"; \
+        ++g_fail; return; \
+    } \
+    if (reason.find(needle) == std::string::npos) { \
+        std::cerr << "  FAIL: rejected for the wrong reason: got \"" << reason \
+                  << "\", expected to contain \"" << (needle) << "\"  (" \
+                  << __FILE__ << ":" << __LINE__ << ")\n"; \
+        ++g_fail; return; \
+    } \
+} while(0)
+
 // ---------------------------------------------------------------------------
 // Fixture generators
 // ---------------------------------------------------------------------------
@@ -615,6 +635,302 @@ static void test_model_clip_integration() {
 }
 
 // ---------------------------------------------------------------------------
+// Mesh parser tests
+// ---------------------------------------------------------------------------
+
+// A closed cylinder strip: `rows` rings of `cols` vertices with the columns
+// wrapping. Chosen because 5294 = 2 * 2647 with 2647 prime, so a two-ring
+// cylinder is the only grid shape that hits the model's vertex count exactly --
+// and unlike a flat patch it has two boundary loops, which exercises the loop
+// counter rather than leaving it at one.
+struct MeshFixture {
+    std::vector<float> positions;
+    std::vector<uint32_t> triangles;
+    std::vector<float> mass;
+    std::vector<uint32_t> pins;
+};
+
+static MeshFixture make_cylinder(uint32_t rows, uint32_t cols) {
+    MeshFixture fixture;
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t c = 0; c < cols; ++c) {
+            const double angle = 6.283185307179586 * double(c) / double(cols);
+            fixture.positions.push_back(float(20.0 * std::cos(angle)));
+            fixture.positions.push_back(float(-20.0 * double(r)));
+            fixture.positions.push_back(float(20.0 * std::sin(angle)));
+            fixture.mass.push_back(0.002f);
+            fixture.pins.push_back(r == 0 ? 1u : 0u);
+        }
+    }
+    for (uint32_t r = 0; r + 1 < rows; ++r) {
+        for (uint32_t c = 0; c < cols; ++c) {
+            const uint32_t next = (c + 1) % cols;
+            const uint32_t v00 = r * cols + c, v01 = r * cols + next;
+            const uint32_t v10 = (r + 1) * cols + c, v11 = (r + 1) * cols + next;
+            fixture.triangles.insert(fixture.triangles.end(), { v00, v10, v11 });
+            fixture.triangles.insert(fixture.triangles.end(), { v00, v11, v01 });
+        }
+    }
+    return fixture;
+}
+
+static std::vector<uint8_t> make_mesh_bytes(const Sha256Digest& modelHash, const MeshFixture& fixture) {
+    std::string err;
+    auto bytes = write_mesh(modelHash, fixture.positions, fixture.triangles, fixture.mass, fixture.pins, err);
+    if (bytes.empty()) std::cerr << "  (write_mesh refused the fixture: " << err << ")\n";
+    return bytes;
+}
+
+static std::vector<uint8_t> make_mesh_bytes(const Sha256Digest& modelHash) {
+    return make_mesh_bytes(modelHash, make_cylinder(2, kClothVertexCount / 2));
+}
+
+static uint32_t read_le32(const std::vector<uint8_t>& bytes, size_t offset) {
+    return uint32_t(bytes[offset]) | (uint32_t(bytes[offset + 1]) << 8) |
+           (uint32_t(bytes[offset + 2]) << 16) | (uint32_t(bytes[offset + 3]) << 24);
+}
+
+static uint64_t read_le64(const std::vector<uint8_t>& bytes, size_t offset) {
+    uint64_t value = 0;
+    for (int i = 7; i >= 0; --i) value = (value << 8) | uint64_t(bytes[offset + size_t(i)]);
+    return value;
+}
+
+static void write_le32(std::vector<uint8_t>& bytes, size_t offset, uint32_t value) {
+    for (int i = 0; i < 4; ++i) bytes[offset + size_t(i)] = uint8_t(value >> (8 * i));
+}
+
+// Byte offset of a named section's payload, or SIZE_MAX when absent.
+static size_t mesh_section_offset(const std::vector<uint8_t>& bytes, const char* name) {
+    const uint32_t sections = read_le32(bytes, 12);
+    for (uint32_t i = 0; i < sections; ++i) {
+        const size_t entry = kSectionHeaderBytes + kSectionEntryBytes * size_t(i);
+        std::string found(reinterpret_cast<const char*>(bytes.data() + entry),
+                          strnlen(reinterpret_cast<const char*>(bytes.data() + entry), kSectionNameBytes));
+        if (found == name) return size_t(read_le64(bytes, entry + kSectionNameBytes));
+    }
+    return SIZE_MAX;
+}
+
+// Recompute the payload digest after a deliberate edit. Without this every patch
+// would stop at the hash check, so the deeper structural checks would never be
+// reached by any test.
+static void mesh_reseal(std::vector<uint8_t>& bytes) {
+    const size_t payloadOffset = size_t(read_le64(bytes, 24));
+    const Sha256Digest digest = sha256(bytes.data() + payloadOffset, bytes.size() - payloadOffset);
+    std::memcpy(bytes.data() + 32, digest.bytes.data(), 32);
+}
+
+static void mesh_patch_u32(std::vector<uint8_t>& bytes, const char* section, size_t index, uint32_t value) {
+    const size_t base = mesh_section_offset(bytes, section);
+    write_le32(bytes, base + 4 * index, value);
+    mesh_reseal(bytes);
+}
+
+static void mesh_patch_f32(std::vector<uint8_t>& bytes, const char* section, size_t index, float value) {
+    const size_t base = mesh_section_offset(bytes, section);
+    std::memcpy(bytes.data() + base + 4 * index, &value, sizeof(value));
+    mesh_reseal(bytes);
+}
+
+static void test_mesh_valid() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    CHECK(!bytes.empty());
+
+    MeshInfo info;
+    std::string err;
+    CHECK(parse_mesh(bytes.data(), bytes.size(), modelHash, info, err));
+    const uint32_t cols = kClothVertexCount / 2;
+    CHECK_EQ(info.vertices, kClothVertexCount);
+    CHECK_EQ(info.triangles, 2u * cols);
+    CHECK_EQ(info.edges, 4u * cols);
+    CHECK_EQ(info.boundaryEdges, 2u * cols);
+    CHECK_EQ(info.boundaryLoops, 2u);
+    CHECK_EQ(info.maxTriangleValence, 3u);
+    CHECK_EQ(info.pinnedVertices, cols);
+    CHECK_EQ(info.modelSha256, modelHash);
+    // Euler characteristic of an annulus is zero; a wrong edge derivation shows up here.
+    CHECK_EQ(int(info.vertices) - int(info.edges) + int(info.triangles), 0);
+    CHECK_EQ(info.edgeCsrOffsets[info.vertices], 2u * info.edges);
+    CHECK_EQ(info.triangleCsrOffsets[info.vertices], 3u * info.triangles);
+}
+
+static void test_mesh_bad_magic() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    bytes[3] = 'X';
+    CHECK_MESH_REJECTS(bytes, modelHash, "bad magic");
+}
+
+static void test_mesh_bad_version() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    write_le32(bytes, 8, 2);
+    CHECK_MESH_REJECTS(bytes, modelHash, "version != 1");
+}
+
+// The lock that stops a topology from another garment loading against this model.
+static void test_mesh_bad_model_hash() {
+    auto names = make_driver_names();
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto otherHash = compute_driver_list_hash(names);
+    auto bytes = make_mesh_bytes(modelHash);
+    CHECK_MESH_REJECTS(bytes, otherHash, "model hash mismatch");
+    MeshInfo info;
+    std::string err;
+    CHECK(parse_mesh(bytes.data(), bytes.size(), modelHash, info, err));
+}
+
+static void test_mesh_payload_tamper() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    const size_t base = mesh_section_offset(bytes, "positions");
+    bytes[base] ^= 0x01; // no reseal: the digest must catch this
+    CHECK_MESH_REJECTS(bytes, modelHash, "payload hash mismatch");
+}
+
+static void test_mesh_truncated() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    bytes.resize(bytes.size() - 64);
+    CHECK_MESH_REJECTS(bytes, modelHash, "fileBytes does not match");
+    std::vector<uint8_t> stub(kSectionHeaderBytes - 1, 0);
+    CHECK_MESH_REJECTS(stub, modelHash, "truncated header");
+}
+
+static void test_mesh_wrong_vertex_count() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash, make_cylinder(2, 100));
+    CHECK(!bytes.empty());
+    CHECK_MESH_REJECTS(bytes, modelHash, "vertex count is 200");
+}
+
+static void test_mesh_triangle_index_out_of_range() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    mesh_patch_u32(bytes, "triangles", 1, kClothVertexCount);
+    CHECK_MESH_REJECTS(bytes, modelHash, "triangle index out of range");
+}
+
+static void test_mesh_degenerate_triangle() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    const size_t base = mesh_section_offset(bytes, "triangles");
+    const uint32_t first = read_le32(bytes, base);
+    mesh_patch_u32(bytes, "triangles", 1, first);
+    CHECK_MESH_REJECTS(bytes, modelHash, "repeated corner");
+}
+
+// An edge shared by three triangles. write_mesh deliberately does not refuse
+// this, because otherwise no test could reach the parser's manifoldness check.
+static void test_mesh_non_manifold_edge() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto fixture = make_cylinder(2, kClothVertexCount / 2);
+    const uint32_t a = fixture.triangles[0], b = fixture.triangles[1];
+    fixture.triangles.insert(fixture.triangles.end(), { a, b, kClothVertexCount / 2 + 7 });
+    auto bytes = make_mesh_bytes(modelHash, fixture);
+    CHECK(!bytes.empty());
+    CHECK_MESH_REJECTS(bytes, modelHash, "non-manifold edge shared by three");
+}
+
+static void test_mesh_no_pins() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto fixture = make_cylinder(2, kClothVertexCount / 2);
+    std::fill(fixture.pins.begin(), fixture.pins.end(), 0u);
+    auto bytes = make_mesh_bytes(modelHash, fixture);
+    CHECK_MESH_REJECTS(bytes, modelHash, "no pinned vertices");
+}
+
+static void test_mesh_all_pinned() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto fixture = make_cylinder(2, kClothVertexCount / 2);
+    std::fill(fixture.pins.begin(), fixture.pins.end(), 1u);
+    auto bytes = make_mesh_bytes(modelHash, fixture);
+    CHECK_MESH_REJECTS(bytes, modelHash, "every vertex is pinned");
+}
+
+static void test_mesh_nonfinite_position() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    mesh_patch_f32(bytes, "positions", 5, std::numeric_limits<float>::quiet_NaN());
+    CHECK_MESH_REJECTS(bytes, modelHash, "nonfinite vertex position");
+}
+
+static void test_mesh_nonpositive_mass() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    mesh_patch_f32(bytes, "vertex_mass", 3, 0.0f);
+    CHECK_MESH_REJECTS(bytes, modelHash, "mass must be positive");
+}
+
+static void test_mesh_pin_mask_not_boolean() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    mesh_patch_u32(bytes, "pin_mask", 0, 2);
+    CHECK_MESH_REJECTS(bytes, modelHash, "pin_mask must be 0 or 1");
+}
+
+// Every derived count in `info` is re-derived by the parser, so a hand-edited
+// header cannot make a mesh claim a structure it does not have.
+static void test_mesh_info_disagrees_with_payload() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    struct Edit { size_t word; uint32_t value; const char* reason; };
+    const Edit edits[] = {
+        { 3, 7u,  "boundaryEdges disagrees" },
+        { 4, 9u,  "boundaryLoops disagrees" },
+        { 5, 8u,  "maxTriangleValence disagrees" },
+        { 6, 11u, "pinned vertex count disagrees" },
+        { 7, 1u,  "reserved info word is not zero" },
+    };
+    for (const Edit& edit : edits) {
+        auto bytes = make_mesh_bytes(modelHash);
+        mesh_patch_u32(bytes, "info", edit.word, edit.value);
+        CHECK_MESH_REJECTS(bytes, modelHash, edit.reason);
+    }
+}
+
+static void test_mesh_edges_not_ascending() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    const size_t base = mesh_section_offset(bytes, "edges");
+    const uint32_t a0 = read_le32(bytes, base), b0 = read_le32(bytes, base + 4);
+    const uint32_t a1 = read_le32(bytes, base + 8), b1 = read_le32(bytes, base + 12);
+    write_le32(bytes, base, a1);
+    write_le32(bytes, base + 4, b1);
+    write_le32(bytes, base + 8, a0);
+    write_le32(bytes, base + 12, b0);
+    mesh_reseal(bytes);
+    CHECK_MESH_REJECTS(bytes, modelHash, "not strictly ascending");
+}
+
+static void test_mesh_duplicate_section_name() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    // Section names live in the directory, not the payload, so no reseal is needed.
+    const size_t second = kSectionHeaderBytes + kSectionEntryBytes;
+    std::memset(bytes.data() + second, 0, kSectionNameBytes);
+    std::memcpy(bytes.data() + second, "info", 4);
+    CHECK_MESH_REJECTS(bytes, modelHash, "duplicate section name");
+}
+
+static void test_mesh_section_out_of_bounds() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    const size_t entry = kSectionHeaderBytes + kSectionEntryBytes;
+    write_le32(bytes, entry + kSectionNameBytes + 8, 0xffffffu); // absurd count
+    CHECK_MESH_REJECTS(bytes, modelHash, "extends past the end");
+}
+
+static void test_mesh_edge_csr_bad_neighbour() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    // A neighbour that is in range but is not an edge of the mesh.
+    mesh_patch_u32(bytes, "edge_csr_nbr", 0, kClothVertexCount - 1);
+    CHECK_MESH_REJECTS(bytes, modelHash, "not in the edge list");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -661,6 +977,28 @@ int main() {
     RUN(test_clip_bad_local_float_count);
     RUN(test_clip_multi_frame);
     RUN(test_clip_zero_frames);
+
+    std::cerr << "\n=== Mesh parser tests ===\n";
+    RUN(test_mesh_valid);
+    RUN(test_mesh_bad_magic);
+    RUN(test_mesh_bad_version);
+    RUN(test_mesh_bad_model_hash);
+    RUN(test_mesh_payload_tamper);
+    RUN(test_mesh_truncated);
+    RUN(test_mesh_wrong_vertex_count);
+    RUN(test_mesh_triangle_index_out_of_range);
+    RUN(test_mesh_degenerate_triangle);
+    RUN(test_mesh_non_manifold_edge);
+    RUN(test_mesh_no_pins);
+    RUN(test_mesh_all_pinned);
+    RUN(test_mesh_nonfinite_position);
+    RUN(test_mesh_nonpositive_mass);
+    RUN(test_mesh_pin_mask_not_boolean);
+    RUN(test_mesh_info_disagrees_with_payload);
+    RUN(test_mesh_edges_not_ascending);
+    RUN(test_mesh_duplicate_section_name);
+    RUN(test_mesh_section_out_of_bounds);
+    RUN(test_mesh_edge_csr_bad_neighbour);
 
     std::cerr << "\n=== Integration tests ===\n";
     RUN(test_model_clip_integration);

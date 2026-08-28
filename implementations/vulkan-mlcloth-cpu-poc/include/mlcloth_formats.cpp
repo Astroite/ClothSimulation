@@ -388,7 +388,10 @@ bool parse_model(const uint8_t* data, size_t len, ModelInfo& out, std::string& e
         return false;
     }
     out.vertices = (out.drivenFeatureLen - out.pcaDim) / 3;
-    if (out.vertices != 5294) { err = "model: derived vertex count != 5294"; return false; }
+    if (out.vertices != static_cast<int>(kClothVertexCount)) {
+        err = "model: derived vertex count != " + std::to_string(kClothVertexCount);
+        return false;
+    }
     {
         const char* p = json;
         if (find_key(p, jsonEnd, "vertexCount")) {
@@ -537,6 +540,331 @@ bool parse_clip(const uint8_t* data, size_t len,
 }
 
 // ===========================================================================
+// Mesh parser
+// ===========================================================================
+
+namespace {
+
+static inline uint64_t le64(const uint8_t* p) {
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; --i) v = (v << 8) | uint64_t(p[i]);
+    return v;
+}
+
+static inline void put_le64(uint8_t* p, uint64_t v) {
+    for (int i = 0; i < 8; ++i) p[i] = uint8_t(v >> (8 * i));
+}
+
+static inline size_t align_up(size_t value, size_t alignment) {
+    return (value + alignment - 1) / alignment * alignment;
+}
+
+struct SectionSpan {
+    std::string name;
+    uint64_t offset{};
+    uint32_t count{};
+    uint32_t stride{};
+};
+
+// Everything the sectioned container guarantees, independent of what the sections mean.
+// Extracted from `parse_mesh` rather than copied for `parse_capsules`: this is the layer that
+// decides whether a file is trustworthy at all, and two copies of it would be two places for
+// a bounds check to go missing. `label` only shapes the messages, so a caller still gets to
+// say which format was rejected.
+static bool parse_container(const uint8_t* data, size_t len,
+                            const char* magic, const char* label, uint32_t expectedVersion,
+                            const Sha256Digest& expectedSourceHash,
+                            std::vector<SectionSpan>& spans,
+                            Sha256Digest& payloadSha, Sha256Digest& sourceSha,
+                            std::string& err) {
+    const std::string tag = std::string(label) + ": ";
+    if (len < kSectionHeaderBytes) { err = tag + "truncated header"; return false; }
+    if (std::memcmp(data, magic, kMagicLen) != 0) { err = tag + "bad magic"; return false; }
+
+    const uint32_t version = le32(data + 8);
+    const uint32_t sectionCount = le32(data + 12);
+    const uint64_t fileBytes = le64(data + 16);
+    const uint64_t payloadOffset = le64(data + 24);
+    std::memcpy(payloadSha.bytes.data(), data + 32, 32);
+    std::memcpy(sourceSha.bytes.data(), data + 64, 32);
+
+    // Names the required version rather than saying "unexpected": the caller supplies it, so a
+    // generic message would drop the one piece of information the reader needs.
+    if (version != expectedVersion) { err = tag + "version != " + std::to_string(expectedVersion); return false; }
+    if (fileBytes != len) { err = tag + "fileBytes does not match the file length"; return false; }
+    if (sectionCount == 0 || sectionCount > 64) { err = tag + "implausible section count"; return false; }
+    const size_t directoryBytes = kSectionHeaderBytes + kSectionEntryBytes * size_t(sectionCount);
+    if (directoryBytes > len) { err = tag + "section directory is truncated"; return false; }
+    if (payloadOffset != align_up(directoryBytes, kSectionAlignment)) {
+        err = tag + "payloadOffset does not follow the section directory";
+        return false;
+    }
+    if (payloadOffset > len) { err = tag + "payloadOffset is past the end"; return false; }
+    if (sourceSha != expectedSourceHash) { err = tag + "model hash mismatch"; return false; }
+    if (sha256(data + payloadOffset, len - size_t(payloadOffset)) != payloadSha) {
+        err = tag + "payload hash mismatch";
+        return false;
+    }
+
+    spans.assign(sectionCount, SectionSpan{});
+    for (uint32_t i = 0; i < sectionCount; ++i) {
+        const uint8_t* entry = data + kSectionHeaderBytes + kSectionEntryBytes * size_t(i);
+        size_t nameLen = 0;
+        while (nameLen < kSectionNameBytes && entry[nameLen] != 0) ++nameLen;
+        if (nameLen == 0 || nameLen == kSectionNameBytes) { err = tag + "section name is empty or unterminated"; return false; }
+        for (size_t j = 0; j < nameLen; ++j) {
+            const uint8_t c = entry[j];
+            if (c < 0x21 || c > 0x7e) { err = tag + "section name is not printable ASCII"; return false; }
+        }
+        for (size_t j = nameLen; j < kSectionNameBytes; ++j) {
+            if (entry[j] != 0) { err = tag + "section name has trailing bytes after its NUL"; return false; }
+        }
+        spans[i].name.assign(reinterpret_cast<const char*>(entry), nameLen);
+        spans[i].offset = le64(entry + kSectionNameBytes);
+        spans[i].count = le32(entry + kSectionNameBytes + 8);
+        spans[i].stride = le32(entry + kSectionNameBytes + 12);
+        if (spans[i].stride == 0 || spans[i].stride % 4 != 0) { err = tag + "section stride must be a non-zero multiple of 4"; return false; }
+        if (spans[i].offset % kSectionAlignment != 0) { err = tag + "section is not 16-byte aligned"; return false; }
+        if (spans[i].offset < payloadOffset || spans[i].offset > len) { err = tag + "section starts outside the payload"; return false; }
+        const uint64_t bytes = uint64_t(spans[i].count) * spans[i].stride;
+        if (bytes > uint64_t(len) - spans[i].offset) { err = tag + "section extends past the end"; return false; }
+    }
+    for (uint32_t i = 0; i < sectionCount; ++i) {
+        for (uint32_t j = i + 1; j < sectionCount; ++j) {
+            if (spans[i].name == spans[j].name) { err = tag + "duplicate section name " + spans[i].name; return false; }
+            const uint64_t ai = spans[i].offset, bi = ai + uint64_t(spans[i].count) * spans[i].stride;
+            const uint64_t aj = spans[j].offset, bj = aj + uint64_t(spans[j].count) * spans[j].stride;
+            if (ai < bj && aj < bi) { err = tag + "sections " + spans[i].name + " and " + spans[j].name + " overlap"; return false; }
+        }
+    }
+    return true;
+}
+
+// Locate one section and require its exact shape, so a wrong count or stride is a rejection
+// rather than a reinterpretation.
+static bool find_section(const uint8_t* data, const std::vector<SectionSpan>& spans,
+                         const char* label, const char* name,
+                         uint32_t count, uint32_t stride,
+                         const uint8_t*& base, std::string& err) {
+    for (const SectionSpan& span : spans) {
+        if (span.name != name) continue;
+        if (span.count != count) {
+            err = std::string(label) + ": section " + name + " count is " + std::to_string(span.count)
+                + ", expected " + std::to_string(count);
+            return false;
+        }
+        if (span.stride != stride) {
+            err = std::string(label) + ": section " + name + " stride is " + std::to_string(span.stride)
+                + ", expected " + std::to_string(stride);
+            return false;
+        }
+        base = data + span.offset;
+        return true;
+    }
+    err = std::string(label) + ": missing required section " + name;
+    return false;
+}
+
+// Disjoint-set over vertices, used to count boundary loops as the connected
+// components of the boundary-edge graph.
+struct DisjointSet {
+    std::vector<uint32_t> parent;
+    explicit DisjointSet(uint32_t n) : parent(n) {
+        for (uint32_t i = 0; i < n; ++i) parent[i] = i;
+    }
+    uint32_t find(uint32_t x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    }
+    void unite(uint32_t a, uint32_t b) {
+        const uint32_t ra = find(a), rb = find(b);
+        if (ra != rb) parent[ra] = rb;
+    }
+};
+
+// Locate an undirected edge in the strictly-ascending `edges` array.
+// Returns the edge index, or UINT32_MAX when absent.
+uint32_t find_edge(const uint32_t* edges, uint32_t edgeCount, uint32_t a, uint32_t b) {
+    if (a > b) { const uint32_t t = a; a = b; b = t; }
+    uint32_t lo = 0, hi = edgeCount;
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        const uint32_t ea = edges[2 * mid], eb = edges[2 * mid + 1];
+        if (ea < a || (ea == a && eb < b)) lo = mid + 1; else hi = mid;
+    }
+    if (lo < edgeCount && edges[2 * lo] == a && edges[2 * lo + 1] == b) return lo;
+    return std::numeric_limits<uint32_t>::max();
+}
+
+} // anonymous namespace
+
+bool parse_mesh(const uint8_t* data, size_t len,
+                const Sha256Digest& expectedModelHash,
+                MeshInfo& out, std::string& err) {
+    std::vector<SectionSpan> spans;
+    if (!parse_container(data, len, "MLMSH001", "mesh", kMeshVersion, expectedModelHash,
+                         spans, out.payloadSha256, out.modelSha256, err)) {
+        return false;
+    }
+
+    auto section = [&](const char* name, uint32_t count, uint32_t stride, const uint8_t*& base) -> bool {
+        return find_section(data, spans, "mesh", name, count, stride, base, err);
+    };
+
+    const uint8_t* infoBytes = nullptr;
+    if (!section("info", 8, 4, infoBytes)) return false;
+    out.vertices           = le32(infoBytes + 0);
+    out.triangles          = le32(infoBytes + 4);
+    out.edges              = le32(infoBytes + 8);
+    out.boundaryEdges      = le32(infoBytes + 12);
+    out.boundaryLoops      = le32(infoBytes + 16);
+    out.maxTriangleValence = le32(infoBytes + 20);
+    out.pinnedVertices     = le32(infoBytes + 24);
+    if (le32(infoBytes + 28) != 0) { err = "mesh: reserved info word is not zero"; return false; }
+
+    const uint32_t V = out.vertices, T = out.triangles, E = out.edges;
+    if (V != kClothVertexCount) {
+        err = "mesh: vertex count is " + std::to_string(V) + ", expected " + std::to_string(kClothVertexCount);
+        return false;
+    }
+    if (T == 0 || E == 0) { err = "mesh: mesh has no triangles or no edges"; return false; }
+    constexpr uint32_t kMax = std::numeric_limits<uint32_t>::max();
+    if (T > kMax / 3 || E > kMax / 2) { err = "mesh: triangle or edge count overflows"; return false; }
+
+    const uint8_t* positions = nullptr; const uint8_t* triangles = nullptr;
+    const uint8_t* edges = nullptr; const uint8_t* edgeOffs = nullptr; const uint8_t* edgeNbr = nullptr;
+    const uint8_t* triOffs = nullptr; const uint8_t* triIdx = nullptr;
+    const uint8_t* mass = nullptr; const uint8_t* pins = nullptr;
+    if (!section("positions", V, 12, positions)) return false;
+    if (!section("triangles", T, 12, triangles)) return false;
+    if (!section("edges", E, 8, edges)) return false;
+    if (!section("edge_csr_offs", V + 1, 4, edgeOffs)) return false;
+    if (!section("edge_csr_nbr", 2 * E, 4, edgeNbr)) return false;
+    if (!section("tri_csr_offs", V + 1, 4, triOffs)) return false;
+    if (!section("tri_csr_idx", 3 * T, 4, triIdx)) return false;
+    if (!section("vertex_mass", V, 4, mass)) return false;
+    if (!section("pin_mask", V, 4, pins)) return false;
+
+    out.positionsCm         = reinterpret_cast<const float*>(positions);
+    out.triangleIndices     = reinterpret_cast<const uint32_t*>(triangles);
+    out.edgePairs           = reinterpret_cast<const uint32_t*>(edges);
+    out.edgeCsrOffsets      = reinterpret_cast<const uint32_t*>(edgeOffs);
+    out.edgeCsrNeighbours   = reinterpret_cast<const uint32_t*>(edgeNbr);
+    out.triangleCsrOffsets  = reinterpret_cast<const uint32_t*>(triOffs);
+    out.triangleCsrIndices  = reinterpret_cast<const uint32_t*>(triIdx);
+    out.vertexMassKg        = reinterpret_cast<const float*>(mass);
+    out.pinMask             = reinterpret_cast<const uint32_t*>(pins);
+
+    if (!all_finite(out.positionsCm, size_t(V) * 3)) { err = "mesh: nonfinite vertex position"; return false; }
+    if (!all_finite(out.vertexMassKg, V)) { err = "mesh: nonfinite vertex mass"; return false; }
+    for (uint32_t v = 0; v < V; ++v) {
+        if (!(out.vertexMassKg[v] > 0.0f)) { err = "mesh: vertex mass must be positive"; return false; }
+    }
+
+    uint32_t pinned = 0;
+    for (uint32_t v = 0; v < V; ++v) {
+        const uint32_t flag = out.pinMask[v];
+        if (flag > 1) { err = "mesh: pin_mask must be 0 or 1"; return false; }
+        pinned += flag;
+    }
+    if (pinned != out.pinnedVertices) { err = "mesh: pinned vertex count disagrees with pin_mask"; return false; }
+    // An entirely free garment has no kinematic anchor, so the solver would let it
+    // fall away from the body forever. That is a bake mistake, not a valid asset.
+    if (pinned == 0) { err = "mesh: no pinned vertices"; return false; }
+    if (pinned == V) { err = "mesh: every vertex is pinned"; return false; }
+
+    // Triangles: in range, and no repeated corner (a repeated corner has zero area
+    // for every configuration, so its area constraint and normal are meaningless).
+    for (uint32_t t = 0; t < T; ++t) {
+        const uint32_t a = out.triangleIndices[3 * t], b = out.triangleIndices[3 * t + 1], c = out.triangleIndices[3 * t + 2];
+        if (a >= V || b >= V || c >= V) { err = "mesh: triangle index out of range"; return false; }
+        if (a == b || b == c || a == c) { err = "mesh: degenerate triangle with a repeated corner"; return false; }
+    }
+
+    // Edges: a < b, in range, and strictly ascending so duplicates are impossible.
+    for (uint32_t e = 0; e < E; ++e) {
+        const uint32_t a = out.edgePairs[2 * e], b = out.edgePairs[2 * e + 1];
+        if (a >= b || b >= V) { err = "mesh: edge is not an ordered in-range pair"; return false; }
+        if (e > 0) {
+            const uint32_t pa = out.edgePairs[2 * e - 2], pb = out.edgePairs[2 * e - 1];
+            if (pa > a || (pa == a && pb >= b)) { err = "mesh: edges are not strictly ascending"; return false; }
+        }
+    }
+
+    // Both CSRs: zero-based, monotonic, exact total, in-range entries.
+    auto checkCsr = [&](const uint32_t* offsets, const uint32_t* values, uint32_t total, uint32_t limit,
+                        const char* label, uint32_t& maximumRun) -> bool {
+        if (offsets[0] != 0) { err = std::string("mesh: ") + label + " CSR does not start at zero"; return false; }
+        if (offsets[V] != total) { err = std::string("mesh: ") + label + " CSR total is wrong"; return false; }
+        maximumRun = 0;
+        for (uint32_t v = 0; v < V; ++v) {
+            if (offsets[v + 1] < offsets[v]) { err = std::string("mesh: ") + label + " CSR offsets are not monotonic"; return false; }
+            maximumRun = std::max(maximumRun, offsets[v + 1] - offsets[v]);
+        }
+        for (uint32_t i = 0; i < total; ++i) {
+            if (values[i] >= limit) { err = std::string("mesh: ") + label + " CSR entry out of range"; return false; }
+        }
+        return true;
+    };
+    uint32_t maximumDegree = 0, maximumValence = 0;
+    if (!checkCsr(out.edgeCsrOffsets, out.edgeCsrNeighbours, 2 * E, V, "edge", maximumDegree)) return false;
+    if (!checkCsr(out.triangleCsrOffsets, out.triangleCsrIndices, 3 * T, T, "triangle", maximumValence)) return false;
+    if (maximumValence != out.maxTriangleValence) { err = "mesh: maxTriangleValence disagrees with the triangle CSR"; return false; }
+    for (uint32_t v = 0; v < V; ++v) {
+        for (uint32_t i = out.edgeCsrOffsets[v]; i < out.edgeCsrOffsets[v + 1]; ++i) {
+            if (out.edgeCsrNeighbours[i] == v) { err = "mesh: edge CSR contains a self neighbour"; return false; }
+            if (find_edge(out.edgePairs, E, v, out.edgeCsrNeighbours[i]) == kMax) {
+                err = "mesh: edge CSR names a pair that is not in the edge list";
+                return false;
+            }
+        }
+    }
+
+    // Manifoldness and coverage in one pass: every triangle edge must be in the
+    // edge list, and every edge must carry one or two triangles. This also proves
+    // the edge list is exactly the triangle edge set rather than merely a subset,
+    // which is what makes it safe for the constraint baker to use either one.
+    std::vector<uint8_t> edgeUse(E, 0);
+    for (uint32_t t = 0; t < T; ++t) {
+        const uint32_t corner[3] = { out.triangleIndices[3 * t], out.triangleIndices[3 * t + 1], out.triangleIndices[3 * t + 2] };
+        for (uint32_t k = 0; k < 3; ++k) {
+            const uint32_t index = find_edge(out.edgePairs, E, corner[k], corner[(k + 1) % 3]);
+            if (index == kMax) { err = "mesh: a triangle edge is missing from the edge list"; return false; }
+            if (edgeUse[index] >= 2) { err = "mesh: non-manifold edge shared by three or more triangles"; return false; }
+            ++edgeUse[index];
+        }
+    }
+    uint32_t boundaryEdges = 0;
+    std::vector<uint32_t> boundaryDegree(V, 0);
+    for (uint32_t e = 0; e < E; ++e) {
+        if (edgeUse[e] == 0) { err = "mesh: edge list contains an edge no triangle uses"; return false; }
+        if (edgeUse[e] == 1) {
+            ++boundaryEdges;
+            ++boundaryDegree[out.edgePairs[2 * e]];
+            ++boundaryDegree[out.edgePairs[2 * e + 1]];
+        }
+    }
+    if (boundaryEdges != out.boundaryEdges) { err = "mesh: boundaryEdges disagrees with the triangle adjacency"; return false; }
+    // On a manifold-with-boundary every boundary vertex sits on exactly two
+    // boundary edges, which is what makes "the highest boundary loop" a
+    // well-defined pin rule rather than a heuristic over a branching curve.
+    for (uint32_t v = 0; v < V; ++v) {
+        if (boundaryDegree[v] != 0 && boundaryDegree[v] != 2) { err = "mesh: boundary is non-manifold at a vertex"; return false; }
+    }
+    DisjointSet loops(V);
+    for (uint32_t e = 0; e < E; ++e) {
+        if (edgeUse[e] == 1) loops.unite(out.edgePairs[2 * e], out.edgePairs[2 * e + 1]);
+    }
+    uint32_t loopCount = 0;
+    for (uint32_t v = 0; v < V; ++v) {
+        if (boundaryDegree[v] != 0 && loops.find(v) == v) ++loopCount;
+    }
+    if (loopCount != out.boundaryLoops) { err = "mesh: boundaryLoops disagrees with the boundary edge graph"; return false; }
+
+    return true;
+}
+
+// ===========================================================================
 // Writers (test fixture generation)
 // ===========================================================================
 
@@ -631,6 +959,244 @@ std::vector<uint8_t> write_clip(uint32_t frameCount,
     std::memcpy(buf.data() + 112, payloadHash.bytes.data(), 32);
 
     return buf;
+}
+
+namespace {
+
+struct MeshSection {
+    const char* name;
+    uint32_t count;
+    uint32_t stride;
+    std::vector<uint8_t> data;
+};
+
+// Mirror of real_scene/formats.py::write_sectioned, so a file produced here and
+// one produced by the Python baker are byte-identical for identical sections.
+std::vector<uint8_t> pack_sections(const char* magic, uint32_t version,
+                                   const Sha256Digest& sourceHash,
+                                   const std::vector<MeshSection>& sections) {
+    const size_t directoryBytes = kSectionHeaderBytes + kSectionEntryBytes * sections.size();
+    const size_t payloadOffset = align_up(directoryBytes, kSectionAlignment);
+    std::vector<uint8_t> out(payloadOffset, 0);
+    std::vector<uint64_t> offsets(sections.size());
+    for (size_t i = 0; i < sections.size(); ++i) {
+        const size_t aligned = align_up(out.size(), kSectionAlignment);
+        out.resize(aligned, 0);
+        offsets[i] = aligned;
+        out.insert(out.end(), sections[i].data.begin(), sections[i].data.end());
+    }
+    const Sha256Digest payloadHash = sha256(out.data() + payloadOffset, out.size() - payloadOffset);
+    std::memcpy(out.data(), magic, kMagicLen);
+    put_le32(out.data() + 8, version);
+    put_le32(out.data() + 12, static_cast<uint32_t>(sections.size()));
+    put_le64(out.data() + 16, static_cast<uint64_t>(out.size()));
+    put_le64(out.data() + 24, static_cast<uint64_t>(payloadOffset));
+    std::memcpy(out.data() + 32, payloadHash.bytes.data(), 32);
+    std::memcpy(out.data() + 64, sourceHash.bytes.data(), 32);
+    for (size_t i = 0; i < sections.size(); ++i) {
+        uint8_t* entry = out.data() + kSectionHeaderBytes + kSectionEntryBytes * i;
+        const size_t nameLen = std::strlen(sections[i].name);
+        std::memcpy(entry, sections[i].name, nameLen);
+        put_le64(entry + kSectionNameBytes, offsets[i]);
+        put_le32(entry + kSectionNameBytes + 8, sections[i].count);
+        put_le32(entry + kSectionNameBytes + 12, sections[i].stride);
+    }
+    return out;
+}
+
+std::vector<uint8_t> pack_u32(const std::vector<uint32_t>& values) {
+    std::vector<uint8_t> bytes(values.size() * 4);
+    for (size_t i = 0; i < values.size(); ++i) put_le32(bytes.data() + 4 * i, values[i]);
+    return bytes;
+}
+
+std::vector<uint8_t> pack_f32(const std::vector<float>& values) {
+    std::vector<uint8_t> bytes(values.size() * 4);
+    if (!values.empty()) std::memcpy(bytes.data(), values.data(), bytes.size());
+    return bytes;
+}
+
+} // anonymous namespace
+
+std::vector<uint8_t> write_mesh(const Sha256Digest& modelHash,
+                                 const std::vector<float>& positionsCm,
+                                 const std::vector<uint32_t>& triangleIndices,
+                                 const std::vector<float>& vertexMassKg,
+                                 const std::vector<uint32_t>& pinMask,
+                                 std::string& err) {
+    err.clear();
+    if (positionsCm.empty() || positionsCm.size() % 3 != 0) { err = "write_mesh: positions must be a non-empty multiple of three"; return {}; }
+    const size_t vertexCount = positionsCm.size() / 3;
+    if (vertexCount > std::numeric_limits<uint32_t>::max()) { err = "write_mesh: too many vertices"; return {}; }
+    const uint32_t V = static_cast<uint32_t>(vertexCount);
+    if (vertexMassKg.size() != vertexCount || pinMask.size() != vertexCount) { err = "write_mesh: mass/pin arrays must be per-vertex"; return {}; }
+    if (triangleIndices.empty() || triangleIndices.size() % 3 != 0) { err = "write_mesh: triangles must be a non-empty multiple of three"; return {}; }
+    const uint32_t T = static_cast<uint32_t>(triangleIndices.size() / 3);
+    for (size_t i = 0; i < triangleIndices.size(); ++i) {
+        if (triangleIndices[i] >= V) { err = "write_mesh: triangle index out of range"; return {}; }
+    }
+
+    // Undirected edges with their triangle-use counts, from one sorted key array.
+    // Counts above two are deliberately NOT rejected here: this writer exists so
+    // the tests can build files that parse_mesh must refuse, and a
+    // three-triangle edge is one of those cases.
+    std::vector<uint64_t> keys;
+    keys.reserve(size_t(T) * 3);
+    for (uint32_t t = 0; t < T; ++t) {
+        const uint32_t corner[3] = { triangleIndices[3 * t], triangleIndices[3 * t + 1], triangleIndices[3 * t + 2] };
+        for (uint32_t k = 0; k < 3; ++k) {
+            uint32_t a = corner[k], b = corner[(k + 1) % 3];
+            if (a == b) { err = "write_mesh: degenerate triangle with a repeated corner"; return {}; }
+            if (a > b) { const uint32_t s = a; a = b; b = s; }
+            keys.push_back((uint64_t(a) << 32) | uint64_t(b));
+        }
+    }
+    std::sort(keys.begin(), keys.end());
+    std::vector<uint32_t> edgePairs, edgeUse;
+    for (size_t i = 0; i < keys.size();) {
+        size_t j = i;
+        while (j < keys.size() && keys[j] == keys[i]) ++j;
+        edgePairs.push_back(static_cast<uint32_t>(keys[i] >> 32));
+        edgePairs.push_back(static_cast<uint32_t>(keys[i] & 0xffffffffull));
+        edgeUse.push_back(static_cast<uint32_t>(j - i));
+        i = j;
+    }
+    const uint32_t E = static_cast<uint32_t>(edgeUse.size());
+
+    // Directed neighbour CSR. Sorting the (from, to) keys keeps every vertex's
+    // neighbour run ascending, which is what parse_mesh's monotonicity and
+    // membership checks expect.
+    std::vector<uint64_t> directed;
+    directed.reserve(size_t(E) * 2);
+    for (uint32_t e = 0; e < E; ++e) {
+        const uint64_t a = edgePairs[2 * e], b = edgePairs[2 * e + 1];
+        directed.push_back((a << 32) | b);
+        directed.push_back((b << 32) | a);
+    }
+    std::sort(directed.begin(), directed.end());
+    std::vector<uint32_t> edgeOffsets(size_t(V) + 1, 0), edgeNeighbours(directed.size());
+    for (size_t i = 0; i < directed.size(); ++i) {
+        edgeNeighbours[i] = static_cast<uint32_t>(directed[i] & 0xffffffffull);
+        ++edgeOffsets[static_cast<size_t>(directed[i] >> 32) + 1];
+    }
+    for (uint32_t v = 0; v < V; ++v) edgeOffsets[size_t(v) + 1] += edgeOffsets[v];
+
+    // Incident-triangle CSR, built the same way.
+    std::vector<uint64_t> incident;
+    incident.reserve(size_t(T) * 3);
+    for (uint32_t t = 0; t < T; ++t) {
+        for (uint32_t k = 0; k < 3; ++k) {
+            incident.push_back((uint64_t(triangleIndices[3 * t + k]) << 32) | uint64_t(t));
+        }
+    }
+    std::sort(incident.begin(), incident.end());
+    std::vector<uint32_t> triOffsets(size_t(V) + 1, 0), triIndices(incident.size());
+    for (size_t i = 0; i < incident.size(); ++i) {
+        triIndices[i] = static_cast<uint32_t>(incident[i] & 0xffffffffull);
+        ++triOffsets[static_cast<size_t>(incident[i] >> 32) + 1];
+    }
+    for (uint32_t v = 0; v < V; ++v) triOffsets[size_t(v) + 1] += triOffsets[v];
+    uint32_t maximumValence = 0;
+    for (uint32_t v = 0; v < V; ++v) maximumValence = std::max(maximumValence, triOffsets[size_t(v) + 1] - triOffsets[v]);
+
+    // Boundary edges, and loops as the components of the boundary edge graph --
+    // the same derivation parse_mesh re-runs, so the two must agree.
+    uint32_t boundaryEdges = 0;
+    std::vector<uint32_t> boundaryDegree(V, 0);
+    DisjointSet loops(V);
+    for (uint32_t e = 0; e < E; ++e) {
+        if (edgeUse[e] != 1) continue;
+        ++boundaryEdges;
+        ++boundaryDegree[edgePairs[2 * e]];
+        ++boundaryDegree[edgePairs[2 * e + 1]];
+        loops.unite(edgePairs[2 * e], edgePairs[2 * e + 1]);
+    }
+    uint32_t boundaryLoops = 0;
+    for (uint32_t v = 0; v < V; ++v) {
+        if (boundaryDegree[v] != 0 && loops.find(v) == v) ++boundaryLoops;
+    }
+    uint32_t pinned = 0;
+    for (uint32_t v = 0; v < V; ++v) pinned += (pinMask[v] != 0 ? 1u : 0u);
+
+    const std::vector<uint32_t> info = { V, T, E, boundaryEdges, boundaryLoops, maximumValence, pinned, 0u };
+    std::vector<MeshSection> sections = {
+        { "info",          8,         4,  pack_u32(info) },
+        { "positions",     V,         12, pack_f32(positionsCm) },
+        { "triangles",     T,         12, pack_u32(triangleIndices) },
+        { "edges",         E,         8,  pack_u32(edgePairs) },
+        { "edge_csr_offs", V + 1,     4,  pack_u32(edgeOffsets) },
+        { "edge_csr_nbr",  2 * E,     4,  pack_u32(edgeNeighbours) },
+        { "tri_csr_offs",  V + 1,     4,  pack_u32(triOffsets) },
+        { "tri_csr_idx",   3 * T,     4,  pack_u32(triIndices) },
+        { "vertex_mass",   V,         4,  pack_f32(vertexMassKg) },
+        { "pin_mask",      V,         4,  pack_u32(pinMask) },
+    };
+    return pack_sections("MLMSH001", kMeshVersion, modelHash, sections);
+}
+
+bool parse_capsules(const uint8_t* data, size_t len,
+                    const Sha256Digest& expectedModelHash,
+                    CapsuleInfo& out, std::string& err) {
+    std::vector<SectionSpan> spans;
+    if (!parse_container(data, len, "MLCAP001", "capsules", kCapsuleVersion, expectedModelHash,
+                         spans, out.payloadSha256, out.modelSha256, err)) {
+        return false;
+    }
+
+    const uint8_t* infoBytes = nullptr;
+    if (!find_section(data, spans, "capsules", "info", 4, 4, infoBytes, err)) return false;
+    out.count = le32(infoBytes + 0);
+    out.driverCount = le32(infoBytes + 4);
+    if (out.count == 0 || out.count > 256) { err = "capsules: implausible capsule count"; return false; }
+    if (out.driverCount != kDriverCount) { err = "capsules: driverCount != 45"; return false; }
+
+    const uint8_t* driverBytes = nullptr;
+    const uint8_t* centreBytes = nullptr;
+    const uint8_t* axisBytes = nullptr;
+    const uint8_t* sizeBytes = nullptr;
+    if (!find_section(data, spans, "capsules", "driver", out.count, 4, driverBytes, err)) return false;
+    if (!find_section(data, spans, "capsules", "center", out.count, 12, centreBytes, err)) return false;
+    if (!find_section(data, spans, "capsules", "axis", out.count, 12, axisBytes, err)) return false;
+    if (!find_section(data, spans, "capsules", "size", out.count, 8, sizeBytes, err)) return false;
+
+    out.driverIndices = reinterpret_cast<const uint32_t*>(driverBytes);
+    out.centresCm = reinterpret_cast<const float*>(centreBytes);
+    out.axes = reinterpret_cast<const float*>(axisBytes);
+    out.sizesCm = reinterpret_cast<const float*>(sizeBytes);
+
+    for (uint32_t i = 0; i < out.count; ++i) {
+        if (out.driverIndices[i] >= out.driverCount) {
+            err = "capsules: a capsule rides a bone outside the driver table";
+            return false;
+        }
+        for (int k = 0; k < 3; ++k) {
+            if (!std::isfinite(out.centresCm[3 * i + k]) || !std::isfinite(out.axes[3 * i + k])) {
+                err = "capsules: a centre or axis is not finite";
+                return false;
+            }
+        }
+        // A non-unit axis would silently shorten or stretch the segment, because the signed
+        // distance projects onto it without normalising. Checked rather than normalised here:
+        // the bake writes unit axes, so a non-unit one means the file is not what it claims.
+        const float* a = out.axes + 3 * i;
+        const float norm = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+        if (!(std::fabs(norm - 1.0f) <= 1.0e-4f)) { err = "capsules: an axis is not unit length"; return false; }
+        const float radius = out.sizesCm[2 * i];
+        const float halfLength = out.sizesCm[2 * i + 1];
+        if (!(radius > 0.0f) || !std::isfinite(radius)) { err = "capsules: a radius is not positive and finite"; return false; }
+        if (!(halfLength >= 0.0f) || !std::isfinite(halfLength)) { err = "capsules: a half length is negative or not finite"; return false; }
+    }
+    // Distinct driver bones, because two capsules on one bone would be a bake that merged or
+    // duplicated geometry rather than the one-capsule-per-body layout this reads.
+    for (uint32_t i = 0; i < out.count; ++i) {
+        for (uint32_t j = i + 1; j < out.count; ++j) {
+            if (out.driverIndices[i] == out.driverIndices[j]) {
+                err = "capsules: two capsules share a driver bone";
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 } // namespace mlcloth
