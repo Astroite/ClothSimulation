@@ -386,11 +386,20 @@ def measure_loop_attachment(
     magnitude tracks how violent the motion is -- a dodge moves roughly three times as
     much as a run -- and a fixed centimetre threshold flips classification between clips
     while the normalised ordering does not.
+
+    The winning bone's per-vertex mean position in its own frame comes back as well. That
+    is the rigid bind the solver-only branch of the comparison drives its pins with, and it
+    falls out of the same computation: a least-squares bind over the reference motion rather
+    than a single frame's offset.
     """
     if not clip_dirs:
         return [], []
-    per_loop_worst = [0.0] * len(loops)
+    # Starts below zero so the first clip always populates the bone and the bind. At 0.0 a
+    # perfectly rigid loop -- normalised residual exactly 0 -- failed the `>` test on every
+    # clip and came out with bone index -1, which then read as a loop with no attachment.
+    per_loop_worst = [-1.0] * len(loops)
     best_bone = [-1] * len(loops)
+    best_local: list[list[list[float]]] = [[] for _ in loops]
     per_clip = []
 
     for clip_dir in clip_dirs:
@@ -422,7 +431,7 @@ def measure_loop_attachment(
 
         scores = []
         for loop_index, vertices in enumerate(loops):
-            best = (math.inf, -1)
+            best = (math.inf, -1, [])
             for bone in range(bone_count):
                 local = []
                 for frame_index, frame_points in world:
@@ -438,30 +447,40 @@ def measure_loop_attachment(
                     )
                 total = 0.0
                 count = len(local)
+                bone_means = []
                 for j in range(len(vertices)):
                     means = [sum(local[k][j][c] for k in range(count)) / count for c in range(3)]
                     variance = (
                         sum(sum((local[k][j][c] - means[c]) ** 2 for c in range(3)) for k in range(count)) / count
                     )
                     total += math.sqrt(variance)
+                    bone_means.append(means)
                 score = total / len(vertices)
                 if score < best[0]:
-                    best = (score, bone)
+                    # The means come along because they are the rigid bind: the vertex's mean
+                    # position in the frame that explains its motion best. Recomputing them
+                    # later from a single frame would give a different answer, and a worse one.
+                    best = (score, bone, bone_means)
             scores.append(best)
 
-        loosest = max(score for score, _bone in scores)
+        loosest = max(score for score, _bone, _means in scores)
         if loosest <= 0.0:
             fail(f"{clip_dir.name}: every boundary loop is perfectly rigid, so this clip carries no cloth motion")
-        normalised = [score / loosest for score, _bone in scores]
+        normalised = [score / loosest for score, _bone, _means in scores]
         per_clip.append({"clip": clip_dir.name, "normalised": [round(value, 6) for value in normalised]})
         for loop_index, value in enumerate(normalised):
             if value > per_loop_worst[loop_index]:
                 per_loop_worst[loop_index] = value
                 best_bone[loop_index] = scores[loop_index][1]
+                best_local[loop_index] = scores[loop_index][2]
 
     return (
         [
-            {"worst_normalised_residual": round(per_loop_worst[i], 6), "best_bone_index": best_bone[i]}
+            {
+                "worst_normalised_residual": round(per_loop_worst[i], 6),
+                "best_bone_index": best_bone[i],
+                "bone_local_cm": best_local[i],
+            }
             for i in range(len(loops))
         ],
         per_clip,
@@ -870,6 +889,34 @@ def main() -> int:
     for v in pinned:
         pin_mask[v] = 1
 
+    # Per pinned vertex, the driver bone it rides and its mean position in that bone's frame.
+    # This is what lets a branch with no network keep its anchor on the body: without it the
+    # only pin target available is the rest pose, which does not move, and a solver-only arm
+    # would be judged on an anchor error that has nothing to do with the solver. Written only
+    # when attachment was measured -- there is nothing to guess it from otherwise.
+    NO_DRIVER = 0xFFFFFFFF
+    pin_driver = [NO_DRIVER] * vertex_count
+    pin_local_cm = [0.0] * (vertex_count * 3)
+    if attachment:
+        for loop_index, vertices in enumerate(derived["loops"]):
+            if not loop_summary[loop_index]["pinned"]:
+                continue
+            record = attachment[loop_index]
+            bone = record["best_bone_index"]
+            local = record["bone_local_cm"]
+            if bone < 0 or len(local) != len(vertices):
+                fail(f"loop {loop_index} is pinned but carries no measured bind")
+            for slot, v in enumerate(vertices):
+                # Two loops sharing a vertex would be a pinch point, and the second write
+                # would silently overwrite the first bind with a different bone.
+                if pin_driver[v] != NO_DRIVER and pin_driver[v] != bone:
+                    fail(f"vertex {v} is on two pinned loops with different attachment bones")
+                pin_driver[v] = bone
+                pin_local_cm[3 * v : 3 * v + 3] = [float(c) for c in local[slot]]
+        bound = sum(1 for v in range(vertex_count) if pin_driver[v] != NO_DRIVER)
+        if bound != len(pinned):
+            fail(f"{bound} vertices carry a bind but {len(pinned)} are pinned")
+
     def u32(values) -> bytes:
         values = list(values)
         return struct.pack(f"<{len(values)}I", *values)
@@ -901,6 +948,9 @@ def main() -> int:
         Section("vertex_mass", vertex_count, 4, f32(mass)),
         Section("pin_mask", vertex_count, 4, u32(pin_mask)),
     ]
+    if attachment:
+        sections.append(Section("pin_driver", vertex_count, 4, u32(pin_driver)))
+        sections.append(Section("pin_local_cm", vertex_count, 12, f32(pin_local_cm)))
     written = write_sectioned(args.output.resolve(), MAGIC, VERSION, sections, source_sha256=model_sha256)
 
     edge_lengths = sorted(
@@ -958,6 +1008,20 @@ def main() -> int:
         "attachment_step": args.attachment_step,
         "attachment_thresholds": {"attached_below": args.attached_below, "free_above": args.free_above},
         "attachment_per_clip": attachment_per_clip,
+        # The rigid bind written into pin_driver / pin_local_cm, which is what a solver-only
+        # branch uses as its kinematic anchor. Absent when no reference clip was given.
+        "pin_bind": {
+            "written": bool(attachment),
+            "loops": [
+                {
+                    "loop": index,
+                    "bone_index": attachment[index]["best_bone_index"],
+                    "vertices": len(derived["loops"][index]),
+                }
+                for index in range(len(derived["loops"]))
+                if attachment and loop_summary[index]["pinned"]
+            ],
+        },
         "boundary_loop_summary": loop_summary,
         # Euler characteristic. A wrong edge derivation shows up here before it can
         # show up as a wrong constraint graph.

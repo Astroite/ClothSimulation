@@ -31,6 +31,7 @@ from pathlib import Path
 POC_ROOT = Path(__file__).resolve().parents[1]
 CONVERTER = POC_ROOT / "tools" / "bake_cloth_topology.py"
 CLOTH_VERTEX_COUNT = 5294
+DRIVER_COUNT = 45
 SECTION_HEADER = struct.Struct("<8sIIQQ32s32s")
 SECTION_ENTRY = struct.Struct("<16sQII")
 
@@ -272,6 +273,20 @@ def read_mlmesh(path: Path, expected_model_sha256: str) -> dict:
     check_equal(vertices - edges + triangles, 0, "Euler characteristic of an annulus")
     check_equal(max(tri_offsets[v + 1] - tri_offsets[v] for v in range(vertices)), max_valence, "max triangle valence")
 
+    # The pin bind is optional, so it is read only when present -- a bake with no reference
+    # clip has nothing to measure it from and writes neither section.
+    pin_driver = read("pin_driver", "I", 4) if "pin_driver" in sections else None
+    pin_local_cm = read("pin_local_cm", "f", 12) if "pin_local_cm" in sections else None
+    check_equal(pin_driver is None, pin_local_cm is None, "the two pin bind sections travel together")
+    if pin_driver is not None:
+        check_equal(len(pin_driver), vertices, "pin_driver length")
+        check_equal(len(pin_local_cm), vertices * 3, "pin_local_cm length")
+        bound = [v for v in range(vertices) if pin_driver[v] != 0xFFFFFFFF]
+        check_equal(len(bound), pinned, "every pinned vertex and only those carry a bind")
+        check(all(pin_mask[v] == 1 for v in bound), "no free vertex carries a driver")
+        check(all(pin_driver[v] < DRIVER_COUNT for v in bound), "every bind names a model driver")
+        check(all(math.isfinite(value) for value in pin_local_cm), "every bind offset is finite")
+
     return {
         "vertices": vertices,
         "triangles": triangles,
@@ -283,6 +298,8 @@ def read_mlmesh(path: Path, expected_model_sha256: str) -> dict:
         "pin_mask": pin_mask,
         "mass": mass,
         "positions": positions,
+        "pin_driver": pin_driver,
+        "pin_local_cm": pin_local_cm,
     }
 
 
@@ -452,6 +469,23 @@ def test_attachment_measurement_overrides_height(work: Path) -> None:
         pinned[0]["pinned_by_height_rule"] is False,
         "the report records that the height rule would have chosen differently",
     )
+
+    # The same measurement also produces the rigid bind the network-free comparison branch
+    # drives its pins with. Every bone in this fixture is a stationary identity and the
+    # attached ring never moves in bone 0's frame, so the bind must be bone 0 at the
+    # vertex's own rest position -- anything else means the offset was taken in the wrong
+    # frame, which is the failure that would place the anchor somewhere plausible but wrong.
+    check(mesh["pin_driver"] is not None, "the bake wrote the pin bind sections")
+    check(all(mesh["pin_driver"][v] == 0 for v in lower_ring), "the bind names bone 0")
+    worst = max(
+        abs(mesh["pin_local_cm"][3 * v + axis] - mesh["positions"][3 * v + axis])
+        for v in lower_ring
+        for axis in range(3)
+    )
+    check(worst < 1.0e-3, f"the bind offset reproduces the rest position (worst {worst:.2e} cm)")
+    check_equal(report["pin_bind"]["written"], True, "the report records that the bind was written")
+    check_equal(len(report["pin_bind"]["loops"]), 1, "one pinned loop is bound")
+    check_equal(report["pin_bind"]["loops"][0]["bone_index"], 0, "the report names bone 0")
 
 
 def test_missing_attachment_clips_warn(work: Path) -> None:

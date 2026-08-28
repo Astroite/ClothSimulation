@@ -648,6 +648,11 @@ struct MeshFixture {
     std::vector<uint32_t> triangles;
     std::vector<float> mass;
     std::vector<uint32_t> pins;
+    // Optional pin bind, empty by default so every existing test still writes a mesh
+    // without those sections -- which is also the shape a bake with no reference clip
+    // produces, so the absent case stays covered.
+    std::vector<uint32_t> pinDrivers;
+    std::vector<float> pinLocalCm;
 };
 
 static MeshFixture make_cylinder(uint32_t rows, uint32_t cols) {
@@ -676,9 +681,26 @@ static MeshFixture make_cylinder(uint32_t rows, uint32_t cols) {
 
 static std::vector<uint8_t> make_mesh_bytes(const Sha256Digest& modelHash, const MeshFixture& fixture) {
     std::string err;
-    auto bytes = write_mesh(modelHash, fixture.positions, fixture.triangles, fixture.mass, fixture.pins, err);
+    auto bytes = write_mesh(modelHash, fixture.positions, fixture.triangles, fixture.mass, fixture.pins, err,
+                            fixture.pinDrivers, fixture.pinLocalCm);
     if (bytes.empty()) std::cerr << "  (write_mesh refused the fixture: " << err << ")\n";
     return bytes;
+}
+
+// The same cylinder with every pinned vertex bound to a driver bone, which is what a bake
+// with reference clips produces. Driver 3 is arbitrary; what matters is that it is a valid
+// index and that free vertices carry kNoDriver.
+static MeshFixture make_bound_cylinder(uint32_t rows, uint32_t cols) {
+    MeshFixture fixture = make_cylinder(rows, cols);
+    const size_t vertices = fixture.pins.size();
+    fixture.pinDrivers.assign(vertices, kNoDriver);
+    fixture.pinLocalCm.assign(vertices * 3, 0.0f);
+    for (size_t v = 0; v < vertices; ++v) {
+        if (fixture.pins[v] == 0) continue;
+        fixture.pinDrivers[v] = 3u;
+        for (size_t axis = 0; axis < 3; ++axis) fixture.pinLocalCm[3 * v + axis] = fixture.positions[3 * v + axis];
+    }
+    return fixture;
 }
 
 static std::vector<uint8_t> make_mesh_bytes(const Sha256Digest& modelHash) {
@@ -931,6 +953,85 @@ static void test_mesh_edge_csr_bad_neighbour() {
 }
 
 // ---------------------------------------------------------------------------
+// Pin bind (optional sections)
+// ---------------------------------------------------------------------------
+
+static void test_mesh_without_pin_bind() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash);
+    MeshInfo info;
+    std::string err;
+    CHECK(parse_mesh(bytes.data(), bytes.size(), modelHash, info, err));
+    // Absent is valid and reported as null rather than as an empty array: a caller that
+    // needs the bind has to check, and `--compare` does.
+    CHECK(info.pinDriverIndices == nullptr);
+    CHECK(info.pinLocalCm == nullptr);
+}
+
+static void test_mesh_with_pin_bind() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash, make_bound_cylinder(2, kClothVertexCount / 2));
+    CHECK(!bytes.empty());
+    MeshInfo info;
+    std::string err;
+    CHECK(parse_mesh(bytes.data(), bytes.size(), modelHash, info, err));
+    CHECK(info.pinDriverIndices != nullptr);
+    CHECK(info.pinLocalCm != nullptr);
+    uint32_t bound = 0;
+    for (uint32_t v = 0; v < info.vertices; ++v) {
+        if (info.pinMask[v] != 0) {
+            CHECK(info.pinDriverIndices[v] < kDriverCount);
+            ++bound;
+        } else {
+            CHECK_EQ(info.pinDriverIndices[v], kNoDriver);
+        }
+    }
+    CHECK_EQ(bound, info.pinnedVertices);
+}
+
+static void test_mesh_pin_bind_needs_both_sections() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash, make_bound_cylinder(2, kClothVertexCount / 2));
+    // Rename `pin_local_cm` so only one of the pair is present. The bind is meaningless
+    // then, and reading a driver with no offset would place the anchor on the bone origin.
+    const size_t sections = read_le32(bytes, 12);
+    bool renamed = false;
+    for (size_t i = 0; i < sections; ++i) {
+        const size_t entry = kSectionHeaderBytes + kSectionEntryBytes * i;
+        if (std::memcmp(bytes.data() + entry, "pin_local_cm", 12) != 0) continue;
+        std::memset(bytes.data() + entry, 0, kSectionNameBytes);
+        std::memcpy(bytes.data() + entry, "spare", 5);
+        renamed = true;
+        break;
+    }
+    CHECK(renamed);
+    CHECK_MESH_REJECTS(bytes, modelHash, "written together");
+}
+
+static void test_mesh_pin_bind_bad_driver() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash, make_bound_cylinder(2, kClothVertexCount / 2));
+    mesh_patch_u32(bytes, "pin_driver", 0, kDriverCount);   // one past the last driver
+    CHECK_MESH_REJECTS(bytes, modelHash, "not one of the 45 model drivers");
+}
+
+static void test_mesh_pin_bind_on_free_vertex() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash, make_bound_cylinder(2, kClothVertexCount / 2));
+    // Vertex 0 of the second ring is free in this fixture. A driver there would silently
+    // drag a free vertex along with the body.
+    mesh_patch_u32(bytes, "pin_driver", kClothVertexCount / 2, 0u);
+    CHECK_MESH_REJECTS(bytes, modelHash, "carries driver");
+}
+
+static void test_mesh_pin_bind_nonfinite() {
+    auto modelHash = compute_model_hash(make_model_bytes());
+    auto bytes = make_mesh_bytes(modelHash, make_bound_cylinder(2, kClothVertexCount / 2));
+    mesh_patch_f32(bytes, "pin_local_cm", 1, std::numeric_limits<float>::infinity());
+    CHECK_MESH_REJECTS(bytes, modelHash, "nonfinite pin_local_cm");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -999,6 +1100,14 @@ int main() {
     RUN(test_mesh_duplicate_section_name);
     RUN(test_mesh_section_out_of_bounds);
     RUN(test_mesh_edge_csr_bad_neighbour);
+
+    std::cerr << "\n=== Pin bind tests ===\n";
+    RUN(test_mesh_without_pin_bind);
+    RUN(test_mesh_with_pin_bind);
+    RUN(test_mesh_pin_bind_needs_both_sections);
+    RUN(test_mesh_pin_bind_bad_driver);
+    RUN(test_mesh_pin_bind_on_free_vertex);
+    RUN(test_mesh_pin_bind_nonfinite);
 
     std::cerr << "\n=== Integration tests ===\n";
     RUN(test_model_clip_integration);

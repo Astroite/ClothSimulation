@@ -20,12 +20,33 @@ param(
     # is a hard guide in disguise and anything over a few is inert.
     [double]$XpbdGuideCompliance = -1.0,
     [double]$XpbdGuideTrust = 0.0,
-    # Side by side: left is the network alone, right is the network plus constraints. One
-    # inference feeds both, so it costs one extra solve and nothing else.
+    # Side by side: A the network alone, B the constraints alone with no network at all, C both.
+    # One inference feeds A and C, so the mode costs one extra solve for C and one for B. Needs a
+    # mesh baked with reference clips, because B takes its pin target from the measured bind.
     [switch]$Compare,
     [double]$CompareSpacingCm = 90,
+    # Equal CPU budget, not equal iterations: C is 2.558 ms of inference plus 2.57 ms of solve,
+    # which at 0.341 ms per iteration buys B about 15. See mlclothcpu.cpp.
+    [ValidateRange(0, 128)]
+    [int]$XpbdIterationsB = 15,
+    # Stop on the final frame instead of looping, so the post-motion settle is observable.
+    [switch]$HoldLastFrame,
+    # Frame decimation, which is the speed axis. The timestep is deliberately not scaled.
+    [ValidateRange(1, 4)]
+    [int]$FrameStep = 1,
     [string]$Capsules = '',
+    # What stands in for the character: the skinned render mesh, the collision capsules, or
+    # nothing. The capsules are still what contacts and the reported penetration use; they are
+    # a ragdoll envelope several centimetres wider than the skin, which is why the skin is what
+    # gets drawn. Needs .work/body/*.mlbody -- bake it with tools/bake_mlcloth_body.py.
+    [ValidateSet('mesh', 'capsules', 'none')]
+    [string]$Body = 'mesh',
+    [string]$BodyMesh = '',
     [switch]$NoBody,
+    # Drop the gradient sky and the gridded floor. They are what gives a hem a height and the
+    # side-by-side branches a shared baseline, so this is for screenshots and for checking
+    # whether a dark patch is shading or geometry.
+    [switch]$NoSky,
     [switch]$NoCollision,
     # Which garment pieces take contacts, largest-first, comma separated. Empty means all,
     # which measurement shows lifts the fitted pieces off the body; '2' is the skirt.
@@ -74,13 +95,31 @@ if (-not $Capsules) {
     if (Test-Path -LiteralPath $DefaultCapsules -PathType Leaf) { $Capsules = $DefaultCapsules }
 }
 if ($Capsules) { $Arguments += @('--capsules', [System.IO.Path]::GetFullPath($Capsules)) }
-if ($NoBody) { $Arguments += '--no-body' }
+if ($NoBody) { $Arguments += '--no-body' } else { $Arguments += @('--body', $Body) }
+if (-not $BodyMesh) {
+    $DefaultBody = Join-Path $PocRoot '.work/body/ch10032_body.mlbody'
+    if (Test-Path -LiteralPath $DefaultBody -PathType Leaf) { $BodyMesh = $DefaultBody }
+}
+if ($BodyMesh) { $Arguments += @('--body-mesh', [System.IO.Path]::GetFullPath($BodyMesh)) }
 if ($NoCollision) { $Arguments += '--no-collision' }
 if ($CollisionPieces) { $Arguments += @('--collision-pieces', $CollisionPieces) }
-if ($Compare) { $Arguments += @('--compare', '--compare-spacing-cm', "$CompareSpacingCm") }
+if ($Compare) {
+    $Arguments += @('--compare', '--compare-spacing-cm', "$CompareSpacingCm",
+        '--xpbd-iterations-b', "$XpbdIterationsB")
+}
+if ($HoldLastFrame) { $Arguments += '--hold-last-frame' }
+if ($FrameStep -gt 1) { $Arguments += @('--frame-step', "$FrameStep") }
 if ($Points) { $Arguments += '--points' }
-if ($Xpbd) {
-    if (-not $Mesh) { throw 'XPBD needs the topology: bake it with bake_cloth_topology.ps1, or drop -Xpbd.' }
+if ($NoSky) { $Arguments += '--no-sky' }
+if ($Xpbd -or $Compare) {
+    # `-Compare` turns the solver on inside the exe, so its knobs have to be forwarded here too.
+    # They were not, and nothing said so: `-Compare -XpbdAreaFloor 1.0` silently ran with the
+    # exe's own default of 0. The verify report now carries the values the solver was configured
+    # with, so a dropped flag shows up as a number rather than as a puzzling result.
+    if (-not $Mesh) {
+        $Which = if ($Xpbd) { '-Xpbd' } else { '-Compare' }
+        throw "XPBD needs the topology: bake it with bake_cloth_topology.ps1, or drop $Which."
+    }
     $Arguments += @(
         '--xpbd',
         '--xpbd-iterations', "$XpbdIterations",

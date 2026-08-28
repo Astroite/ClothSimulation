@@ -30,6 +30,14 @@ add_executable(mesh_validate
 )
 target_include_directories(mesh_validate PRIVATE ../include)
 
+# The same role for the character body: a gate before running the sample, and the
+# cross-check between the Python bake and the C++ parser.
+add_executable(body_validate
+    ../include/mlcloth_formats.cpp
+    body_validate.cpp
+)
+target_include_directories(body_validate PRIVATE ../include)
+
 # Runs one XPBD scenario so the Python reference in the sibling PoC can be compared
 # against this port. The comparison is the only check here that does not share the port's
 # own assumptions, so it is a first-class artifact rather than a test detail.
@@ -63,16 +71,29 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_mlcloth_xpbd.py")
     set_tests_properties(mlcloth_xpbd PROPERTIES
         ENVIRONMENT "MLCLOTH_XPBD_REFERENCE=$<TARGET_FILE:xpbd_reference>")
+    # The body bake: the bind-pose composition, the coordinate inversion and the fold of
+    # bones the model does not drive. Synthesises its own character fixture, so it needs
+    # neither the sibling PoC's export nor a built runtime.
+    add_test(NAME mlcloth_body
+        COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_mlcloth_body.py")
+    set_tests_properties(mlcloth_body PROPERTIES
+        ENVIRONMENT "MLCLOTH_BODY_VALIDATE=$<TARGET_FILE:body_validate>")
 else()
     message(STATUS "Mesh converter, capsule and driver tests not registered: no Python 3 interpreter found")
 endif()
 
 set(DEFAULT_MODEL_FOR_MESH "${CMAKE_CURRENT_SOURCE_DIR}/../.work/runtime/model_NeuralRes4_NeuralRes4_final.enc")
 set(DEFAULT_MESH "${CMAKE_CURRENT_SOURCE_DIR}/../.work/mesh/ch10032_cloth2607.mlmesh")
+set(DEFAULT_BODY "${CMAKE_CURRENT_SOURCE_DIR}/../.work/body/ch10032_body.mlbody")
 if(EXISTS "${DEFAULT_MODEL_FOR_MESH}" AND EXISTS "${DEFAULT_MESH}")
     add_test(NAME mlcloth_real_mesh COMMAND mesh_validate "${DEFAULT_MODEL_FOR_MESH}" "${DEFAULT_MESH}")
 else()
     message(STATUS "Real mesh validation not registered: run bake_cloth_topology.ps1 first")
+endif()
+if(EXISTS "${DEFAULT_MODEL_FOR_MESH}" AND EXISTS "${DEFAULT_BODY}")
+    add_test(NAME mlcloth_real_body COMMAND body_validate "${DEFAULT_MODEL_FOR_MESH}" "${DEFAULT_BODY}")
+else()
+    message(STATUS "Real body validation not registered: run tools/bake_mlcloth_body.py first")
 endif()
 
 if(WIN32)

@@ -1,3 +1,5 @@
+#include "scene_camera.hlsli"
+
 struct VSInput {
     [[vk::location(0)]] float4 position : POSITION0;
 };
@@ -7,12 +9,6 @@ struct VSOutput {
     [[vk::builtin("PointSize")]] float pointSize : PSIZE;
     [[vk::location(0)]] float3 color : COLOR0;
 };
-
-struct CameraParams {
-    float4x4 projection;
-    float4x4 view;
-};
-cbuffer cameraParams : register(b0) { CameraParams camera; };
 
 VSOutput main(VSInput input)
 {

@@ -1,0 +1,77 @@
+// Linear-blend skinning for the character body, from the driver clip's own bone transforms.
+//
+// The body exists so penetration can be judged by eye. The capsules are what the solver
+// collides against and what the reported numbers measure, but they are a ragdoll envelope
+// several centimetres wider than the skin, so cloth resting on the chest looks like it is
+// floating and cloth a centimetre inside the skin looks fine.
+//
+// One matrix per driver slot arrives already composed on the host as `pose * inverseBind`,
+// so this pass has no bone hierarchy to walk and no inverse to form -- 45 matrices for
+// 67,857 vertices, which is why composing them per frame on the CPU costs nothing worth
+// measuring while doing the vertices there would not.
+//
+// `influences` comes from the asset rather than being a constant: merging the bones the
+// model does not drive onto their parents takes this body from twelve influences to five,
+// and this loop is what that width is paid in.
+//
+// The output is world metres, matching what `point_transform.comp` writes for the cloth, so
+// the two share one graphics pipeline and cannot disagree about the space they are in. The
+// component-to-world step is the fixed permutation `(c.x, c.z, -c.y) * 0.01`; unlike the
+// cloth there is no root basis involved, because the body is skinned straight into component
+// space. The side-by-side lateral offset is a rigid world translation applied per draw in
+// the vertex shader instead of here, so one skinned copy serves every branch.
+
+StructuredBuffer<float4> restPositions : register(t0);   // component cm, w unused
+StructuredBuffer<float4> restNormals : register(t1);     // unit, w unused
+StructuredBuffer<uint> boneIndices : register(t2);       // vertexCount * influences
+StructuredBuffer<float> boneWeights : register(t3);      // vertexCount * influences
+StructuredBuffer<float4> skinMatrices : register(t4);    // 3 rows per driver slot
+RWStructuredBuffer<float4> outPositions : register(u5);
+RWStructuredBuffer<float4> outNormals : register(u6);
+
+struct BodyParams {
+    uint vertexCount;
+    uint influences;
+    uint reserved0;
+    uint reserved1;
+};
+cbuffer bodyParams : register(b7) { BodyParams body; };
+
+[numthreads(128, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint vertex = dispatchThreadId.x;
+    if (vertex >= body.vertexCount) return;
+
+    const float3 rest = restPositions[vertex].xyz;
+    const float3 restNormal = restNormals[vertex].xyz;
+    float3 position = float3(0.0, 0.0, 0.0);
+    float3 normal = float3(0.0, 0.0, 0.0);
+
+    for (uint slot = 0; slot < body.influences; ++slot) {
+        const uint index = vertex * body.influences + slot;
+        const float weight = boneWeights[index];
+        // Zero-weight padding, not an early break: the weights are stored descending, but
+        // breaking would make the loop's cost depend on the data and the result identical,
+        // and a uniform trip count is what keeps the wave from diverging.
+        if (weight <= 0.0) continue;
+        const uint bone = boneIndices[index] * 3;
+        const float4 r0 = skinMatrices[bone + 0];
+        const float4 r1 = skinMatrices[bone + 1];
+        const float4 r2 = skinMatrices[bone + 2];
+        position += weight * float3(dot(r0.xyz, rest) + r0.w,
+                                    dot(r1.xyz, rest) + r1.w,
+                                    dot(r2.xyz, rest) + r2.w);
+        // Rotation only for the normal: the translation column would move a direction.
+        // The rows are orthonormal here (unit bind scale is enforced by the bake), so the
+        // inverse transpose is the same matrix and no adjugate is needed.
+        normal += weight * float3(dot(r0.xyz, restNormal),
+                                  dot(r1.xyz, restNormal),
+                                  dot(r2.xyz, restNormal));
+    }
+
+    outPositions[vertex] = float4(float3(position.x, position.z, -position.y) * 0.01, 1.0);
+    const float3 worldNormal = float3(normal.x, normal.z, -normal.y);
+    const float lengthSquared = dot(worldNormal, worldNormal);
+    outNormals[vertex] = float4(lengthSquared > 1.0e-12 ? worldNormal * rsqrt(lengthSquared) : float3(0.0, 1.0, 0.0), 0.0);
+}

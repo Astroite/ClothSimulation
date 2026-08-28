@@ -14,10 +14,21 @@ PROFILES = {".comp": "cs_6_0", ".vert": "vs_6_0", ".frag": "ps_6_0"}
 EXPECTED = {
     "point_transform.comp",  # Root_M-local cm -> world metres
     "cloth_normals.comp",    # area-weighted vertex normals over the baked triangle CSR
+    "body_skin.comp",        # linear-blend skinning of the character body from the driver clip
     "point.vert",
     "point.frag",
     "cloth.vert",
     "cloth.frag",
+    "sky.vert",              # fullscreen triangle, no vertex buffer
+    "sky.frag",              # gradient sky over the gridded floor, along the view ray
+}
+
+# Headers, checked separately because the stage set above is compared for equality: an
+# `.hlsli` appearing in it would be compiled as a stage, and one missing from here is a
+# dxc include error whose message names a path rather than the thing that went missing.
+EXPECTED_HEADERS = {
+    "scene_camera.hlsli",    # the one declaration of the camera block
+    "scene_lighting.hlsli",  # sky, lights and the tone curve, shared by sky and surface shading
 }
 
 def find_tool(name: str) -> str:
@@ -43,6 +54,13 @@ def main() -> int:
         raise RuntimeError(
             f"HLSL stage set in {source} does not match the expected set; "
             f"missing={missing}, unexpected={unexpected}"
+        )
+    headers = {path.name for path in source.iterdir() if path.suffix == ".hlsli"}
+    if headers != EXPECTED_HEADERS:
+        raise RuntimeError(
+            f"HLSL header set in {source} does not match the expected set; "
+            f"missing={sorted(EXPECTED_HEADERS - headers)}, "
+            f"unexpected={sorted(headers - EXPECTED_HEADERS)}"
         )
     for shader in shaders:
         output = shader.with_suffix(shader.suffix + ".spv")

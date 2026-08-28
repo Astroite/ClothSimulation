@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -70,6 +71,22 @@ int main(int argc, char** argv) {
               << " triangles, " << meshInfo.edges << " edges, " << meshInfo.boundaryEdges
               << " boundary edges in " << meshInfo.boundaryLoops << " loops, max triangle valence "
               << meshInfo.maxTriangleValence << ", " << meshInfo.pinnedVertices << " pinned\n";
+    // The pin bind, reported rather than merely validated: a mesh silently missing it still
+    // loads for every mode except the comparison, so its absence has to be visible at bake time
+    // and not first noticed when `--compare` refuses to start.
+    if (meshInfo.pinDriverIndices == nullptr) {
+        std::cout << "pin bind: absent (no reference clip was measured; --compare needs it)\n";
+    } else {
+        std::map<uint32_t, uint32_t> perDriver;
+        for (uint32_t v = 0; v < meshInfo.vertices; ++v) {
+            if (meshInfo.pinDriverIndices[v] != mlcloth::kNoDriver) ++perDriver[meshInfo.pinDriverIndices[v]];
+        }
+        std::cout << "pin bind: " << perDriver.size() << " driver bone(s):";
+        for (const auto& entry : perDriver) {
+            std::cout << ' ' << modelInfo.driverNames[entry.first] << '(' << entry.second << ')';
+        }
+        std::cout << '\n';
+    }
 
     if (!jsonPath.empty()) {
         std::ofstream report(jsonPath);

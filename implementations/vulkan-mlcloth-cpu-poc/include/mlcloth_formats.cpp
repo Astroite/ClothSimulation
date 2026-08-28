@@ -665,6 +665,22 @@ static bool find_section(const uint8_t* data, const std::vector<SectionSpan>& sp
     return false;
 }
 
+// Locate a section that is allowed to be absent. Returns false only for a section that is
+// present with the wrong shape -- absence is reported through `found`, so a caller can
+// require the group to be all-or-nothing rather than treating a half-written pair as valid.
+static bool find_optional_section(const uint8_t* data, const std::vector<SectionSpan>& spans,
+                                  const char* label, const char* name,
+                                  uint32_t count, uint32_t stride,
+                                  const uint8_t*& base, bool& found, std::string& err) {
+    found = false;
+    for (const SectionSpan& span : spans) {
+        if (span.name != name) continue;
+        found = true;
+        return find_section(data, spans, label, name, count, stride, base, err);
+    }
+    return true;
+}
+
 // Disjoint-set over vertices, used to count boundary loops as the connected
 // components of the boundary-edge graph.
 struct DisjointSet {
@@ -772,6 +788,38 @@ bool parse_mesh(const uint8_t* data, size_t len,
     // fall away from the body forever. That is a bake mistake, not a valid asset.
     if (pinned == 0) { err = "mesh: no pinned vertices"; return false; }
     if (pinned == V) { err = "mesh: every vertex is pinned"; return false; }
+
+    // Optional pin bind. Required to be a matched pair: one section without the other would
+    // give a bone with no offset or an offset with no bone, and either is a half-written file
+    // rather than a mesh baked without reference clips.
+    const uint8_t* pinDriver = nullptr; const uint8_t* pinLocal = nullptr;
+    bool haveDriver = false, haveLocal = false;
+    if (!find_optional_section(data, spans, "mesh", "pin_driver", V, 4, pinDriver, haveDriver, err)) return false;
+    if (!find_optional_section(data, spans, "mesh", "pin_local_cm", V, 12, pinLocal, haveLocal, err)) return false;
+    if (haveDriver != haveLocal) {
+        err = "mesh: pin_driver and pin_local_cm must be written together";
+        return false;
+    }
+    if (haveDriver) {
+        out.pinDriverIndices = reinterpret_cast<const uint32_t*>(pinDriver);
+        out.pinLocalCm       = reinterpret_cast<const float*>(pinLocal);
+        if (!all_finite(out.pinLocalCm, size_t(V) * 3)) { err = "mesh: nonfinite pin_local_cm entry"; return false; }
+        for (uint32_t v = 0; v < V; ++v) {
+            const bool isPinned = out.pinMask[v] != 0;
+            const uint32_t driver = out.pinDriverIndices[v];
+            if (isPinned && driver >= kDriverCount) {
+                err = "mesh: pinned vertex " + std::to_string(v) + " names driver " + std::to_string(driver)
+                    + ", which is not one of the " + std::to_string(kDriverCount) + " model drivers";
+                return false;
+            }
+            // A free vertex carrying a driver would be bound to the body by a branch that
+            // reads this section, so it is refused rather than ignored.
+            if (!isPinned && driver != kNoDriver) {
+                err = "mesh: free vertex " + std::to_string(v) + " carries driver " + std::to_string(driver);
+                return false;
+            }
+        }
+    }
 
     // Triangles: in range, and no repeated corner (a repeated corner has zero area
     // for every configuration, so its area constraint and normal are meaningless).
@@ -1023,7 +1071,9 @@ std::vector<uint8_t> write_mesh(const Sha256Digest& modelHash,
                                  const std::vector<uint32_t>& triangleIndices,
                                  const std::vector<float>& vertexMassKg,
                                  const std::vector<uint32_t>& pinMask,
-                                 std::string& err) {
+                                 std::string& err,
+                                 const std::vector<uint32_t>& pinDrivers,
+                                 const std::vector<float>& pinLocalCm) {
     err.clear();
     if (positionsCm.empty() || positionsCm.size() % 3 != 0) { err = "write_mesh: positions must be a non-empty multiple of three"; return {}; }
     const size_t vertexCount = positionsCm.size() / 3;
@@ -1131,6 +1181,14 @@ std::vector<uint8_t> write_mesh(const Sha256Digest& modelHash,
         { "vertex_mass",   V,         4,  pack_f32(vertexMassKg) },
         { "pin_mask",      V,         4,  pack_u32(pinMask) },
     };
+    if (!pinDrivers.empty() || !pinLocalCm.empty()) {
+        if (pinDrivers.size() != vertexCount || pinLocalCm.size() != vertexCount * 3) {
+            err = "write_mesh: pin bind arrays must be per-vertex and supplied together";
+            return {};
+        }
+        sections.push_back({ "pin_driver",   V, 4,  pack_u32(pinDrivers) });
+        sections.push_back({ "pin_local_cm", V, 12, pack_f32(pinLocalCm) });
+    }
     return pack_sections("MLMSH001", kMeshVersion, modelHash, sections);
 }
 
@@ -1195,6 +1253,102 @@ bool parse_capsules(const uint8_t* data, size_t len,
                 return false;
             }
         }
+    }
+    return true;
+}
+
+bool parse_body(const uint8_t* data, size_t len,
+                const Sha256Digest& expectedModelHash,
+                BodyInfo& out, std::string& err) {
+    std::vector<SectionSpan> spans;
+    if (!parse_container(data, len, "MLBDY001", "body", kBodyVersion, expectedModelHash,
+                         spans, out.payloadSha256, out.modelSha256, err)) {
+        return false;
+    }
+
+    const uint8_t* infoBytes = nullptr;
+    if (!find_section(data, spans, "body", "info", 6, 4, infoBytes, err)) return false;
+    out.vertices    = le32(infoBytes + 0);
+    out.triangles   = le32(infoBytes + 4);
+    out.drivers     = le32(infoBytes + 8);
+    out.influences  = le32(infoBytes + 12);
+    out.foldedBones = le32(infoBytes + 16);
+    if (le32(infoBytes + 20) != 0) { err = "body: reserved info word is not zero"; return false; }
+
+    if (out.vertices == 0 || out.triangles == 0) { err = "body: no vertices or no triangles"; return false; }
+    constexpr uint32_t kMax = std::numeric_limits<uint32_t>::max();
+    if (out.triangles > kMax / 3) { err = "body: triangle count overflows"; return false; }
+    if (out.drivers != kDriverCount) {
+        err = "body: drivers != " + std::to_string(kDriverCount);
+        return false;
+    }
+    // Zero would leave every vertex unskinned at the origin; above the source rig's twelve
+    // means the file is not what the bake produces.
+    if (out.influences == 0 || out.influences > kMaxBodyInfluences) {
+        err = "body: influences is " + std::to_string(out.influences) + ", outside 1.."
+            + std::to_string(kMaxBodyInfluences);
+        return false;
+    }
+    if (out.foldedBones >= out.drivers) { err = "body: every bone cannot be a folded one"; return false; }
+    if (out.vertices > kMax / out.influences) { err = "body: influence array overflows"; return false; }
+
+    const uint8_t* positions = nullptr; const uint8_t* normals = nullptr;
+    const uint8_t* indices = nullptr; const uint8_t* weights = nullptr;
+    const uint8_t* triangles = nullptr; const uint8_t* inverseBind = nullptr;
+    const uint32_t influenceStride = out.influences * 4;
+    if (!find_section(data, spans, "body", "rest_pos", out.vertices, 12, positions, err)) return false;
+    if (!find_section(data, spans, "body", "rest_nrm", out.vertices, 12, normals, err)) return false;
+    if (!find_section(data, spans, "body", "bone_idx", out.vertices, influenceStride, indices, err)) return false;
+    if (!find_section(data, spans, "body", "bone_weight", out.vertices, influenceStride, weights, err)) return false;
+    if (!find_section(data, spans, "body", "tri", out.triangles, 12, triangles, err)) return false;
+    if (!find_section(data, spans, "body", "inv_bind", out.drivers, 48, inverseBind, err)) return false;
+
+    out.restPositionsCm = reinterpret_cast<const float*>(positions);
+    out.restNormals     = reinterpret_cast<const float*>(normals);
+    out.boneIndices     = reinterpret_cast<const uint32_t*>(indices);
+    out.boneWeights     = reinterpret_cast<const float*>(weights);
+    out.triangleIndices = reinterpret_cast<const uint32_t*>(triangles);
+    out.inverseBind     = reinterpret_cast<const float*>(inverseBind);
+
+    const size_t influenceCount = size_t(out.vertices) * out.influences;
+    if (!all_finite(out.restPositionsCm, size_t(out.vertices) * 3)) { err = "body: nonfinite rest position"; return false; }
+    if (!all_finite(out.restNormals, size_t(out.vertices) * 3)) { err = "body: nonfinite rest normal"; return false; }
+    if (!all_finite(out.boneWeights, influenceCount)) { err = "body: nonfinite bone weight"; return false; }
+    if (!all_finite(out.inverseBind, size_t(out.drivers) * 12)) { err = "body: nonfinite inverse bind entry"; return false; }
+
+    for (uint32_t t = 0; t < out.triangles; ++t) {
+        for (uint32_t k = 0; k < 3; ++k) {
+            if (out.triangleIndices[3 * t + k] >= out.vertices) {
+                err = "body: triangle index out of range";
+                return false;
+            }
+        }
+    }
+
+    for (uint32_t v = 0; v < out.vertices; ++v) {
+        float sum = 0.0f;
+        for (uint32_t k = 0; k < out.influences; ++k) {
+            const uint32_t driver = out.boneIndices[size_t(v) * out.influences + k];
+            const float weight = out.boneWeights[size_t(v) * out.influences + k];
+            if (driver >= out.drivers) { err = "body: an influence names a bone outside the driver table"; return false; }
+            if (weight < 0.0f) { err = "body: negative bone weight"; return false; }
+            sum += weight;
+        }
+        // Weights that do not sum to one scale the vertex towards the component origin,
+        // which reads as a dent rather than as a broken file, so it is refused here. The
+        // bake normalises, so a deviation means the payload was edited or truncated.
+        if (!(std::fabs(sum - 1.0f) <= 1.0e-4f)) {
+            err = "body: vertex " + std::to_string(v) + " has skin weights summing to " + std::to_string(sum);
+            return false;
+        }
+    }
+
+    // A unit rest normal, for the same reason the capsule axis is checked: the skinning pass
+    // rotates it without renormalising, so a short one shades wrongly rather than failing.
+    for (uint32_t v = 0; v < out.vertices; ++v) {
+        const float* n = out.restNormals + size_t(v) * 3;
+        const float norm = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (!(std::fabs(norm - 1.0f) <= 1.0e-3f)) { err = "body: a rest normal is not unit length"; return false; }
     }
     return true;
 }

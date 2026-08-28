@@ -180,6 +180,18 @@ bool parse_clip(const uint8_t* data, size_t len,
 //   tri_csr_idx    3T x 4  u32
 //   vertex_mass    V x 4   float, kg, area-weighted
 //   pin_mask       V x 4   u32, 0 or 1
+//
+// Optional sections, written together or not at all:
+//   pin_driver     V x 4   u32, the driver bone a pinned vertex rides, kNoDriver elsewhere
+//   pin_local_cm   V x 12  float3, that vertex in the bone's own frame, cm, zero elsewhere
+//
+// They exist for the branch of the comparison that has no network: a solver-only arm still
+// needs its kinematic anchor to follow the body, and without them the only anchor available
+// is a rest pose that does not move.  The bake measures both by expressing each boundary-loop
+// vertex in each of the 45 driver frames over reference motion and taking the frame with the
+// least variance, so the bone is the one the loop actually rides and the offset is its mean
+// position there -- a least-squares rigid bind over the motion rather than a single frame.
+// A mesh baked without reference clips carries neither section and both pointers stay null.
 
 static constexpr size_t kSectionHeaderBytes = 96;
 static constexpr size_t kSectionEntryBytes  = 32;
@@ -190,6 +202,10 @@ static constexpr uint32_t kMeshVersion      = 1;
 // The model's vertex count, derived from (drivenFeatureLen - pcaDim) / 3 and
 // required by both parsers so a mesh and a model can never disagree.
 static constexpr uint32_t kClothVertexCount = 5294;
+
+// `pin_driver` entry for a vertex that is not pinned.  Not 0: driver 0 is Root_M, so a
+// zero default would silently bind every free vertex to the pelvis.
+static constexpr uint32_t kNoDriver = 0xFFFFFFFFu;
 
 struct MeshInfo {
     uint32_t vertices{};
@@ -212,6 +228,9 @@ struct MeshInfo {
     const uint32_t* triangleCsrIndices{};   // triangles * 3
     const float*    vertexMassKg{};         // vertices
     const uint32_t* pinMask{};              // vertices
+    // Null unless the optional pin-driver sections are present.
+    const uint32_t* pinDriverIndices{};     // vertices, kNoDriver where not pinned
+    const float*    pinLocalCm{};           // vertices * 3, zero where not pinned
 };
 
 // Parse a cloth mesh from a memory buffer.  `expectedModelHash` must equal the
@@ -254,6 +273,52 @@ bool parse_capsules(const uint8_t* data, size_t len,
                     CapsuleInfo& out, std::string& err);
 
 // ---------------------------------------------------------------------------
+// Character body format (.mlbody) — MLBDY001
+// ---------------------------------------------------------------------------
+// The character's render mesh, skinnable from a `.mldrv` clip and nothing else: rest
+// positions in Unreal component centimetres at the bind pose, an inverse bind matrix per
+// driver slot, and per-vertex influences already remapped onto those slots.  The runtime's
+// whole per-frame job is `skin[s] = pose(s) * invBind[s]` for the 45 slots, then a weighted
+// sum per vertex — no bone hierarchy, no name lookup and no retargeting.
+//
+// It is a *display* asset.  Contacts are resolved against the capsules, which are a ragdoll
+// envelope several centimetres wider than this surface; the point of drawing the skin is
+// that judging a garment by eye against the envelope is misleading in both directions.
+//
+// Sections: `info` 6x4 = [vertices, triangles, drivers, influences, foldedBones, 0],
+//           `rest_pos` V x 12, `rest_nrm` V x 12, `bone_idx` V x 4*I, `bone_weight` V x 4*I,
+//           `tri` T x 12, `inv_bind` 45 x 48 (row-major 3x4).
+//
+// `influences` is a property of the asset rather than a constant: folding the bones the
+// model does not drive onto parents that often already influenced the same vertex takes
+// CH10032's body from twelve influences to five, and that width is what the skinning pass
+// loops over.  `foldedBones` records how many bones that was, so a body whose motion is
+// partly approximated cannot claim to be exact.
+
+static constexpr uint32_t kBodyVersion = 1;
+static constexpr uint32_t kMaxBodyInfluences = 12;
+
+struct BodyInfo {
+    uint32_t vertices{};
+    uint32_t triangles{};
+    uint32_t drivers{};
+    uint32_t influences{};
+    uint32_t foldedBones{};
+    Sha256Digest modelSha256{};
+    Sha256Digest payloadSha256{};
+    const float*    restPositionsCm{};   // vertices * 3, component cm
+    const float*    restNormals{};       // vertices * 3, unit
+    const uint32_t* boneIndices{};       // vertices * influences, driver slots
+    const float*    boneWeights{};       // vertices * influences, sums to 1
+    const uint32_t* triangleIndices{};   // triangles * 3
+    const float*    inverseBind{};       // drivers * 12, row-major 3x4
+};
+
+bool parse_body(const uint8_t* data, size_t len,
+                const Sha256Digest& expectedModelHash,
+                BodyInfo& out, std::string& err);
+
+// ---------------------------------------------------------------------------
 // Writers (for tests / fixture generation)
 // ---------------------------------------------------------------------------
 
@@ -281,11 +346,14 @@ std::vector<uint8_t> write_clip(uint32_t frameCount,
 // exactly covers the triangle edge set, so a real asset whose Python baker
 // disagrees with this derivation fails to load rather than loading wrongly.
 // Returns an empty vector and sets `err` when the inputs cannot form a mesh.
+// `pinDrivers` and `pinLocalCm` are the optional pin-bind sections: pass both or neither.
 std::vector<uint8_t> write_mesh(const Sha256Digest& modelHash,
                                  const std::vector<float>& positionsCm,
                                  const std::vector<uint32_t>& triangleIndices,
                                  const std::vector<float>& vertexMassKg,
                                  const std::vector<uint32_t>& pinMask,
-                                 std::string& err);
+                                 std::string& err,
+                                 const std::vector<uint32_t>& pinDrivers = {},
+                                 const std::vector<float>& pinLocalCm = {});
 
 } // namespace mlcloth
