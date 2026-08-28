@@ -1,0 +1,56 @@
+// Area-weighted vertex normals for the predicted cloth, gathered per vertex.
+//
+// The incident-triangle CSR comes baked in the `.mlmesh` (`tri_csr_offs` /
+// `tri_csr_idx`) rather than being derived here, for the same reason the sibling
+// GNN PoC bakes its gather tables: a scatter from triangles into vertices would
+// need atomics, and float atomics have no fixed summation order, so two runs of
+// the same frame could disagree in the last bits. A gather in a fixed order is
+// reproducible.
+//
+// The cross product is left unnormalised on purpose -- its magnitude is twice the
+// triangle area, so summing raw cross products is the area weighting. Forming it
+// as cross(b - a, c - a) in the mesh's *stored* corner order (not "mine first")
+// is what makes every vertex of a triangle contribute the same float with the
+// same sign; the same rule the constraint code follows, see
+// real_scene/xpbd.py::triangle_areas.
+
+StructuredBuffer<float4> worldPositions : register(t0);
+StructuredBuffer<uint> triangleIndices : register(t1);
+StructuredBuffer<uint> triangleCsrOffsets : register(t2);
+StructuredBuffer<uint> triangleCsrIndices : register(t3);
+RWStructuredBuffer<float4> vertexNormals : register(u4);
+
+struct MeshParams {
+    uint vertexCount;
+    uint triangleCount;
+    uint reserved0;
+    uint reserved1;
+};
+cbuffer meshParams : register(b5) { MeshParams mesh; };
+
+[numthreads(128, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint vertex = dispatchThreadId.x;
+    if (vertex >= mesh.vertexCount) return;
+
+    float3 accumulated = float3(0.0, 0.0, 0.0);
+    const uint begin = triangleCsrOffsets[vertex];
+    const uint end = triangleCsrOffsets[vertex + 1];
+    for (uint slot = begin; slot < end; ++slot) {
+        // `face`, not `triangle`: the latter is a reserved HLSL input modifier and
+        // dxc rejects it as an identifier.
+        const uint face = triangleCsrIndices[slot];
+        const float3 a = worldPositions[triangleIndices[3 * face + 0]].xyz;
+        const float3 b = worldPositions[triangleIndices[3 * face + 1]].xyz;
+        const float3 c = worldPositions[triangleIndices[3 * face + 2]].xyz;
+        accumulated += cross(b - a, c - a);
+    }
+
+    // A vertex whose incident triangles cancel out has no defined normal. Falling
+    // back to +Y keeps it shaded rather than black, and the degenerate-triangle
+    // fraction in the structure metrics is where that condition gets reported.
+    const float lengthSquared = dot(accumulated, accumulated);
+    const float3 normal = lengthSquared > 1.0e-20 ? accumulated * rsqrt(lengthSquared) : float3(0.0, 1.0, 0.0);
+    vertexNormals[vertex] = float4(normal, 0.0);
+}
