@@ -3,6 +3,19 @@ project(mlcloth_format_tests LANGUAGES CXX)
 
 enable_testing()
 
+add_executable(temporal_surface_tests temporal_surface_tests.cpp)
+target_compile_features(temporal_surface_tests PRIVATE cxx_std_17)
+target_include_directories(temporal_surface_tests PRIVATE ../include)
+if(MSVC)
+    target_compile_options(temporal_surface_tests PRIVATE /UNDEBUG)
+endif()
+add_test(NAME temporal_surface COMMAND temporal_surface_tests)
+set(TEMPORAL_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/../../vulkan-gnn-poc/.venv/Scripts/python.exe")
+if(EXISTS "${TEMPORAL_PYTHON}")
+    add_test(NAME temporal_model COMMAND "${TEMPORAL_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/test_temporal_model.py")
+    add_test(NAME temporal_data COMMAND "${TEMPORAL_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/test_temporal_data.py")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -96,7 +109,40 @@ else()
     message(STATUS "Real body validation not registered: run tools/bake_mlcloth_body.py first")
 endif()
 
+add_executable(demo_physics_tests
+    ../include/demo_physics.cpp
+    demo_physics_tests.cpp
+)
+target_include_directories(demo_physics_tests PRIVATE ../include)
+add_test(NAME demo_physics COMMAND demo_physics_tests)
+add_executable(demo_contact_probe demo_contact_probe.cpp ../include/demo_physics.cpp)
+add_executable(temporal_reference_export ../tools/temporal_reference_export.cpp ../include/demo_physics.cpp ../include/demo_assets.cpp ../include/mlcloth_formats.cpp)
+add_executable(temporal_reference_probe temporal_reference_probe.cpp ../include/demo_physics.cpp)
+target_include_directories(temporal_reference_probe PRIVATE ../include)
+target_include_directories(temporal_reference_probe SYSTEM PRIVATE ../.work/Vulkan/external/tinygltf)
+target_include_directories(temporal_reference_export PRIVATE ../include)
+target_include_directories(temporal_reference_export SYSTEM PRIVATE ../.work/Vulkan/external/glm ../.work/Vulkan/external/tinygltf)
+target_include_directories(demo_contact_probe PRIVATE ../include)
+target_include_directories(demo_contact_probe SYSTEM PRIVATE ../.work/Vulkan/external/tinygltf)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.work/demo/self-contact-fixture.json")
+    add_test(NAME demo_contact_probe COMMAND demo_contact_probe "${CMAKE_CURRENT_SOURCE_DIR}/../.work/demo/self-contact-fixture.json")
+endif()
+
+add_executable(demo_asset_tests demo_asset_tests.cpp ../include/demo_assets.cpp ../include/mlcloth_formats.cpp)
+target_include_directories(demo_asset_tests PRIVATE ../include)
+target_include_directories(demo_asset_tests SYSTEM PRIVATE ../.work/Vulkan/external/glm ../.work/Vulkan/external/tinygltf)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.work/demo/demo.json")
+    add_test(NAME demo_assets COMMAND demo_asset_tests "${CMAKE_CURRENT_SOURCE_DIR}/../.work/demo/demo.json")
+endif()
+
 if(WIN32)
+    add_executable(demo_session_tests demo_session_tests.cpp ../include/demo_session.cpp ../include/demo_physics.cpp
+        ../include/demo_assets.cpp ../include/mlcloth_formats.cpp ../include/mlcloth_runtime.cpp)
+    target_include_directories(demo_session_tests PRIVATE ../include)
+    target_include_directories(demo_session_tests SYSTEM PRIVATE ../.work/Vulkan/external/glm ../.work/Vulkan/external/tinygltf)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.work/demo/demo.json")
+        add_test(NAME demo_session COMMAND demo_session_tests "${CMAKE_CURRENT_SOURCE_DIR}/../.work/demo/demo.json")
+    endif()
     add_executable(runtime_integration
         ../include/mlcloth_formats.cpp
         ../include/mlcloth_runtime.cpp

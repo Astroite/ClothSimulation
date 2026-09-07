@@ -1,0 +1,58 @@
+// HOOD 20/12/9 contract; physical velocity is converted to a 30 Hz displacement.
+struct Push {uint n,m,e,embedding;uint treeSize,words,pad0,pad1;};
+[[vk::push_constant]] Push p;
+[[vk::binding(0)]] StructuredBuffer<float> weights;
+[[vk::binding(1)]] StructuredBuffer<float> norms;
+[[vk::binding(2)]] StructuredBuffer<float4> x;
+[[vk::binding(3)]] StructuredBuffer<float4> velocity;
+[[vk::binding(4)]] StructuredBuffer<float4> pins;
+[[vk::binding(5)]] StructuredBuffer<float4> rest;
+[[vk::binding(6)]] StructuredBuffer<uint> triangles;
+[[vk::binding(7)]] StructuredBuffer<uint> offsets;
+[[vk::binding(8)]] StructuredBuffer<uint> incident;
+[[vk::binding(9)]] StructuredBuffer<uint> senders;
+[[vk::binding(10)]] StructuredBuffer<uint> receivers;
+[[vk::binding(11)]] StructuredBuffer<float4> body;
+[[vk::binding(12)]] StructuredBuffer<float4> future;
+[[vk::binding(13)]] StructuredBuffer<float4> normals;
+struct Node {float4 lo,hi;uint4 links;};
+[[vk::binding(14)]] StructuredBuffer<Node> tree;
+[[vk::binding(15)]] RWStructuredBuffer<uint> nearest;
+[[vk::binding(16)]] RWStructuredBuffer<uint> active;
+[[vk::binding(17)]] RWStructuredBuffer<uint> bits;
+[[vk::binding(18)]] RWStructuredBuffer<float> nodeFeatures;
+[[vk::binding(19)]] RWStructuredBuffer<float> meshFeatures;
+[[vk::binding(20)]] RWStructuredBuffer<float> directFeatures;
+[[vk::binding(21)]] RWStructuredBuffer<float> inverseFeatures;
+float3 effective(uint i){return x[i].w==0?pins[i].xyz:x[i].xyz;}
+float norm(float v,uint mean,uint std,uint i){return (v-norms[mean+i])/norms[std+i];}
+float3 material(){return float3((log(3.9625778333333325e-5)-log(6.370782056371576e-8))/(log(.0013139737991266374)-log(6.370782056371576e-8)),(log(23600.)-log(15909.))/(log(63636.)-log(15909.)),(44400.-3535.414406069427)/(93333.73508005822-3535.414406069427));}
+void node(uint i,float3 v,uint type,float3 normal,float mass,float3 mat){
+    float raw[17];raw[0]=v.x;raw[1]=v.y;raw[2]=v.z;
+    for(uint k=0;k<9;k++)raw[3+k]=weights[p.embedding+type*9+k];
+    raw[12]=normal.x;raw[13]=normal.y;raw[14]=normal.z;raw[15]=1./30;raw[16]=mass;
+    for(uint j=0;j<17;j++)nodeFeatures[i*20+j]=norm(raw[j],0,17,j);
+    nodeFeatures[i*20+17]=mat.x;nodeFeatures[i*20+18]=mat.y;nodeFeatures[i*20+19]=mat.z;
+}
+[numthreads(128,1,1)]
+void main(uint3 id:SV_DispatchThreadID){uint i=id.x;
+    if(i<p.n){float3 current=effective(i),normal=0;
+        for(uint s=offsets[i];s<offsets[i+1];s++){uint t=incident[s]*3;float3 a=effective(triangles[t]),b=effective(triangles[t+1]),c=effective(triangles[t+2]);normal+=cross(b-a,c-b)+cross(c-b,a-c)+cross(a-c,b-a);}
+        normal=dot(normal,normal)>1e-20?normalize(normal):float3(0,1,0);
+        node(i,x[i].w==0?current-x[i].xyz:velocity[i].xyz/30,x[i].w==0?3:0,normal,log(max(rest[i].w,1e-20)),material());
+        uint hit=0xffffffffu,k=0;float best=.03*.03;
+        // Stackless nearest-point BVH, with deterministic ties by original point ID.
+        while(k<p.treeSize){Node t=tree[k];float3 q=max(max(t.lo.xyz-current,current-t.hi.xyz),0);
+            if(dot(q,q)>best){k=t.links.y;continue;}
+            if(t.links.w){uint v=t.links.z;float3 d=current-body[v].xyz;float ds=dot(d,d);if(ds<best||(ds==best&&v<hit)){best=ds;hit=v;}k=t.links.y;}else k++;
+        }
+        nearest[i]=hit;
+        if(hit!=0xffffffffu){uint ignored;InterlockedOr(active[hit],1,ignored);InterlockedOr(bits[hit*p.words+i/32],1u<<(i%32),ignored);
+            float3 a=current-body[hit].xyz,b=current-future[hit].xyz;float raw[9]={a.x,a.y,a.z,length(a),b.x,b.y,b.z,length(b),1./30};
+            for(uint w=0;w<9;w++){directFeatures[i*9+w]=norm(raw[w],52,61,w);inverseFeatures[i*9+w]=norm((w<3||(w>=4&&w<7))?-raw[w]:raw[w],52,61,w);}
+        }else for(uint w=0;w<9;w++){directFeatures[i*9+w]=0;inverseFeatures[i*9+w]=0;}
+    }
+    if(i<p.m)node(p.n+i,future[i].xyz-body[i].xyz,1,normals[i].xyz,-1,-1.xxx);
+    if(i<p.e){uint a=senders[i],b=receivers[i];float3 d=effective(a)-effective(b),r=rest[a].xyz-rest[b].xyz;float raw[9]={d.x,d.y,d.z,length(d),r.x,r.y,r.z,length(r),1./30};
+        for(uint j=0;j<9;j++)meshFeatures[i*12+j]=norm(raw[j],34,43,j);float3 mat=material();meshFeatures[i*12+9]=mat.x;meshFeatures[i*12+10]=mat.y;meshFeatures[i*12+11]=mat.z;}
+}

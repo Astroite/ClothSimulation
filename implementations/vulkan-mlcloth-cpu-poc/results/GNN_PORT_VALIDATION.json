@@ -1,0 +1,357 @@
+{
+  "scope": "Algorithm port only; existing Demo resources retained; no full performance qualification",
+  "executable_sha256": "dcc8a3bb3befabf8abeba3b0b64f0100ca036711123707269d510c1aa6e91944",
+  "gnn_reference": {
+    "vertices": 5294,
+    "body_nodes": 2119,
+    "directed_mesh_edges": 30598,
+    "world_edges": 3620,
+    "blocks": 12,
+    "feature_max_abs": {
+      "node": 1.341104507446289e-06,
+      "mesh": 1.9073486328125e-06,
+      "direct": 7.152557373046875e-07,
+      "inverse": 7.152557373046875e-07
+    },
+    "decoder_max_abs_m": 8.149072527885437e-08,
+    "decoder_mean_abs_m": 3.2104958691547836e-09,
+    "stable_reverse_csr": true,
+    "nearest_bvh": true,
+    "weight_sha256": "07345c49ebd50c27e5236239832cc483d55dfdcf9cd204389a7d43c875ce261e",
+    "passed": true,
+    "performance_qualified": false
+  },
+  "integration": {
+    "cases": [
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "GNN actor owns no MLCloth stream",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 1e-06,
+        "name": "zero strength equals pure XPBD",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "learned contribution is finite and nonzero",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "checkpoint within held acceleration interval",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "reset and deterministic replay",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "unsync retains GNN without ML stream",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "independent animation switch",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "resync restores master animation",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "switch back restores ML stream",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "failed model load retains current scene",
+        "passed": true
+      },
+      {
+        "error": 0.0,
+        "limit": 0.0,
+        "name": "switch to GNN releases ML stream",
+        "passed": true
+      }
+    ],
+    "gnn_max_contribution_m": 0.03968805447220802,
+    "passed": true,
+    "performance_qualified": false
+  },
+  "existing_gpu_cases": 88,
+  "existing_gpu_passed": true,
+  "asset_gpu": {
+    "cases": [
+      {
+        "cpu_position": [
+          0.0305399838835001,
+          1.2880680561065674,
+          -0.0759224146604538
+        ],
+        "gpu_position": [
+          0.030535433441400528,
+          1.288063406944275,
+          -0.07592198252677917
+        ],
+        "initial_position": [
+          0.016001243144273758,
+          1.2866019010543823,
+          -0.09029065817594528
+        ],
+        "max_error_m": 6.519813723571133e-06,
+        "name": "structural",
+        "p95_error_m": 1.4102081991040905e-07,
+        "passed": true,
+        "pinned": 0,
+        "worst_vertex": 3799
+      },
+      {
+        "cpu_position": [
+          -0.11866141110658646,
+          1.2429845333099365,
+          0.02153775840997696
+        ],
+        "gpu_position": [
+          -0.11866147816181183,
+          1.2429845333099365,
+          0.02153758332133293
+        ],
+        "initial_position": [
+          -0.12136571109294891,
+          1.2436484098434448,
+          0.022577106952667236
+        ],
+        "max_error_m": 1.8748983166005928e-07,
+        "name": "body contact",
+        "p95_error_m": 0.0,
+        "passed": true,
+        "pinned": 0,
+        "worst_vertex": 182
+      },
+      {
+        "cpu_position": [
+          0.14311803877353668,
+          1.3666635751724243,
+          0.01417334470897913
+        ],
+        "gpu_position": [
+          0.14311960339546204,
+          1.3666590452194214,
+          0.014174564741551876
+        ],
+        "initial_position": [
+          0.14236371219158173,
+          1.3658099174499512,
+          0.014524567872285843
+        ],
+        "max_error_m": 4.945401542499894e-06,
+        "name": "self contact",
+        "p95_error_m": 7.450580596923828e-09,
+        "passed": true,
+        "pinned": 0,
+        "worst_vertex": 1263
+      },
+      {
+        "max_error_m": 0.0,
+        "name": "full mesh checkpoint replays 48 contact substeps exactly",
+        "passed": true
+      }
+    ],
+    "note": "Full asset single-step comparisons and short static-body checkpoint replay; not long-run quality qualification.",
+    "passed": true,
+    "vertices": 5294
+  },
+  "ctest": {
+    "passed": 13,
+    "total": 13,
+    "log": "E:\\Projects\\cloth-simulation\\implementations\\vulkan-mlcloth-cpu-poc\\.work\\gnn-port-final-build.log"
+  },
+  "smoke_directory": "E:\\Projects\\cloth-simulation\\implementations\\vulkan-mlcloth-cpu-poc\\.work\\demo\\gnn-smoke-20260907-201014",
+  "smoke": {
+    "executable_sha256": "dcc8a3bb3befabf8abeba3b0b64f0100ca036711123707269d510c1aa6e91944",
+    "scope": "Short fixed-clock playback, final-state diagnostics only; complex clip first five seconds.",
+    "performance_qualified": false,
+    "cloth_quality_qualified": false,
+    "cases": [
+      {
+        "clip": "idle",
+        "time": 5.016666666666667,
+        "target_time": 5.0,
+        "reached": true,
+        "actors": [
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.2589242843963422,
+            "edge_ratio_max": 3.6538578075971886
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.5632910408021619,
+            "edge_ratio_max": 17.509166818236633
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.366217013206591,
+            "edge_ratio_max": 7.606610115078531
+          }
+        ]
+      },
+      {
+        "clip": "walk",
+        "time": 2.35,
+        "target_time": 2.3333333333333335,
+        "reached": true,
+        "actors": [
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.2608170226315738,
+            "edge_ratio_max": 3.6994742128963574
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.5382494655824492,
+            "edge_ratio_max": 10.619370649941937
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.4221052725839858,
+            "edge_ratio_max": 10.247217649823781
+          }
+        ]
+      },
+      {
+        "clip": "run",
+        "time": 2.6166666666666667,
+        "target_time": 2.6,
+        "reached": true,
+        "actors": [
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.2362512590100705,
+            "edge_ratio_max": 3.822718704074692
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.473586561729669,
+            "edge_ratio_max": 32.94604898692807
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.3796262004115027,
+            "edge_ratio_max": 38.45539484221914
+          }
+        ]
+      },
+      {
+        "clip": "sprint",
+        "time": 1.0166666666666666,
+        "target_time": 1.0,
+        "reached": true,
+        "actors": [
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.2500645752936392,
+            "edge_ratio_max": 3.5318804167583804
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.5533840675144852,
+            "edge_ratio_max": 23.575299608283892
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.5155423618302895,
+            "edge_ratio_max": 14.650895757732185
+          }
+        ]
+      },
+      {
+        "clip": "jump",
+        "time": 5.783333333333333,
+        "target_time": 5.766666666666667,
+        "reached": true,
+        "actors": [
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.2336554310602599,
+            "edge_ratio_max": 3.387649120413712
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 2.1134684841709754,
+            "edge_ratio_max": 17.996788970507104
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 2.154902521966344,
+            "edge_ratio_max": 10.70342937914908
+          }
+        ]
+      },
+      {
+        "clip": "turn",
+        "time": 6.816666666666666,
+        "target_time": 6.8,
+        "reached": true,
+        "actors": [
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.242495667397827,
+            "edge_ratio_max": 3.685700414916527
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.4997029526697956,
+            "edge_ratio_max": 13.00082670551635
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.3717095444232044,
+            "edge_ratio_max": 9.450987998788936
+          }
+        ]
+      },
+      {
+        "clip": "complex",
+        "time": 5.016666666666667,
+        "target_time": 5,
+        "reached": true,
+        "actors": [
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.1923701482504325,
+            "edge_ratio_max": 2.037816764096289
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.5080577829137332,
+            "edge_ratio_max": 8.300715389558048
+          },
+          {
+            "finite": true,
+            "edge_ratio_p95": 1.4826562688093619,
+            "edge_ratio_max": 9.588130817608137
+          }
+        ]
+      }
+    ]
+  },
+  "performance_qualified": false,
+  "cloth_quality_qualified": false
+}

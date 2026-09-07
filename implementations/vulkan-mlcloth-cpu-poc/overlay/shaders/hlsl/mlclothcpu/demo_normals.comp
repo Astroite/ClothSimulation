@@ -1,0 +1,12 @@
+[[vk::binding(0,0)]] StructuredBuffer<float4> points;
+[[vk::binding(1,0)]] RWStructuredBuffer<float4> normals;
+[[vk::binding(2,0)]] StructuredBuffer<uint> triangles;
+[[vk::binding(3,0)]] StructuredBuffer<uint> offsets;
+[[vk::binding(4,0)]] StructuredBuffer<uint> incident;
+struct Params {uint vertices;float blend0;float blend1;float blend2;};
+[[vk::push_constant]] ConstantBuffer<Params> p;
+float3 position(uint slot,float blend){return lerp(points[slot+3*p.vertices].xyz,points[slot].xyz,blend);}
+[numthreads(128,1,1)]
+void main(uint3 id:SV_DispatchThreadID){uint slot=id.x;if(slot>=p.vertices*3)return;uint v=slot%p.vertices,base=slot-v;float3 n=0;float blend=base==0?p.blend0:base==p.vertices?p.blend1:p.blend2;
+for(uint i=offsets[v];i<offsets[v+1];++i){uint t=incident[i]*3;float3 a=position(base+triangles[t],blend),b=position(base+triangles[t+1],blend),c=position(base+triangles[t+2],blend);n+=cross(b-a,c-a);}
+normals[slot]=float4(dot(n,n)>1e-20?normalize(n):float3(0,1,0),0);}

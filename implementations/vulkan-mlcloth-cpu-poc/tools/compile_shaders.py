@@ -12,6 +12,10 @@ PROFILES = {".comp": "cs_6_0", ".vert": "vs_6_0", ".frag": "ps_6_0"}
 # about *which* one, and it silently accepts a renamed file -- which then fails much
 # later as a pipeline creation error inside the sample.
 EXPECTED = {
+    "temporal_history.comp", "temporal_encode.comp",
+    "demo_gnn_features.comp", "demo_gnn_reverse.comp", "demo_gnn_decode.comp",
+    "tinyhood_encode.comp", "tinyhood_edge_update.comp", "tinyhood_node_update.comp",
+    "demo_scene.vert", "demo_scene.frag", "demo_normals.comp", "demo_physics.comp",
     "point_transform.comp",  # Root_M-local cm -> world metres
     "cloth_normals.comp",    # area-weighted vertex normals over the baked triangle CSR
     "body_skin.comp",        # linear-blend skinning of the character body from the driver clip
@@ -27,6 +31,7 @@ EXPECTED = {
 # `.hlsli` appearing in it would be compiled as a stage, and one missing from here is a
 # dxc include error whose message names a path rather than the thing that went missing.
 EXPECTED_HEADERS = {
+    "tinyhood_mlp.hlsli",
     "scene_camera.hlsli",    # the one declaration of the camera block
     "scene_lighting.hlsli",  # sky, lights and the tone curve, shared by sky and surface shading
 }
@@ -64,7 +69,7 @@ def main() -> int:
         )
     for shader in shaders:
         output = shader.with_suffix(shader.suffix + ".spv")
-        subprocess.run([dxc, "-spirv", "-E", "main", "-T", PROFILES[shader.suffix], "-fspv-target-env=vulkan1.1", "-O3", "-Fo", str(output), str(shader)], check=True)
+        subprocess.run([dxc, "-spirv", "-DHOOD_TINY_LATENT=32", "-E", "main", "-T", PROFILES[shader.suffix], "-fspv-target-env=vulkan1.1", "-O3", "-Fo", str(output), str(shader)], check=True)
         subprocess.run([validator, "--target-env", "vulkan1.1", str(output)], check=True)
         print(f"compiled and validated {shader.name} -> {output.name}")
     return 0

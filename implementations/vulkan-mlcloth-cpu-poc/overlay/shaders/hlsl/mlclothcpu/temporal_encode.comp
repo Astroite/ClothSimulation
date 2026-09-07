@@ -1,0 +1,13 @@
+// Two linear layers. Input-major packed weights, shared 32-channel node encoder.
+struct Push {uint count,pad0,pad1,pad2;};[[vk::push_constant]] Push p;
+[[vk::binding(0)]] StructuredBuffer<float> weights;
+[[vk::binding(1)]] StructuredBuffer<float> history;
+[[vk::binding(2)]] RWStructuredBuffer<float> latent;
+groupshared float hidden[32];
+[numthreads(32,1,1)]
+void main(uint3 group:SV_GroupID,uint lane:SV_GroupIndex){uint i=group.x;if(i>=p.count)return;
+    float value=weights[896+lane];for(uint j=0;j<28;j++)value+=weights[j*32+lane]*history[i*28+j];
+    hidden[lane]=max(value,0);GroupMemoryBarrierWithGroupSync();
+    value=weights[1952+lane];for(uint j=0;j<32;j++)value+=weights[928+j*32+lane]*hidden[j];
+    latent[i*32+lane]+=value;
+}

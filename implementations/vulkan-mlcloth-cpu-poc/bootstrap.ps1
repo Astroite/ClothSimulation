@@ -31,6 +31,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $GlmRoot 'glm'))) {
 $ActualGlmCommit = (& git -C $GlmRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $ActualGlmCommit -ne $Lock.submodules.'external/glm'.commit) { throw "GLM commit mismatch: expected $($Lock.submodules.'external/glm'.commit), got $ActualGlmCommit" }
 
+# Source edits must never run against a stale precompiled compute kernel.
+& py -3 (Join-Path $PocRoot 'tools/compile_shaders.py')
+if ($LASTEXITCODE -ne 0) { throw 'Shader compilation or SPIR-V validation failed' }
+
 $Destinations = @(
     @{ Source = Join-Path $PocRoot 'overlay/examples/mlclothcpu'; Destination = Join-Path $UpstreamRoot 'examples/mlclothcpu' },
     @{ Source = Join-Path $PocRoot 'overlay/shaders/hlsl/mlclothcpu'; Destination = Join-Path $UpstreamRoot 'shaders/hlsl/mlclothcpu' },
@@ -64,4 +68,19 @@ if ($CmakeText -notmatch '(?m)^\s*mlclothcpu\s*$') {
 }
 Write-Host "Upstream ready: $UpstreamRoot @ $ActualCommit"
 Write-Host 'Overlay installed: examples/mlclothcpu and shaders/*/mlclothcpu'
+
+# Optional standalone overlay hook. Other upstream samples keep the stock wrapper.
+$BaseHeader = Join-Path $UpstreamRoot 'base/vulkanexamplebase.h'
+$BaseSource = Join-Path $UpstreamRoot 'base/vulkanexamplebase.cpp'
+$HeaderText = Get-Content -LiteralPath $BaseHeader -Raw
+if ($HeaderText -notmatch 'useStandaloneUI') {
+    $HeaderText = $HeaderText.Replace('virtual void OnUpdateUIOverlay', 'virtual bool useStandaloneUI() const { return false; }' + "`r`n`t" + 'virtual void OnUpdateUIOverlay')
+    Set-Content -LiteralPath $BaseHeader -Value $HeaderText -NoNewline
+}
+$SourceText = Get-Content -LiteralPath $BaseSource -Raw
+if ($SourceText -notmatch 'useStandaloneUI') {
+    $Hook = "ImGui::NewFrame();`r`n`tif (useStandaloneUI()) { OnUpdateUIOverlay(&ui); ImGui::Render(); ui.update(currentBuffer); return; }"
+    $SourceText = $SourceText.Replace('ImGui::NewFrame();', $Hook)
+    Set-Content -LiteralPath $BaseSource -Value $SourceText -NoNewline
+}
 

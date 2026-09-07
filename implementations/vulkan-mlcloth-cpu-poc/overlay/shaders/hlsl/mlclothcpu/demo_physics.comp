@@ -1,0 +1,505 @@
+// Persistent small-step XPBD. Every structural color has disjoint write sets.
+[[vk::binding(0,0)]] RWStructuredBuffer<float4> x;
+[[vk::binding(1,0)]] RWStructuredBuffer<float4> velocity;
+[[vk::binding(2,0)]] RWStructuredBuffer<float4> previous;
+[[vk::binding(3,0)]] StructuredBuffer<float4> pins;
+[[vk::binding(4,0)]] StructuredBuffer<float4> guide;
+struct Constraint {uint4 ids;float4 rest;};
+[[vk::binding(5,0)]] StructuredBuffer<Constraint> constraints;
+[[vk::binding(6,0)]] RWStructuredBuffer<float> multipliers;
+[[vk::binding(7,0)]] StructuredBuffer<uint> patchOffsets;
+[[vk::binding(8,0)]] StructuredBuffer<uint> patchVertices;
+[[vk::binding(9,0)]] RWStructuredBuffer<float4> patchLambda;
+[[vk::binding(10,0)]] StructuredBuffer<float4> body;
+[[vk::binding(11,0)]] StructuredBuffer<float4> bodyPrevious;
+[[vk::binding(12,0)]] StructuredBuffer<uint> bodyTriangles;
+struct Node {float4 lo;float4 hi;uint4 links;};
+[[vk::binding(13,0)]] StructuredBuffer<Node> bodyTree;
+[[vk::binding(14,0)]] StructuredBuffer<uint> triangles;
+[[vk::binding(15,0)]] RWStructuredBuffer<Node> clothTree;
+[[vk::binding(16,0)]] RWStructuredBuffer<float4> snapshot;
+[[vk::binding(17,0)]] RWStructuredBuffer<uint> contactCounts;
+[[vk::binding(18,0)]] RWStructuredBuffer<float4> corrections;
+[[vk::binding(19,0)]] StructuredBuffer<uint> edges;
+[[vk::binding(20,0)]] RWStructuredBuffer<Node> edgeTree;
+[[vk::binding(21,0)]] StructuredBuffer<uint> adjacencyOffsets;
+[[vk::binding(22,0)]] StructuredBuffer<uint> adjacency;
+[[vk::binding(23,0)]] RWStructuredBuffer<uint> faceCellCounts;
+[[vk::binding(24,0)]] RWStructuredBuffer<uint> faceCells;
+[[vk::binding(25,0)]] RWStructuredBuffer<uint> edgeCellCounts;
+[[vk::binding(26,0)]] RWStructuredBuffer<uint> edgeCells;
+struct Bounds {float4 lo,hi;};
+[[vk::binding(27,0)]] RWStructuredBuffer<Bounds> faceBounds;
+[[vk::binding(28,0)]] RWStructuredBuffer<Bounds> edgeBounds;
+[[vk::binding(29,0)]] StructuredBuffer<float> adjacencyDistance;
+struct ContactRecord {uint4 ids;float4 weights;float4 delta;};
+[[vk::binding(30,0)]] RWStructuredBuffer<ContactRecord> contactRecords;
+// Conservative candidate cache: control words, anchor positions, fixed-capacity query lists.
+[[vk::binding(31,0)]] RWStructuredBuffer<uint> candidateCache;
+[[vk::binding(32,0)]] StructuredBuffer<uint> bodyIncidence;
+[[vk::binding(33,0)]] RWStructuredBuffer<float4> bodyNormals;
+[[vk::binding(34,0)]] RWStructuredBuffer<float4> guideContacts;
+[[vk::binding(35,0)]] StructuredBuffer<float4> learnedAcceleration;
+static const uint CACHE_CAPACITY=128;
+static const float CACHE_MARGIN=.01;
+struct Push {uint phase,start,count,vertices;float dt,alpha,gravity,damping;
+    float thickness,friction,guide;uint bodyCount,treeCount,edges,pad0,pad1;};
+[[vk::push_constant]] ConstantBuffer<Push> p;
+[[vk::constant_id(0)]] const uint PHASE=0;
+float3 unitOrZero(float3 v){float norm=length(v);return norm>1e-12?v/norm:0;}
+float3 bodyFaceNormal(uint tri){float3 a=body[bodyTriangles[tri*3]].xyz,b=body[bodyTriangles[tri*3+1]].xyz,c=body[bodyTriangles[tri*3+2]].xyz;return unitOrZero(cross(b-a,c-a));}
+float3 bodyFeatureNormal(uint tri,float3 bary){
+    uint base=p.start+tri*4;float3 normal=bodyNormals[base].xyz;
+    for(uint k=0;k<3;++k)if(bary[k]>=1-1e-6){normal=bodyNormals[bodyTriangles[tri*3+k]].xyz;return length(normal)>.5?normal:bodyNormals[base].xyz;}
+    for(uint k=0;k<3;++k)if(bary[(k+2)%3]<=1e-6){normal=bodyNormals[base+1+k].xyz;break;}
+    return length(normal)>.5?normal:bodyNormals[base].xyz;
+}
+float3 distanceNormal(float3 delta,float3 pseudo,float distance){return distance>1e-8?delta*((dot(delta,pseudo)<0?-1.:1.)/distance):pseudo;}
+float3 bodyPointAt(uint v,float time){return lerp(bodyPrevious[v].xyz,body[v].xyz,time);}
+float3 bodyFaceNormalAt(uint t,float time){float3 a=bodyPointAt(bodyTriangles[3*t],time),b=bodyPointAt(bodyTriangles[3*t+1],time),c=bodyPointAt(bodyTriangles[3*t+2],time);return unitOrZero(cross(b-a,c-a));}
+float3 bodyFeatureNormalAt(uint tri,float3 bary,float time){
+    float3 normal=bodyFaceNormalAt(tri,time);
+    for(uint k=0;k<3;++k)if(bary[k]>=1-1e-6){uint v=bodyTriangles[3*tri+k];float3 sum=0;
+        for(uint i=bodyIncidence[4+v];i<bodyIncidence[5+v];++i){uint t=bodyIncidence[bodyIncidence[2]+i],corner=0;while(corner<2&&bodyTriangles[3*t+corner]!=v)++corner;
+            float3 e1=bodyPointAt(bodyTriangles[3*t+(corner+1)%3],time)-bodyPointAt(v,time),e2=bodyPointAt(bodyTriangles[3*t+(corner+2)%3],time)-bodyPointAt(v,time);
+            if(dot(e1,e1)*dot(e2,e2)>1e-20)sum+=bodyFaceNormalAt(t,time)*atan2(length(cross(e1,e2)),dot(e1,e2));}
+        float3 result=unitOrZero(sum);return length(result)>.5?result:normal;}
+    for(uint k=0;k<3;++k)if(bary[(k+2)%3]<=1e-6){float3 result=unitOrZero(normal+bodyFaceNormalAt(bodyIncidence[bodyIncidence[3]+3*tri+k],time));return length(result)>.5?result:normal;}
+    return normal;
+}
+float3 closestBary(float3 v,float3 a,float3 b,float3 c){
+    float3 ab=b-a,ac=c-a,ap=v-a;float d1=dot(ab,ap),d2=dot(ac,ap);
+    float3 area=cross(ab,ac);float edge2=max(dot(ab,ab),max(dot(ac,ac),dot(c-b,c-b)));
+    if(dot(area,area)<=1e-12*edge2*edge2){
+        float3 points[3]={a,b,c};float3 axes[3]={float3(1,0,0),float3(0,1,0),float3(0,0,1)};
+        float best=1e30;float3 bary=float3(1,0,0);
+        for(uint k=0;k<3;++k){uint next=(k+1)%3;float3 edge=points[next]-points[k];float norm=dot(edge,edge);
+            float t=norm>1e-20?saturate(dot(v-points[k],edge)/norm):0;float3 delta=v-(points[k]+edge*t);
+            float distance=dot(delta,delta);if(distance<best){best=distance;bary=lerp(axes[k],axes[next],t);}}
+        return bary;
+    }
+    if(d1<=0&&d2<=0)return float3(1,0,0);
+    float3 bp=v-b;float d3=dot(ab,bp),d4=dot(ac,bp);if(d3>=0&&d4<=d3)return float3(0,1,0);
+    float vc=d1*d4-d3*d2;if(vc<=0&&d1>=0&&d3<=0){float t=d1/(d1-d3);return float3(1-t,t,0);}
+    float3 cp=v-c;float d5=dot(ab,cp),d6=dot(ac,cp);if(d6>=0&&d5<=d6)return float3(0,0,1);
+    float vb=d5*d2-d1*d6;if(vb<=0&&d2>=0&&d6<=0){float t=d2/(d2-d6);return float3(1-t,0,t);}
+    float va=d3*d6-d5*d4;if(va<=0&&(d4-d3)>=0&&(d5-d6)>=0){float t=(d4-d3)/((d4-d3)+(d5-d6));return float3(0,1-t,t);}
+    float denominator=va+vb+vc;if(abs(denominator)<1e-20)return float3(1,0,0);
+    float u=saturate(vb/denominator),vv=clamp(vc/denominator,0,1-u);return float3(1-u-vv,u,vv);
+}
+bool overlap(float3 lo,float3 hi,Node node){return all(hi>=node.lo.xyz-p.thickness)&&all(lo<=node.hi.xyz+p.thickness);}
+uint hashCell(int3 cell){return ((uint(cell.x)*73856093u)^(uint(cell.y)*19349663u)^(uint(cell.z)*83492791u))&32767u;}
+void primitiveBounds(uint primitive,bool edge,out float3 lo,out float3 hi){
+    lo=1e30;hi=-1e30;
+    for(uint k=0;k<(edge?2:3);++k){uint v=edge?edges[primitive*2+k]:triangles[primitive*3+k];
+        lo=min(lo,min(snapshot[v].xyz,previous[v].xyz));hi=max(hi,max(snapshot[v].xyz,previous[v].xyz));}
+}
+struct Candidates {int3 first,last,cell;uint slot,node,largeSlot,lane;bool edge,fallback,done,cached;uint cacheBase,cacheCount;float3 lo,hi;};
+Candidates beginCandidates(float3 lo,float3 hi,bool edge,uint lane){
+    Candidates c;c.lo=lo;c.hi=hi;c.first=int3(floor((lo-p.thickness)/.02));c.last=int3(floor((hi+p.thickness)/.02));
+    c.cached=false;c.cacheBase=0;c.cacheCount=0;c.cell=c.first;c.slot=lane;c.node=0;c.largeSlot=lane;c.lane=lane;c.edge=edge;c.done=false;
+    c.fallback=any(c.last-c.first>6)||(edge?edgeCellCounts[32768]:faceCellCounts[32768])>512;
+    if(!c.fallback)for(int xx=c.first.x;xx<=c.last.x;++xx)for(int yy=c.first.y;yy<=c.last.y;++yy)for(int zz=c.first.z;zz<=c.last.z;++zz){
+        uint hash=hashCell(int3(xx,yy,zz));if((edge?edgeCellCounts[hash]:faceCellCounts[hash])>512)c.fallback=true;}
+    return c;
+}
+bool nextCandidate(inout Candidates c,out uint primitive){
+    primitive=0;
+    if(c.cached){if(c.slot>=c.cacheCount)return false;primitive=candidateCache[c.cacheBase+1+c.slot];c.slot+=32;return true;}
+    if(c.fallback){
+        while(c.node<p.treeCount){Node n;if(c.edge)n=edgeTree[c.node];else n=clothTree[c.node];
+            if(!overlap(c.lo,c.hi,n)){c.node=n.links.y;continue;}++c.node;
+            if(n.links.w&&((n.links.z&31u)==c.lane)){primitive=n.links.z;return true;}}
+        return false;
+    }
+    while(!c.done){
+        uint hash=hashCell(c.cell),count=c.edge?edgeCellCounts[hash]:faceCellCounts[hash];
+        while(c.slot<count){
+            primitive=c.edge?edgeCells[hash*512+c.slot]:faceCells[hash*512+c.slot];c.slot+=32;
+            Bounds bounds;if(c.edge)bounds=edgeBounds[primitive];else bounds=faceBounds[primitive];float3 lo=bounds.lo.xyz,hi=bounds.hi.xyz;
+            int3 first=max(c.first,int3(floor(lo/.02)));
+            if(all(first==c.cell)&&all(c.hi+p.thickness>=lo)&&all(c.lo-p.thickness<=hi))return true;
+        }
+        c.slot=c.lane;++c.cell.z;if(c.cell.z>c.last.z){c.cell.z=c.first.z;++c.cell.y;}
+        if(c.cell.y>c.last.y){c.cell.y=c.first.y;++c.cell.x;}if(c.cell.x>c.last.x)c.done=true;
+    }
+    uint largeCount=c.edge?edgeCellCounts[32768]:faceCellCounts[32768];
+    while(c.largeSlot<largeCount){
+        primitive=c.edge?edgeCells[32768*512+c.largeSlot]:faceCells[32768*512+c.largeSlot];c.largeSlot+=32;
+        Bounds bounds;if(c.edge)bounds=edgeBounds[primitive];else bounds=faceBounds[primitive];float3 lo=bounds.lo.xyz,hi=bounds.hi.xyz;
+        if(all(c.hi+p.thickness>=lo)&&all(c.lo-p.thickness<=hi))return true;
+    }
+    return false;
+}
+uint cacheBase(uint query){return 16+3*p.vertices+query*(CACHE_CAPACITY+1);}
+Candidates queryCandidates(float3 lo,float3 hi,bool edge,uint lane,uint query){
+    if(p.pad1&2)return beginCandidates(lo,hi,edge,lane);
+    if(candidateCache[0])return beginCandidates(lo-CACHE_MARGIN,hi+CACHE_MARGIN,edge,lane);
+    Candidates c=(Candidates)0;c.edge=edge;c.lo=lo;c.hi=hi;c.lane=lane;c.slot=lane;
+    c.cacheBase=cacheBase(query);c.cacheCount=candidateCache[c.cacheBase];
+    // Overflow uses the freshly refitted BVH; never consume a truncated candidate list.
+    c.cached=c.cacheCount<=CACHE_CAPACITY;c.fallback=!c.cached;return c;
+}
+void cacheCandidate(uint query,uint primitive){
+    if((p.pad1&2)||!candidateCache[0])return;uint slot,base=cacheBase(query);InterlockedAdd(candidateCache[base],1,slot);
+    if(slot<CACHE_CAPACITY)candidateCache[base+1+slot]=primitive;
+    else if(slot==CACHE_CAPACITY)InterlockedAdd(candidateCache[4],1);
+}
+bool neighbor(uint a,uint b){uint first=adjacencyOffsets[a],last=adjacencyOffsets[a+1],end=last;
+    while(first<last){uint middle=(first+last)/2;if(adjacency[middle]<b)first=middle+1;else last=middle;}
+    return first<end&&adjacency[first]==b&&adjacencyDistance[first]<=2*p.thickness;
+}
+void addCorrection(uint v,float3 delta){
+    if(snapshot[v].w==0)return;
+    uint slot;InterlockedAdd(contactCounts[v],1,slot);
+    if(slot<256)corrections[v*256+slot]=float4(delta,0);
+    else InterlockedAdd(contactCounts[p.vertices],1);
+}
+float2 segmentPair(float3 a,float3 b,float3 c,float3 d){
+    float3 e1=b-a,e2=d-c,r=a-c;float aa=dot(e1,e1),ee=dot(e2,e2),ff=dot(e2,r),s=0,t=0;
+    if(aa<=1e-16&&ee<=1e-16)return 0;
+    if(aa<=1e-16)t=saturate(ff/ee);
+    else{float cc=dot(e1,r);if(ee<=1e-16)s=saturate(-cc/aa);
+        else{float bb=dot(e1,e2),den=aa*ee-bb*bb;s=abs(den)>1e-16?saturate((bb*ff-cc*ee)/den):0;t=(bb*s+ff)/ee;
+            if(t<0){t=0;s=saturate(-cc/aa);}else if(t>1){t=1;s=saturate((bb-cc)/aa);}}}
+    return float2(s,t);
+}
+float3 capsuleClosest(float3 particlePoint,float3 a,float3 b,out float along){
+    float3 axis=b-a;float norm=dot(axis,axis);along=norm>1e-16?saturate(dot(particlePoint-a,axis)/norm):0;return a+axis*along;
+}
+bool capsuleProject(inout float3 particlePoint,float3 start,uint index,bool sweep,
+                    out float3 normal,out float3 surfaceVelocity,out float impulse,out bool recovered){
+    float4 a=body[index],b=body[index+1];float3 oldA=bodyPrevious[index].xyz,oldB=bodyPrevious[index+1].xyz;
+    float radius=a.w+p.thickness,along,oldAlong;float3 end=particlePoint,q=capsuleClosest(end,a.xyz,b.xyz,along),oldQ=capsuleClosest(start,oldA,oldB,oldAlong);
+    float distance=length(end-q),oldGap=length(start-oldQ)-radius;normal=end-q;bool hit=distance<radius;recovered=oldGap<0;surfaceVelocity=0;impulse=0;
+    // Distance is invariant under a shared translation. Bound only relative endpoint motion.
+    float3 motion=end-start;float bound=max(length(a.xyz-oldA-motion),length(b.xyz-oldB-motion));
+    if(sweep&&oldGap>0&&bound>1e-9&&distance<=bound+radius){float time=0;
+        for(uint k=0;k<32;++k){float3 at=lerp(oldA,a.xyz,time),bt=lerp(oldB,b.xyz,time),pt=lerp(start,end,time);float t;
+            float3 feature=capsuleClosest(pt,at,bt,t);float gap=length(pt-feature)-radius;
+            if(gap<=1e-5){normal=pt-feature;along=t;q=lerp(a.xyz,b.xyz,t);hit=true;break;}
+            time+=gap/bound;if(time>1)break;}
+    }
+    if(!hit)return false;
+    if(length(normal)<1e-8)normal=start-oldQ;
+    if(length(normal)<1e-8){normal=cross(b.xyz-a.xyz,float3(1,0,0));if(length(normal)<1e-8)normal=float3(0,0,1);}
+    normal=normalize(normal);float residual=dot(end-q,normal)-radius;if(residual>=0)return false;
+    particlePoint=end-normal*residual;impulse=-residual/p.dt;surfaceVelocity=((a.xyz-oldA)*(1-along)+(b.xyz-oldB)*along)/p.dt;return true;
+}
+bool recoverBodyContact(inout float3 particlePoint,inout uint hint,out float3 normal,out float3 motion,out float impulse){
+    float nearest=1e30,signedDistance=0;normal=0;motion=0;impulse=0;uint selected=0xffffffff;
+    if(hint<(p.bodyCount+1)/2){float3 a=body[bodyTriangles[3*hint]].xyz,b=body[bodyTriangles[3*hint+1]].xyz,c=body[bodyTriangles[3*hint+2]].xyz;
+        if(length(cross(b-a,c-a))>=1e-12){float3 bc=closestBary(particlePoint,a,b,c);nearest=length(particlePoint-(a+(b-a)*bc.y+(c-a)*bc.z));}}
+    uint index=0;while(index<p.bodyCount){Node node=bodyTree[index];float3 delta=max(max(node.lo.xyz-particlePoint,particlePoint-node.hi.xyz),0);
+        if(dot(delta,delta)>(nearest+1e-6)*(nearest+1e-6)){index=node.links.y;continue;}
+        if(node.links.w==0){++index;continue;}uint tri=node.links.z,ia=bodyTriangles[3*tri],ib=bodyTriangles[3*tri+1],ic=bodyTriangles[3*tri+2];
+        float3 a=body[ia].xyz,b=body[ib].xyz,c=body[ic].xyz,n=cross(b-a,c-a);float norm=length(n);
+        if(norm>=1e-12){n/=norm;float3 bc=closestBary(particlePoint,a,b,c),q=a+(b-a)*bc.y+(c-a)*bc.z;float distance=length(particlePoint-q);
+            if(distance<nearest-1e-6||(abs(distance-nearest)<=1e-6&&tri<selected)){nearest=distance;selected=tri;normal=distanceNormal(particlePoint-q,bodyFeatureNormal(tri,bc),distance);signedDistance=dot(particlePoint-q,normal);
+                motion=((a-bodyPrevious[ia].xyz)*bc.x+(b-bodyPrevious[ib].xyz)*bc.y+(c-bodyPrevious[ic].xyz)*bc.z)/p.dt;}}
+        ++index;
+    }
+    hint=selected;if(signedDistance>=-1e-6)return false;
+    particlePoint+=normal*(p.thickness-signedDistance);impulse=(p.thickness-signedDistance)/p.dt;return true;
+}
+[numthreads(64,1,1)]
+void main(uint id:SV_DispatchThreadID){
+    if(id>=p.count)return;
+    if(PHASE==16){
+        for(uint slot=0;slot<3;++slot)guideContacts[3*id+slot]=0;
+        if(x[id].w==0)return;
+        float3 particlePoint=x[id].xyz;
+        float band=max(4*p.thickness,.012),reach=p.thickness+band;
+        guideContacts[3*id]=float4(0,1,0,saturate((reach-particlePoint.y)/band));float4 capsuleContact=0;
+        for(uint k=0;k<p.edges;++k){float4 a=body[p.start+2*k],b=body[p.start+2*k+1];float3 axis=b.xyz-a.xyz;
+            float t=saturate(dot(particlePoint-a.xyz,axis)/max(dot(axis,axis),1e-20));float3 delta=particlePoint-(a.xyz+axis*t);float distance=length(delta);
+            float proximity=saturate((reach-distance+a.w)/band);
+            if(distance>1e-8&&proximity>capsuleContact.w)capsuleContact=float4(delta/distance,proximity);}
+        guideContacts[3*id+1]=capsuleContact;
+        float nearest=reach;uint index=0,selected=0xffffffff;float3 normal=0,closest=0;
+        while(index<p.bodyCount){Node node=bodyTree[index];float3 delta=max(max(node.lo.xyz-particlePoint,particlePoint-node.hi.xyz),0);
+            if(dot(delta,delta)>(nearest+1e-6)*(nearest+1e-6)){index=node.links.y;continue;}
+            if(node.links.w==0){++index;continue;}
+            uint tri=node.links.z;uint3 ids=uint3(bodyTriangles[3*tri],bodyTriangles[3*tri+1],bodyTriangles[3*tri+2]);
+            float3 a=body[ids.x].xyz,b=body[ids.y].xyz,c=body[ids.z].xyz;
+            if(length(cross(b-a,c-a))>1e-12){float3 bary=closestBary(particlePoint,a,b,c),q=a*bary.x+b*bary.y+c*bary.z;float distance=length(particlePoint-q);
+                if(distance<nearest-1e-6||(abs(distance-nearest)<=1e-6&&tri<selected)){
+                    nearest=distance;selected=tri;closest=q;normal=distanceNormal(particlePoint-q,bodyFeatureNormal(tri,bary),distance);}}
+            ++index;
+        }
+        if(selected!=0xffffffff)guideContacts[3*id+2]=float4(normal,saturate((reach-dot(particlePoint-closest,normal))/band));
+        return;
+    }
+    if(PHASE==15){
+        uint vertices=bodyIncidence[0],faces=bodyIncidence[1];
+        if(id<vertices){float3 sum=0;
+            for(uint i=bodyIncidence[4+id];i<bodyIncidence[5+id];++i){uint tri=bodyIncidence[bodyIncidence[2]+i],corner=0;
+                while(corner<2&&bodyTriangles[3*tri+corner]!=id)++corner;
+                float3 e1=body[bodyTriangles[3*tri+(corner+1)%3]].xyz-body[id].xyz,e2=body[bodyTriangles[3*tri+(corner+2)%3]].xyz-body[id].xyz;
+                if(dot(e1,e1)*dot(e2,e2)>1e-20)sum+=bodyFaceNormal(tri)*atan2(length(cross(e1,e2)),dot(e1,e2));
+            }
+            bodyNormals[id]=float4(unitOrZero(sum),0);
+        }
+        if(id<faces){float3 normal=bodyFaceNormal(id);uint base=vertices+id*4;bodyNormals[base]=float4(normal,0);
+            for(uint k=0;k<3;++k)bodyNormals[base+1+k]=float4(unitOrZero(normal+bodyFaceNormal(bodyIncidence[bodyIncidence[3]+3*id+k])),0);}
+        return;
+    }
+    if(PHASE==14){
+        if(x[id].w==0)return;
+        Constraint t=constraints[p.start+id];float3 position=x[id].xyz,correction=0;uint count=0;
+        for(uint k=0;k<4;++k)if(t.rest[k]>0){
+            ++count;float3 delta=position-pins[t.ids[k]].xyz;float distance=length(delta),limit=t.rest[k]*p.alpha;
+            if(distance>limit)correction-=delta*((distance-limit)/distance);
+        }
+        if(count)x[id].xyz=position+correction/float(count);
+        return;
+    }
+    if(PHASE==11){
+        float3 anchor=asfloat(uint3(candidateCache[16+3*id],candidateCache[17+3*id],candidateCache[18+3*id]));
+        float3 now=snapshot[id].xyz-snapshot[0].xyz,old=previous[id].xyz-previous[0].xyz;
+        if((p.pad1&2)||!candidateCache[1]||length(now-anchor)>.5*CACHE_MARGIN||length(old-anchor)>.5*CACHE_MARGIN)
+            InterlockedOr(candidateCache[0],1);
+        return;
+    }
+    if(PHASE==12){
+        if(candidateCache[0])candidateCache[cacheBase(id)]=0;
+        if(id==0){if(candidateCache[0]){candidateCache[2]++;candidateCache[4]=0;}else candidateCache[3]++;}return;
+    }
+    if(PHASE==13){
+        if(candidateCache[0]){uint3 anchor=asuint(snapshot[id].xyz-snapshot[0].xyz);
+            candidateCache[16+3*id]=anchor.x;candidateCache[17+3*id]=anchor.y;candidateCache[18+3*id]=anchor.z;
+            if(id==0)candidateCache[1]=1;}return;
+    }
+    if(PHASE==9||PHASE==10){
+        if(!candidateCache[0])return;
+        bool edge=PHASE==10;float3 lo,hi;primitiveBounds(id,edge,lo,hi);
+        Bounds bounds;bounds.lo=float4(lo,0);bounds.hi=float4(hi,0);if(edge)edgeBounds[id]=bounds;else faceBounds[id]=bounds;
+        int3 first=int3(floor(lo/.02)),last=int3(floor(hi/.02));
+        if(any(last-first>6)){uint slot;if(edge){InterlockedAdd(edgeCellCounts[32768],1,slot);if(slot<512)edgeCells[32768*512+slot]=id;}
+            else{InterlockedAdd(faceCellCounts[32768],1,slot);if(slot<512)faceCells[32768*512+slot]=id;}return;}
+        for(int xx=first.x;xx<=last.x;++xx)for(int yy=first.y;yy<=last.y;++yy)for(int zz=first.z;zz<=last.z;++zz){
+            uint hash=hashCell(int3(xx,yy,zz)),slot;
+            if(edge){InterlockedAdd(edgeCellCounts[hash],1,slot);if(slot<512)edgeCells[hash*512+slot]=id;}
+            else{InterlockedAdd(faceCellCounts[hash],1,slot);if(slot<512)faceCells[hash*512+slot]=id;}
+        }return;
+    }
+    if(PHASE==0){
+        float4 particle=x[id];previous[id]=particle;
+        if(particle.w==0){particle.xyz=pins[id].xyz;velocity[id]=0;}
+        else{float3 v=velocity[id].xyz*exp(-p.damping*p.dt);v+=((p.pad1&4)!=0?learnedAcceleration[id].xyz:float3(0,p.gravity,0))*p.dt;particle.xyz+=v*p.dt;velocity[id].xyz=v;}
+        x[id]=particle;return;
+    }
+    if(PHASE==1){
+        uint ci=p.start+id;Constraint c=constraints[ci];uint type=(uint)c.rest.y;
+        float4 a=x[c.ids.x],b=x[c.ids.y],cc=x[c.ids.z],d=x[c.ids.w];
+        float3 g0=0,g1=0,g2=0,g3=0;float residual;
+        if(type==0){float3 delta=a.xyz-b.xyz;float distance=length(delta);if(distance<1e-10)return;g0=delta/distance;g1=-g0;residual=distance-c.rest.x;}
+        else if(type==1){float3 e1=b.xyz-a.xyz,e2=cc.xyz-a.xyz;residual=dot(e1,e2)-c.rest.x;g0=-e1-e2;g1=e2;g2=e1;}
+        else{
+            float3 e=b.xyz-a.xyz,n1=cross(e,cc.xyz-a.xyz),n2=cross(e,d.xyz-a.xyz);
+            float e2=dot(e,e),n12=dot(n1,n1),n22=dot(n2,n2);if(min(e2,min(n12,n22))<1e-16)return;
+            float edgeLength=sqrt(e2);float3 eh=e/edgeLength;
+            float angle=atan2(dot(cross(n1,n2),eh),dot(n1,n2));residual=atan2(sin(angle-c.rest.x),cos(angle-c.rest.x));
+            g2=-n1*edgeLength/n12;g3=n2*edgeLength/n22;
+            float tc=dot(cc.xyz-a.xyz,e)/e2,td=dot(d.xyz-a.xyz,e)/e2;
+            g0=-(1-tc)*g2-(1-td)*g3;g1=-tc*g2-td*g3;
+        }
+        float denominator=a.w*dot(g0,g0)+b.w*dot(g1,g1)+(type>=1?cc.w*dot(g2,g2):0)+(type==2?d.w*dot(g3,g3):0)+p.alpha;
+        if(denominator<1e-12)return;float dl=(-residual-p.alpha*multipliers[ci])/denominator;multipliers[ci]+=dl;
+        a.xyz+=a.w*g0*dl;b.xyz+=b.w*g1*dl;x[c.ids.x]=a;x[c.ids.y]=b;
+        if(type>=1){cc.xyz+=cc.w*g2*dl;x[c.ids.z]=cc;}if(type==2){d.xyz+=d.w*g3*dl;x[c.ids.w]=d;}return;
+    }
+    if(PHASE==2){
+        uint first=patchOffsets[id],end=patchOffsets[id+1];float mass=0,confidence=1;float3 difference=0;
+        for(uint k=first;k<end;++k){uint v=patchVertices[k];if(x[v].w>0){float m=1/x[v].w;mass+=m;difference+=(x[v].xyz-guide[v].xyz)*m;}}
+        if(mass<1e-12)return;difference/=mass;
+        if(p.guide>0)for(uint item=first;item<end;++item){uint v=patchVertices[item];if(x[v].w>0)
+            for(uint slot=0;slot<3;++slot){float4 contact=guideContacts[3*v+slot];confidence=min(confidence,1-contact.w*saturate(dot(difference,contact.xyz)/max(4*p.thickness,.012)));}}
+        if(confidence<=1e-6){patchLambda[id]=0;return;}
+        // A centroid component has gradient m_i / M. Sum(w_i * grad_i^2)=1/M.
+        // Suppress a grossly abnormal model prediction rather than creating a kick.
+        float attenuation=saturate(1-length(difference)/.5);float alpha=p.alpha/(max(attenuation,.01)*confidence);
+        float3 dl=(-difference-alpha*patchLambda[id].xyz)/(1/mass+alpha)*(p.alpha==0?confidence:1.);patchLambda[id]+=float4(dl,0);
+        for(uint j=first;j<end;++j){uint v=patchVertices[j];if(x[v].w>0)x[v]+=float4(dl/mass,0);}return;
+    }
+    if(PHASE==4||PHASE==5){
+        bool edge=p.guide>0;Node node;if(edge)node=edgeTree[id];else node=clothTree[id];
+        if(PHASE==4){if(node.links.w==0)return;float3 lo=1e30,hi=-1e30;uint stride=edge?2:3;
+            for(uint k=0;k<stride;++k){uint v=edge?edges[node.links.z*2+k]:triangles[node.links.z*3+k];
+                lo=min(lo,min(snapshot[v].xyz,previous[v].xyz));hi=max(hi,max(snapshot[v].xyz,previous[v].xyz));}
+            node.lo.xyz=lo;node.hi.xyz=hi;
+        }else{if(node.links.w!=0||(uint)node.lo.w!=p.start)return;
+            Node left,right;if(edge){left=edgeTree[id+1];right=edgeTree[node.links.x];}else{left=clothTree[id+1];right=clothTree[node.links.x];}
+            node.lo.xyz=min(left.lo.xyz,right.lo.xyz);node.hi.xyz=max(left.hi.xyz,right.hi.xyz);}
+        if(edge)edgeTree[id]=node;else clothTree[id]=node;return;
+    }
+    if(PHASE==6){
+        uint lane=id&31u;id>>=5;
+        float3 v=snapshot[id].xyz,oldV=previous[id].xyz;float3 lo=min(v,oldV),hi=max(v,oldV);Candidates candidates=queryCandidates(lo,hi,false,lane,id);uint t;
+        uint nearestKey=0xffffffffu,selectedPrimitive=0xffffffffu;uint3 selected=0;float3 selectedBary=0,selectedDelta=0;bool found=false;
+        while(nextCandidate(candidates,t)){uint a=triangles[3*t],b=triangles[3*t+1],c=triangles[3*t+2];
+            if(neighbor(id,a)||neighbor(id,b)||neighbor(id,c))continue;cacheCandidate(id,t);
+            float3 aa=snapshot[a].xyz,bb=snapshot[b].xyz,cc=snapshot[c].xyz;
+            float3 oa=previous[a].xyz,ob=previous[b].xyz,oc=previous[c].xyz;
+            float3 bary=closestBary(v,aa,bb,cc),q=aa+(bb-aa)*bary.y+(cc-aa)*bary.z;
+            float3 normal=cross(bb-aa,cc-aa);float nl=length(normal);if(nl<1e-12)continue;normal/=nl;
+            float3 oldNormal=cross(ob-oa,oc-oa);normal*=dot(oldV-oa,oldNormal)>=0?1:-1;
+            float distance=length(v-q);bool contact=distance<p.thickness;
+            float3 motion=v-oldV;float bound=max(length(aa-oa-motion),max(length(bb-ob-motion),length(cc-oc-motion))),time=0;
+            if(distance>bound+p.thickness)continue;
+            for(uint k=0;k<24&&!contact&&bound>1e-9;++k){
+                float3 at=lerp(oa,aa,time),bt=lerp(ob,bb,time),ct=lerp(oc,cc,time),vt=lerp(oldV,v,time);
+                float3 bc=closestBary(vt,at,bt,ct);float gap=length(vt-(at+(bt-at)*bc.y+(ct-at)*bc.z));
+                if(gap<p.thickness+1e-5){bary=bc;q=aa+(bb-aa)*bc.y+(cc-aa)*bc.z;contact=true;break;}
+                time+=(gap-p.thickness)/bound;if(time>1)break;}
+            if(min(bary.x,min(bary.y,bary.z))<1e-6){float3 separation=oldV-(oa+(ob-oa)*bary.y+(oc-oa)*bary.z);
+                if(length(separation)>1e-6)normal=normalize(separation);}
+            float residual=dot(v-q,normal)-p.thickness;
+            if(!contact||residual>=0)continue;
+            float denom=snapshot[id].w+snapshot[a].w*bary.x*bary.x+snapshot[b].w*bary.y*bary.y+snapshot[c].w*bary.z*bary.z;
+            if(denom<1e-12)continue;
+            // An almost immovable barycentric contact must not launch a distant free corner.
+            float mobile=max(snapshot[id].w,max(snapshot[a].w*bary.x,max(snapshot[b].w*bary.y,snapshot[c].w*bary.z)));
+            float3 delta=normal*(-residual/max(denom,mobile*.25));
+            uint key=uint(distance*1e6+.5);
+            if(key<nearestKey||(key==nearestKey&&t<selectedPrimitive)){nearestKey=key;selectedPrimitive=t;selected=uint3(a,b,c);selectedBary=bary;selectedDelta=delta;found=true;}
+        }
+        // Quantized micrometre distance plus primitive ID removes traversal-order ties.
+        uint minimum=WaveActiveMin(nearestKey);
+        uint primitive=WaveActiveMin(nearestKey==minimum?selectedPrimitive:0xffffffffu);
+        uint winner=WaveActiveMin(nearestKey==minimum&&selectedPrimitive==primitive?lane:0xffffffffu);
+        if(found&&winner==lane){
+            ContactRecord record;record.ids=uint4(id,selected);record.weights=float4(1,-selectedBary);record.delta=float4(selectedDelta,float(nearestKey+1)*1e-6);contactRecords[id]=record;
+            addCorrection(id,selectedDelta*snapshot[id].w);
+            for(uint k=0;k<3;++k)if(selectedBary[k]>1e-6)addCorrection(selected[k],-selectedDelta*snapshot[selected[k]].w*selectedBary[k]);}
+        return;
+    }
+    if(PHASE==7){
+        uint lane=id&31u;id>>=5;
+        uint a=edges[2*id],b=edges[2*id+1];float3 aa=snapshot[a].xyz,bb=snapshot[b].xyz,oa=previous[a].xyz,ob=previous[b].xyz;
+        float3 lo=min(min(aa,bb),min(oa,ob)),hi=max(max(aa,bb),max(oa,ob));Candidates candidates=queryCandidates(lo,hi,true,lane,p.vertices+id);uint e;
+        uint nearestKey=0xffffffffu,selectedPrimitive=0xffffffffu;uint2 selected=0;float4 selectedWeights=0;float3 selectedCorrection=0;bool found=false;
+        while(nextCandidate(candidates,e)){if(e<=id)continue;
+            uint c=edges[2*e],d=edges[2*e+1];if(neighbor(a,c)||neighbor(a,d)||neighbor(b,c)||neighbor(b,d))continue;cacheCandidate(p.vertices+id,e);
+            float3 cc=snapshot[c].xyz,dd=snapshot[d].xyz,oc=previous[c].xyz,od=previous[d].xyz;
+            float2 st=segmentPair(aa,bb,cc,dd);float3 delta=lerp(aa,bb,st.x)-lerp(cc,dd,st.y);float distance=length(delta);
+            float3 common=((aa-oa)+(bb-ob)+(cc-oc)+(dd-od))*.25;
+            bool contact=distance<p.thickness;float bound=max(length(aa-oa-common),length(bb-ob-common))+max(length(cc-oc-common),length(dd-od-common)),time=0;
+            if(distance>bound+p.thickness)continue;
+            for(uint k=0;k<24&&!contact&&bound>1e-9;++k){
+                float3 at=lerp(oa,aa,time),bt=lerp(ob,bb,time),ct=lerp(oc,cc,time),dt=lerp(od,dd,time);
+                float2 pair=segmentPair(at,bt,ct,dt);float gap=length(lerp(at,bt,pair.x)-lerp(ct,dt,pair.y));
+                if(gap<p.thickness+1e-5){st=pair;contact=true;break;}time+=(gap-p.thickness)/bound;if(time>1)break;}
+            if(!contact)continue;
+            float3 oldDelta=lerp(oa,ob,st.x)-lerp(oc,od,st.y);
+            float3 normal=length(oldDelta)>1e-6?normalize(oldDelta):cross(bb-aa,dd-cc);float nl=length(normal);if(nl<1e-12)continue;normal/=nl;
+            float residual=dot(lerp(aa,bb,st.x)-lerp(cc,dd,st.y),normal)-p.thickness;if(residual>=0)continue;
+            float4 w=float4(1-st.x,st.x,1-st.y,st.y);
+            float denom=snapshot[a].w*w.x*w.x+snapshot[b].w*w.y*w.y+snapshot[c].w*w.z*w.z+snapshot[d].w*w.w*w.w;
+            if(denom<1e-12)continue;
+            float mobile=max(max(snapshot[a].w*w.x,snapshot[b].w*w.y),max(snapshot[c].w*w.z,snapshot[d].w*w.w));
+            float3 correction=normal*(-residual/max(denom,mobile*.25));
+            uint key=uint(distance*1e6+.5);
+            if(key<nearestKey||(key==nearestKey&&e<selectedPrimitive)){nearestKey=key;selectedPrimitive=e;selected=uint2(c,d);selectedWeights=w;selectedCorrection=correction;found=true;}
+        }
+        // Quantized micrometre distance plus primitive ID removes traversal-order ties.
+        uint minimum=WaveActiveMin(nearestKey);
+        uint primitive=WaveActiveMin(nearestKey==minimum?selectedPrimitive:0xffffffffu);
+        uint winner=WaveActiveMin(nearestKey==minimum&&selectedPrimitive==primitive?lane:0xffffffffu);
+        if(found&&winner==lane){
+            ContactRecord record;record.ids=uint4(a,b,selected);record.weights=selectedWeights*float4(1,1,-1,-1);record.delta=float4(selectedCorrection,float(nearestKey+1)*1e-6);contactRecords[p.vertices+id]=record;
+            if(selectedWeights.x>1e-6)addCorrection(a,selectedCorrection*snapshot[a].w*selectedWeights.x);if(selectedWeights.y>1e-6)addCorrection(b,selectedCorrection*snapshot[b].w*selectedWeights.y);
+            if(selectedWeights.z>1e-6)addCorrection(selected.x,-selectedCorrection*snapshot[selected.x].w*selectedWeights.z);if(selectedWeights.w>1e-6)addCorrection(selected.y,-selectedCorrection*snapshot[selected.y].w*selectedWeights.w);}
+        return;
+    }
+    if(PHASE==8){
+        uint count=contactCounts[id];if(!count||x[id].w==0)return;
+        if(count>256){
+            // Rare overflow: gather every source in stable ID order instead of an
+            // arbitrary atomic prefix. No contact is dropped due to scheduling.
+            float3 sum=0;uint total=0;
+            for(uint source=0;source<p.vertices+p.start;++source){ContactRecord record=contactRecords[source];
+                for(uint corner=0;corner<4;++corner)if(record.ids[corner]==id&&abs(record.weights[corner])>1e-6){
+                    sum+=record.delta.xyz*(snapshot[id].w*record.weights[corner]);++total;}}
+            if(total)x[id]+=float4(sum/total,0);return;
+        }
+        // Atomic append order is unspecified. A bounded fixed-point sum makes
+        // the mean reproducible without sorting or floating-point atomics.
+        float maximum=0;
+        for(uint k=0;k<count;++k){float3 delta=abs(corrections[id*256+k].xyz);maximum=max(maximum,max(delta.x,max(delta.y,delta.z)));}
+        if(maximum<1e-20)return;float scale=2097152./maximum;int3 sum=0;
+        for(uint j=0;j<count;++j)sum+=int3(round(corrections[id*256+j].xyz*scale));
+        x[id]+=float4((float3(sum)/2097152.)*(maximum/count),0);return;
+    }
+    if(PHASE==3){
+        float4 particle=x[id];if(particle.w==0){particle.xyz=pins[id].xyz;x[id]=particle;velocity[id]=0;return;}
+        float3 start=previous[id].xyz,predicted=particle.xyz,contactNormal=0,bodyVelocity=0;float impulse=0;
+        float3 lo=min(start,predicted),hi=max(start,predicted);
+        // A swept broadphase is evaluated against every triangle in each leaf.
+        uint nodeIndex=0,bestTriangle=0xffffffff,nearestTriangle=0xffffffff;float best=1e30,bestTime=2,nearest=1e30,nearestSigned=0;float3 nearestNormal=0,nearestVelocity=0;bool recovery=false;
+        // Seed an upper bound from the spatially closest leaf before DFS. This only
+        // prunes provably farther nodes; swept-contact traversal remains unchanged.
+        if(p.bodyCount){uint hint=uint(velocity[id].w),tri=0;
+            // Re-evaluate the previous nearest triangle in the current pose. It is
+            // only an upper bound; every swept candidate still traverses the BVH.
+            if(hint>0&&hint<=(p.bodyCount+1)/2)tri=hint-1;
+            else{uint seed=0;while(bodyTree[seed].links.w==0){Node node=bodyTree[seed],left=bodyTree[seed+1],right=bodyTree[node.links.x];
+                    float3 dl=max(max(left.lo.xyz-predicted,predicted-left.hi.xyz),0),dr=max(max(right.lo.xyz-predicted,predicted-right.hi.xyz),0);
+                    seed=dot(dl,dl)<=dot(dr,dr)?seed+1:node.links.x;}tri=bodyTree[seed].links.z;}
+            float3 a=body[bodyTriangles[3*tri]].xyz,b=body[bodyTriangles[3*tri+1]].xyz,c=body[bodyTriangles[3*tri+2]].xyz;
+            if(length(cross(b-a,c-a))>=1e-12){float3 bc=closestBary(predicted,a,b,c);nearest=length(predicted-(a+(b-a)*bc.y+(c-a)*bc.z));}
+        }
+        while(nodeIndex<p.bodyCount){Node node=bodyTree[nodeIndex];float3 boxDelta=max(max(node.lo.xyz-predicted,predicted-node.hi.xyz),0);
+            if(!overlap(lo,hi,node)&&dot(boxDelta,boxDelta)>(nearest+1e-6)*(nearest+1e-6)){nodeIndex=node.links.y;continue;}
+            if(node.links.w==0){++nodeIndex;continue;}
+            uint t=node.links.z;uint ia=bodyTriangles[t*3],ib=bodyTriangles[t*3+1],ic=bodyTriangles[t*3+2];
+            float3 a=body[ia].xyz,b=body[ib].xyz,c=body[ic].xyz;
+            float3 oldA=bodyPrevious[ia].xyz,oldB=bodyPrevious[ib].xyz,oldC=bodyPrevious[ic].xyz;
+            float3 normal=cross(b-a,c-a);float nl=length(normal);if(nl<1e-12){++nodeIndex;continue;}normal/=nl;
+            float3 bary=closestBary(predicted,a,b,c),q=a+(b-a)*bary.y+(c-a)*bary.z;
+            float distance=length(predicted-q);normal=distanceNormal(predicted-q,bodyFeatureNormal(t,bary),distance);float signedDistance=dot(predicted-q,normal);
+            if(distance<nearest-1e-6||(abs(distance-nearest)<=1e-6&&t<nearestTriangle)){nearest=distance;nearestTriangle=t;nearestSigned=signedDistance;nearestNormal=normal;
+                nearestVelocity=((a-oldA)*bary.x+(b-oldB)*bary.y+(c-oldC)*bary.z)/p.dt;}
+            bool contact=false;
+            // Conservative advancement for the moving particle and moving triangle.
+            float3 motion=predicted-start;float bound=max(length(a-oldA-motion),max(length(b-oldB-motion),length(c-oldC-motion)));
+            float time=0;
+            for(uint k=0;k<32&&!contact&&bound>1e-9&&distance<=bound+p.thickness+1e-5;++k){
+                float3 aa=lerp(oldA,a,time),bb=lerp(oldB,b,time),cc=lerp(oldC,c,time),pp=lerp(start,predicted,time);
+                float3 bc=closestBary(pp,aa,bb,cc);float gap=length(pp-(aa+(bb-aa)*bc.y+(cc-aa)*bc.z));
+                if(gap<=p.thickness+1e-5){contact=true;bary=bc;q=a+(b-a)*bc.y+(c-a)*bc.z;normal=distanceNormal(pp-(aa+(bb-aa)*bc.y+(cc-aa)*bc.z),bodyFeatureNormalAt(t,bc,time),gap);signedDistance=dot(predicted-q,normal);break;}
+                time+=(gap-p.thickness)/bound;if(time>1)break;
+            }
+            if(!contact&&distance<p.thickness){contact=true;time=bound<=1e-9?0:1;}
+            bool earlier=time<bestTime-1e-6,sameTime=abs(time-bestTime)<=1e-6;
+            if(contact&&signedDistance<p.thickness&&(earlier||(sameTime&&(distance<best-1e-6||(abs(distance-best)<=1e-6&&t<bestTriangle))))){best=distance;bestTime=time;bestTriangle=t;particle.xyz=predicted+normal*(p.thickness-signedDistance);
+                contactNormal=normal;bodyVelocity=((a-oldA)*bary.x+(b-oldB)*bary.y+(c-oldC)*bary.z)/p.dt;
+                impulse=max(0,dot(particle.xyz-predicted,normal)/p.dt);}
+            ++nodeIndex;
+        }
+        // A swept shell alone cannot recover an initially embedded particle. Use the
+        // closest outward face only when no swept contact selected the arrival side.
+        if(best==1e30&&nearestSigned<0){particle.xyz=predicted+nearestNormal*(p.thickness-nearestSigned);
+            contactNormal=nearestNormal;bodyVelocity=nearestVelocity;impulse=(p.thickness-nearestSigned)/p.dt;recovery=true;}
+        for(uint pass=0;pass<2;++pass)for(uint capsule=0;capsule<p.edges;++capsule){
+            float3 normal,motion;float correction;bool embedded;
+            if(capsuleProject(particle.xyz,start,p.start+2*capsule,pass==0,normal,motion,correction,embedded)){
+                contactNormal=normal;bodyVelocity=motion;impulse=correction;recovery=embedded;}
+        }
+        // A single swept plane can leave a particle inside a concave part of the
+        // same body. Check the corrected position, then reapply overlapping legs.
+        if(p.bodyCount&&dot(contactNormal,contactNormal)>0)for(uint pass=0;pass<2;++pass){float3 normal,motion;float correction;
+            if(!recoverBodyContact(particle.xyz,nearestTriangle,normal,motion,correction))break;
+            contactNormal=normal;bodyVelocity=motion;impulse=correction;recovery=true;
+            for(uint round=0;round<2;++round)for(uint capsule=0;capsule<p.edges;++capsule){bool embedded;
+                if(capsuleProject(particle.xyz,start,p.start+2*capsule,false,normal,motion,correction,embedded)){
+                    contactNormal=normal;bodyVelocity=motion;impulse=correction;recovery=embedded;}}
+        }
+        // Scene floor contact uses the same inertial frame.
+        if(p.pad0&&particle.y<p.thickness){impulse=(p.thickness-particle.y)/p.dt;particle.y=p.thickness;contactNormal=float3(0,1,0);bodyVelocity=0;recovery=false;}
+        float3 v=(particle.xyz-start)/p.dt;
+        if(dot(contactNormal,contactNormal)>0){float3 rel=v-bodyVelocity;float vn=dot(rel,contactNormal);float3 tangent=rel-contactNormal*vn;float tl=length(tangent);
+            if(tl>1e-9)v-=tangent*min(1,p.friction*impulse/tl);if(vn<0||recovery)v-=contactNormal*vn;}
+        x[id]=particle;velocity[id]=float4(v,nearestTriangle==0xffffffff?0:float(nearestTriangle+1));return;
+    }
+}

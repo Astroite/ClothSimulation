@@ -1,0 +1,15 @@
+// Stable reverse CSR via per-proxy bitsets. No per-cloth O(N^2) rank scan.
+struct Push{uint phase,m,words,pad;};[[vk::push_constant]] Push p;
+[[vk::binding(0)]] StructuredBuffer<uint> bits;
+[[vk::binding(1)]] RWStructuredBuffer<uint> counts;
+[[vk::binding(2)]] RWStructuredBuffer<uint> begin;
+[[vk::binding(3)]] RWStructuredBuffer<uint> cloth;
+groupshared uint sum[128];
+[numthreads(128,1,1)]
+void main(uint3 group:SV_GroupID,uint lane:SV_GroupIndex){uint proxy=group.x;if(proxy>=p.m)return;uint value=0;
+    if(p.phase==0){for(uint w=lane;w<p.words;w+=128)value+=countbits(bits[proxy*p.words+w]);}
+    else for(uint j=lane;j<proxy;j+=128)value+=counts[j];
+    sum[lane]=value;GroupMemoryBarrierWithGroupSync();
+    for(uint stride=64;stride>0;stride/=2){if(lane<stride)sum[lane]+=sum[lane+stride];GroupMemoryBarrierWithGroupSync();}
+    if(lane==0){if(p.phase==0)counts[proxy]=sum[0];else{uint at=sum[0];begin[proxy]=at;for(uint w=0;w<p.words;w++){uint b=bits[proxy*p.words+w];while(b){uint bit=firstbitlow(b);cloth[at++]=w*32+bit;b&=b-1;}}}}
+}

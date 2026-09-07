@@ -1,0 +1,23 @@
+#include "tinyhood_mlp.hlsli"
+struct Push{uint n,decoder;float strength,trust;float gravity;uint pad0,pad1,pad2;};[[vk::push_constant]] Push p;
+[[vk::binding(0)]] StructuredBuffer<float> weights;
+[[vk::binding(1)]] StructuredBuffer<uint4> mlpTable;
+[[vk::binding(2)]] StructuredBuffer<float> norms;
+[[vk::binding(3)]] StructuredBuffer<float> latent;
+[[vk::binding(4)]] StructuredBuffer<float> minEdge;
+[[vk::binding(5)]] RWStructuredBuffer<float4> acceleration;
+[[vk::binding(6)]] RWStructuredBuffer<float4> rawOutput;
+[numthreads(HOOD_TINY_LATENT,1,1)]
+void main(uint3 group:SV_GroupID,uint lane:SV_GroupIndex){uint i=group.x;if(i>=p.n)return;
+    MlpDesc m=loadMlp(mlpTable,p.decoder);tinyScratchA[lane]=latent[i*TINY_LATENT+lane];GroupMemoryBarrierWithGroupSync();
+    tinyScratchB[lane]=max(tinyHiddenLinear(weights,m.w0,m.b0,lane,TINY_LATENT,TINY_LATENT,true),0);GroupMemoryBarrierWithGroupSync();
+    tinyScratchA[lane]=max(tinyHiddenLinear(weights,m.w1,m.b1,lane,TINY_LATENT,TINY_LATENT,false),0);GroupMemoryBarrierWithGroupSync();
+    if(lane<3)tinyScratchB[lane]=tinyHiddenLinear(weights,m.w2,m.b2,lane,TINY_LATENT,3,true)*norms[73+lane]+norms[70+lane];GroupMemoryBarrierWithGroupSync();
+    if(lane==0){float3 raw=float3(tinyScratchB[0],tinyScratchB[1],tinyScratchB[2]),g=float3(0,p.gravity,0);rawOutput[i]=float4(raw,0);
+        // Decoder units are displacement per 30 Hz frame, NOT m/s^2.
+        bool valid=all(isfinite(raw));float confidence=valid?1:0;
+        if(p.trust>0&&valid)confidence=saturate(2-length(raw-g/900)/max(p.trust*minEdge[i],1e-6));
+        float3 a=g;if(valid)a+=p.strength*confidence*(raw*900-g);
+        acceleration[i]=float4(a,confidence);
+    }
+}

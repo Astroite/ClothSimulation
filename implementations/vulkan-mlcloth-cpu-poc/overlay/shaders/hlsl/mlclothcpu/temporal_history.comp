@@ -1,0 +1,18 @@
+struct Push {uint n,m,tick,currentOnly;};[[vk::push_constant]] Push p;
+[[vk::binding(0)]] StructuredBuffer<float4> velocity;
+[[vk::binding(1)]] StructuredBuffer<float4> body;
+[[vk::binding(2)]] RWStructuredBuffer<float4> previousBody;
+[[vk::binding(3)]] StructuredBuffer<float> nodeFeatures;
+[[vk::binding(4)]] StructuredBuffer<float> norms;
+[[vk::binding(5)]] RWStructuredBuffer<float> history;
+[[vk::binding(6)]] RWStructuredBuffer<float> normalizedHistory;
+[numthreads(128,1,1)]
+void main(uint3 id:SV_DispatchThreadID){uint i=id.x;if(i>=p.n+p.m)return;
+    float3 d=0;if(i<p.n)d=velocity[i].xyz/30;else{uint b=i-p.n;if(p.tick>0)d=body[b].xyz-previousBody[b].xyz;previousBody[b]=body[b];}
+    float values[7];for(uint c=0;c<3;c++){values[c]=(d[c]-norms[c])/norms[17+c];values[3+c]=nodeFeatures[i*20+12+c];}values[6]=1;
+    uint base=i*28;
+    if(p.tick==0){for(uint t=0;t<3;t++)for(uint c=0;c<7;c++)history[base+t*7+c]=c==6?0:values[c];}
+    else{for(uint c=0;c<21;c++)history[base+c]=history[base+c+7];}
+    for(uint c=0;c<7;c++)history[base+21+c]=values[c];
+    for(uint c=0;c<28;c++)normalizedHistory[base+c]=p.currentOnly!=0?values[c%7]:history[base+c];
+}
