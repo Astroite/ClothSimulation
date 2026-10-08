@@ -19,3 +19,6 @@ desktop.ini
 # 通用构建产物
 build/
 out/
+
+# 本地实验、日志与备份
+.work/
